@@ -443,7 +443,7 @@ where
             url,
             dest_base,
             taken_at_unix,
-            |bytes| progress(bytes),
+            &mut progress,
             cancel.clone(),
         )
         .await;

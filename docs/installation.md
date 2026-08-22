@@ -2,15 +2,15 @@
 
 ## macOS
 
-**Homebrew (recommended)** — no Gatekeeper prompts at all, since Homebrew strips the quarantine flag:
+Grab `insta-dl-gui_x.y.z_universal.dmg` from [releases](https://github.com/subzeroid/insta-dl-gui/releases) — it runs natively on both Apple Silicon and Intel Macs.
+
+Or install via Homebrew for automatic updates on `brew upgrade`:
 
 ```sh
 brew install --cask subzeroid/tap/insta-dl-gui
 ```
 
-The cask ships a **universal binary** (Apple Silicon + Intel).
-
-**Manual download** — grab `insta-dl-gui_x.y.z_aarch64.dmg` (Apple Silicon) or `_x64.dmg` (Intel) from [releases](https://github.com/subzeroid/insta-dl-gui/releases). Unsigned builds trigger Gatekeeper on first launch; see [Troubleshooting → macOS blocks the app](troubleshooting.md#macos-blocks-the-app) for the two-click fix.
+> **Note:** the app is not code-signed yet, so Gatekeeper will ask for confirmation on first launch no matter how you installed it ("Open Anyway" or right-click → Open). See [Troubleshooting → macOS blocks the app](troubleshooting.md#macos-blocks-the-app).
 
 ## Windows
 

@@ -428,9 +428,21 @@ pub fn map_search_user(u: &Value) -> Option<crate::models::SearchUser> {
     Some(crate::models::SearchUser {
         pk,
         username,
-        full_name: u.get("full_name").and_then(|v| v.as_str()).map(String::from),
-        is_verified: u.get("is_verified").and_then(|v| v.as_bool()).unwrap_or(false),
-        is_private: u.get("is_private").and_then(|v| v.as_bool()).unwrap_or(false),
-        avatar_url: u.get("profile_pic_url").and_then(|v| v.as_str()).map(String::from),
+        full_name: u
+            .get("full_name")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        is_verified: u
+            .get("is_verified")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        is_private: u
+            .get("is_private")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        avatar_url: u
+            .get("profile_pic_url")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     })
 }

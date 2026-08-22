@@ -37,6 +37,10 @@ const storiesLoading = ref(false);
 const modalPost = ref<Post | null>(null);
 const modalStory = ref<StoryItem | null>(null);
 
+// Bumped on every user-intent navigation; async responses from an older
+// epoch are dropped instead of clobbering newer state.
+let epoch = 0;
+
 const tabs = [
   { id: "posts", label: "Posts" },
   { id: "reels", label: "Reels" },
@@ -70,10 +74,14 @@ function onQueryInput() {
     suggestOpen.value = false;
     return;
   }
+  const seq = ++epoch;
   debounce = window.setTimeout(async () => {
     try {
-      suggestions.value = await searchUsers(q);
+      const found = await searchUsers(q);
+      if (seq !== epoch) return;
+      suggestions.value = found;
     } catch {
+      if (seq !== epoch) return;
       suggestions.value = [];
     }
     highlight.value = suggestions.value.length > 0 ? 0 : -1;
@@ -109,8 +117,10 @@ async function submit() {
   if (!raw || loading.value) return;
   suggestOpen.value = false;
   error.value = null;
+  const seq = ++epoch;
   try {
     const target = await resolveInput(raw);
+    if (seq !== epoch) return;
     if (target.kind === "post") {
       const id = await downloadPost(target.code);
       jobs.addPlaceholder(id, `Post ${target.code}`);
@@ -118,11 +128,13 @@ async function submit() {
       await loadProfile(target.username);
     }
   } catch (e) {
+    if (seq !== epoch) return;
     error.value = String(e);
   }
 }
 
 async function loadProfile(username: string) {
+  const seq = ++epoch;
   loading.value = true;
   error.value = null;
   preview.value = null;
@@ -131,33 +143,48 @@ async function loadProfile(username: string) {
   modalStory.value = null;
   activeTab.value = "posts";
   try {
-    preview.value = await fetchProfile(username, null);
+    const result = await fetchProfile(username, null);
+    if (seq !== epoch) return;
+    preview.value = result;
   } catch (e) {
+    if (seq !== epoch) return;
     error.value = String(e);
   } finally {
-    loading.value = false;
+    if (seq === epoch) {
+      loading.value = false;
+    }
   }
 }
 
 async function loadMore() {
   const cursor = preview.value?.end_cursor;
-  if (!preview.value || !cursor || loadingMore.value) return;
+  const username = preview.value?.profile.username;
+  if (!preview.value || !username || !cursor || loadingMore.value) return;
+  const seq = epoch; // pagination must not outlive a profile switch
   loadingMore.value = true;
   error.value = null;
   try {
-    const username = preview.value.profile.username;
     const more = await fetchProfile(username, cursor);
-    if (preview.value.profile.username === more.profile.username) {
-      preview.value = {
-        profile: more.profile,
-        recent_posts: [...preview.value.recent_posts, ...more.recent_posts],
-        end_cursor: more.end_cursor,
-      };
+    if (
+      seq !== epoch ||
+      preview.value?.profile.username !== username ||
+      more.profile.username !== username
+    ) {
+      return;
     }
+    preview.value = {
+      profile: more.profile,
+      recent_posts: [...preview.value.recent_posts, ...more.recent_posts],
+      end_cursor: more.end_cursor,
+    };
   } catch (e) {
-    error.value = String(e);
+    if (seq === epoch) {
+      error.value = String(e);
+    }
   } finally {
-    loadingMore.value = false;
+    if (seq === epoch) {
+      loadingMore.value = false;
+    }
   }
 }
 
@@ -191,15 +218,24 @@ async function downloadAvatar() {
 }
 
 async function loadStories() {
-  if (!preview.value || storiesLoading.value) return;
+  const username = preview.value?.profile.username;
+  if (!username || storiesLoading.value) return;
+  const seq = epoch;
   storiesLoading.value = true;
   error.value = null;
   try {
-    stories.value = await fetchStories(preview.value.profile.username);
+    const items = await fetchStories(username);
+    // Never attach profile A's stories to whatever profile is open now —
+    // downloads would land in the wrong directory otherwise.
+    if (seq !== epoch || preview.value?.profile.username !== username) return;
+    stories.value = items;
   } catch (e) {
+    if (seq !== epoch || preview.value?.profile.username !== username) return;
     error.value = String(e);
   } finally {
-    storiesLoading.value = false;
+    if (seq === epoch && preview.value?.profile.username === username) {
+      storiesLoading.value = false;
+    }
   }
 }
 

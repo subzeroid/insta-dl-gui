@@ -136,9 +136,23 @@ async fn search_autocomplete() {
         return;
     };
     let client = HikerClient::new(token);
-    let users = client.search_accounts("nike").await.expect("search_accounts");
+    let users = client
+        .search_accounts("nike")
+        .await
+        .expect("search_accounts");
     assert!(!users.is_empty());
-    let mapped: Vec<_> = users.iter().filter_map(insta_dl_gui_lib::hiker::map_search_user).collect();
-    assert!(mapped.iter().any(|u| u.username == "nike"), "exact match must be present");
-    println!("search 'nike': {} raw → {} mapped, first: {:?}", users.len(), mapped.len(), mapped.first().map(|u| &u.username));
+    let mapped: Vec<_> = users
+        .iter()
+        .filter_map(insta_dl_gui_lib::hiker::map_search_user)
+        .collect();
+    assert!(
+        mapped.iter().any(|u| u.username == "nike"),
+        "exact match must be present"
+    );
+    println!(
+        "search 'nike': {} raw → {} mapped, first: {:?}",
+        users.len(),
+        mapped.len(),
+        mapped.first().map(|u| &u.username)
+    );
 }

@@ -24,6 +24,18 @@ const previewLoading = ref(false);
 
 const opts = computed<ProfileOptions>(() => {
   const max = maxPosts.value;
+  // Private profiles expose nothing but the avatar; hidden checkboxes must
+  // not leak their previous state into the backend call.
+  if (preview.value?.profile.is_private) {
+    return {
+      posts: false,
+      reels: false,
+      stories: false,
+      highlights: false,
+      avatar: avatar.value,
+      max_posts: null,
+    };
+  }
   return {
     posts: posts.value,
     reels: reels.value,

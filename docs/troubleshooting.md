@@ -16,15 +16,19 @@ The target is private, or the post was deleted. Private profiles expose nothing 
 
 A safety check: the app only downloads from official Instagram CDN hosts (`cdninstagram.com`, `fbcdn.net`). If you see this error on a normal post, the media URL likely expired between fetching and downloading — just retry; a fresh URL is minted per attempt.
 
-## macOS: "app is damaged" / won't open
+## macOS: "Apple could not verify…" / «Файл не был открыт» (Gatekeeper)
 
-Unsigned/ad-hoc binaries trigger Gatekeeper. Run:
+The app is not code-signed yet, so macOS blocks the first launch. Two ways through:
+
+**GUI:** dismiss the dialog with **Done/Готово** (don't press "Move to Trash"), then open **System Settings → Privacy & Security** and click **Open Anyway**.
+
+**Terminal:**
 
 ```sh
 xattr -cr /Applications/insta-dl-gui.app
 ```
 
-or right-click → Open as described in [Installation](installation.md).
+Both only affect the first launch; after that the app opens normally.
 
 ## Windows SmartScreen blocked the installer
 

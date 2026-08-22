@@ -51,7 +51,11 @@ struct JobEvents {
 
 impl JobEvents {
     fn new(app: &AppHandle, job_id: String, label: String) -> Self {
-        Self { app: app.clone(), job_id, label }
+        Self {
+            app: app.clone(),
+            job_id,
+            label,
+        }
     }
 
     fn progress(&self, current_file: usize, total_files: usize, bytes_done: u64, file_name: &str) {
@@ -79,7 +83,10 @@ impl JobEvents {
                 &JobProgress {
                     job_id: self.job_id.clone(),
                     label: self.label.clone(),
-                    state: JobState::Done { count, dir: dir.to_string_lossy().into_owned() },
+                    state: JobState::Done {
+                        count,
+                        dir: dir.to_string_lossy().into_owned(),
+                    },
                 },
             )
             .ok();
@@ -114,8 +121,11 @@ impl JobEvents {
 
 fn taken_at_name(ts: Option<i64>, fallback_code: &str) -> String {
     let base = match ts {
-        Some(unix) => chrono::DateTime::<chrono::Utc>::from_timestamp(unix, 0)
-            .map(|u| u.with_timezone(&chrono::Local).format("%Y-%m-%d_%H-%M-%S").to_string()),
+        Some(unix) => chrono::DateTime::<chrono::Utc>::from_timestamp(unix, 0).map(|u| {
+            u.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d_%H-%M-%S")
+                .to_string()
+        }),
         None => None,
     }
     .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string());
@@ -124,7 +134,13 @@ fn taken_at_name(ts: Option<i64>, fallback_code: &str) -> String {
 
 fn safe_segment(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || "-_.@".contains(c) { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "-_.@".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -133,7 +149,9 @@ fn existing_stems(dir: &Path) -> HashSet<String> {
     let mut set = HashSet::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
@@ -158,7 +176,10 @@ fn write_sidecar(cfg: &Config, dir: &Path, post: &Post, first_file: &Path) -> Re
     if !cfg.sidecar {
         return Ok(());
     }
-    let stem = first_file.file_stem().and_then(|s| s.to_str()).unwrap_or("post");
+    let stem = first_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("post");
     let sidecar = serde_json::json!({
         "pk": post.pk,
         "code": post.code,
@@ -208,6 +229,7 @@ fn is_fatal_api_error(e: &crate::hiker::HikerError) -> bool {
 
 /// Stream one resource into `dest_base` with transient-error retries,
 /// forwarding progress and honouring cancellation.
+#[allow(clippy::too_many_arguments)]
 async fn download_one(
     cdn_http: &reqwest::Client,
     url: &str,
@@ -257,13 +279,21 @@ pub async fn resolve_input(input: String) -> Result<Target, String> {
 }
 
 async fn client(state: &State<'_, AppState>) -> Result<Arc<crate::hiker::HikerClient>, String> {
-    state.client.read().await.clone().ok_or_else(|| "No HikerAPI token configured".into())
+    state
+        .client
+        .read()
+        .await
+        .clone()
+        .ok_or_else(|| "No HikerAPI token configured".into())
 }
 
 /// Account autocomplete — same order the API returns (Instagram's own
 /// ranking); no client-side reranking by design.
 #[tauri::command]
-pub async fn search_users(query: String, state: State<'_, AppState>) -> Result<Vec<SearchUser>, String> {
+pub async fn search_users(
+    query: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<SearchUser>, String> {
     let q = query.trim();
     if q.len() < 2 {
         return Ok(Vec::new());
@@ -287,25 +317,45 @@ pub async fn fetch_profile(
     state: State<'_, AppState>,
 ) -> Result<ProfilePreview, String> {
     let client = client(&state).await?;
-    let user = client.user_by_username(&username).await.map_err(|e| e.to_string())?;
+    let user = client
+        .user_by_username(&username)
+        .await
+        .map_err(|e| e.to_string())?;
     let profile = map_profile(&user).ok_or("Could not parse profile payload")?;
     if profile.is_private || (profile.media_count == 0 && end_cursor.is_none()) {
-        return Ok(ProfilePreview { profile, recent_posts: Vec::new(), end_cursor: None });
+        return Ok(ProfilePreview {
+            profile,
+            recent_posts: Vec::new(),
+            end_cursor: None,
+        });
     }
     let page = client
         .user_medias_chunk(&profile.pk, end_cursor.as_deref())
         .await
         .map_err(|e| e.to_string())?;
-    Ok(ProfilePreview { profile, recent_posts: page.posts, end_cursor: page.end_cursor })
+    Ok(ProfilePreview {
+        profile,
+        recent_posts: page.posts,
+        end_cursor: page.end_cursor,
+    })
 }
 
 /// Active stories of a profile for the Explorer grid (billed 2 requests).
 #[tauri::command]
-pub async fn fetch_stories(username: String, state: State<'_, AppState>) -> Result<Vec<StoryItem>, String> {
+pub async fn fetch_stories(
+    username: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<StoryItem>, String> {
     let client = client(&state).await?;
-    let user = client.user_by_username(&username).await.map_err(|e| e.to_string())?;
+    let user = client
+        .user_by_username(&username)
+        .await
+        .map_err(|e| e.to_string())?;
     let profile = map_profile(&user).ok_or("Could not parse profile payload")?;
-    let items = client.user_stories(&profile.pk).await.map_err(|e| e.to_string())?;
+    let items = client
+        .user_stories(&profile.pk)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(items
         .iter()
         .filter_map(|item| {
@@ -328,7 +378,11 @@ pub async fn fetch_stories(username: String, state: State<'_, AppState>) -> Resu
             Some(StoryItem {
                 pk,
                 taken_at: parse_ts(item),
-                kind: if is_video { "video".into() } else { "photo".into() },
+                kind: if is_video {
+                    "video".into()
+                } else {
+                    "photo".into()
+                },
                 media_url,
                 thumb_url,
             })
@@ -461,18 +515,20 @@ pub async fn enqueue_profile_download(
     // a cancelled job never wastes their quota mid-run. Fatal API errors
     // abort the enqueue; anything transient degrades to an empty section.
     let stories_items = if opts.stories {
-        fetch_soft(|| client.user_stories(&profile.pk)).await.map_err(|e| {
-            in_flight.lock().unwrap().remove(&key);
-            e
-        })?
+        fetch_soft(|| client.user_stories(&profile.pk))
+            .await
+            .inspect_err(|_| {
+                in_flight.lock().unwrap().remove(&key);
+            })?
     } else {
         Vec::new()
     };
     let highlights_tray = if opts.highlights {
-        fetch_soft(|| client.user_highlights(&profile.pk)).await.map_err(|e| {
-            in_flight.lock().unwrap().remove(&key);
-            e
-        })?
+        fetch_soft(|| client.user_highlights(&profile.pk))
+            .await
+            .inspect_err(|_| {
+                in_flight.lock().unwrap().remove(&key);
+            })?
     } else {
         Vec::new()
     };
@@ -485,7 +541,16 @@ pub async fn enqueue_profile_download(
     tauri::async_runtime::spawn(async move {
         let job_id = job_id_task;
         let result = run_profile_job(
-            &client, &cdn_http, &cfg, &em, &dir, &profile, &opts, stories_items, highlights_tray, Some(cancel_rx),
+            &client,
+            &cdn_http,
+            &cfg,
+            &em,
+            &dir,
+            &profile,
+            &opts,
+            stories_items,
+            highlights_tray,
+            Some(cancel_rx),
         )
         .await;
         match result {
@@ -516,19 +581,22 @@ async fn run_profile_job(
     std::fs::create_dir_all(dir)?;
     let skip = existing_stems(dir);
     let mut files_done = 0usize;
+    let mut failed_files = 0usize;
     let mut bytes_total = 0u64;
     let is_cancelled = || cancel.as_ref().map(|c| *c.borrow()).unwrap_or(false);
 
-    /// Per-file failures are logged-and-skipped so one dead CDN link or a
-    /// flaky network never kills the whole archive run.
+    // Per-file failures are logged-and-skipped so one dead CDN link or a
+    // flaky network never kills the whole archive run. But if EVERYTHING
+    // failed, the job must not masquerade as a successful "Done: 0".
     macro_rules! try_file {
         ($fut:expr) => {
             match $fut.await {
                 Ok(path) => path,
-                Err(JobFail::Fatal(e)) if e.contains("Cancelled") => {
-                    return Err(JobFail::Cancelled)
+                Err(JobFail::Fatal(e)) if e.contains("Cancelled") => return Err(JobFail::Cancelled),
+                Err(_) => {
+                    failed_files += 1;
+                    continue;
                 }
-                Err(_) => continue,
             }
         };
     }
@@ -552,6 +620,8 @@ async fn run_profile_job(
                 .is_ok()
                 {
                     files_done += 1;
+                } else {
+                    failed_files += 1;
                 }
             }
         }
@@ -582,7 +652,12 @@ async fn run_profile_job(
                     }
                 }
                 considered += 1;
-                if reels_only && !post.resources.iter().any(|r| r.kind == crate::models::MediaKind::Video) {
+                if reels_only
+                    && !post
+                        .resources
+                        .iter()
+                        .any(|r| r.kind == crate::models::MediaKind::Video)
+                {
                     continue;
                 }
                 let base = taken_at_name(post.taken_at, &post.code);
@@ -590,6 +665,7 @@ async fn run_profile_job(
                     continue;
                 }
                 let total = post.resources.len();
+                let mut got = 0usize;
                 for (idx, resource) in post.resources.iter().enumerate() {
                     let dest_base = if total > 1 {
                         posts_dir.join(format!("{base}_{}", idx + 1))
@@ -609,8 +685,9 @@ async fn run_profile_job(
                     if idx == 0 {
                         write_sidecar(cfg, &posts_dir, post, &out)?;
                     }
+                    got += 1;
                 }
-                files_done += total;
+                files_done += got;
             }
             cursor = page.end_cursor;
             if cursor.is_none() {
@@ -662,7 +739,9 @@ async fn run_profile_job(
             if is_cancelled() {
                 return Err(JobFail::Cancelled);
             }
-            let Some(hl_pk) = tray.get("pk").and_then(|v| v.as_str()) else { continue };
+            let Some(hl_pk) = tray.get("pk").and_then(|v| v.as_str()) else {
+                continue;
+            };
             let title = tray
                 .get("title")
                 .and_then(|v| v.as_str())
@@ -702,6 +781,11 @@ async fn run_profile_job(
         }
     }
 
+    if files_done == 0 && failed_files > 0 {
+        return Err(JobFail::Fatal(format!(
+            "All {failed_files} download(s) failed — check network or retry"
+        )));
+    }
     Ok(files_done)
 }
 
@@ -741,8 +825,9 @@ pub async fn download_post(
     let jobs: Arc<JobRegistry> = state.jobs.clone();
 
     // Backend dedup: same shortcode cannot run twice at once.
+    // Shortcodes are case-sensitive — keep the exact form.
     let in_flight = state.in_flight.clone();
-    let key = format!("post:{}", code.to_lowercase());
+    let key = format!("post:{code}");
     {
         let mut guard = state.in_flight.lock().unwrap();
         if !guard.insert(key.clone()) {
@@ -770,7 +855,12 @@ pub async fn download_post(
     let em = JobEvents::new(
         &app,
         job_id.clone(),
-        format!("@{}", post.owner_username.clone().unwrap_or_else(|| post.code.clone())),
+        format!(
+            "@{}",
+            post.owner_username
+                .clone()
+                .unwrap_or_else(|| post.code.clone())
+        ),
     );
     let job_id_task = job_id.clone();
 
@@ -808,6 +898,7 @@ async fn run_single_post(
     let total = post.resources.len();
     let mut bytes_total = 0u64;
     let mut downloaded = 0usize;
+    let mut failed_downloads = 0usize;
 
     for (idx, resource) in post.resources.iter().enumerate() {
         if cancel.as_ref().map(|c| *c.borrow()).unwrap_or(false) {
@@ -837,8 +928,16 @@ async fn run_single_post(
                 downloaded += 1;
             }
             Err(JobFail::Fatal(e)) if e.contains("Cancelled") => return Err(JobFail::Cancelled),
-            Err(_) => continue, // skip failed resource after retries
+            Err(_) => {
+                failed_downloads += 1;
+                continue; // skip failed resource after retries
+            }
         }
+    }
+    if downloaded == 0 && failed_downloads > 0 {
+        return Err(JobFail::Fatal(format!(
+            "All {failed_downloads} file(s) failed — check network or retry"
+        )));
     }
     Ok(downloaded)
 }
