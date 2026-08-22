@@ -31,8 +31,8 @@ src-tauri/src/
 
 Ground rules:
 
-- **All HikerAPI and CDN traffic stays in Rust.** During setup, the webview handles the token only while it is entered and sends it to Rust via Tauri IPC. Rust validates and stores it; the stored token is never returned to the webview.
-- **`cdn.rs` is the only place that touches media URLs.** Don't bypass its checks.
+- **Authenticated HikerAPI requests and file downloads stay in Rust.** During setup, the webview handles the token only while it is entered and sends it to Rust via Tauri IPC. Rust validates and stores it; the stored token is never returned to the webview. The frontend may render token-free CDN preview URLs returned in mapped DTOs.
+- **`cdn.rs` is the only backend path that downloads or persists media.** Don't bypass its MIME, redirect, size, retry, cancellation, and destination checks for downloads.
 - Backend shapes are mapped to DTOs in `hiker.rs` mappers; raw JSON never leaks to the frontend.
 
 ## Tests
@@ -53,8 +53,13 @@ This site is MkDocs Material. With [`uv`](https://docs.astral.sh/uv/) installed,
 
 ```sh
 uv venv --python 3.12 .venv-docs
-uv pip install --python .venv-docs/bin/python --require-hashes -r docs/requirements.txt
-.venv-docs/bin/mkdocs serve
+
+# Activate with one of:
+. .venv-docs/bin/activate                 # macOS/Linux
+.\.venv-docs\Scripts\Activate.ps1        # Windows PowerShell
+
+uv pip install --require-hashes -r docs/requirements.txt
+mkdocs serve
 ```
 
 Edit `docs/*.md`; CI builds strictly and deploys on push to `main`.
