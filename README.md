@@ -12,6 +12,8 @@ Powered by [HikerAPI](https://hikerapi.com) · built with [Tauri 2](https://taur
 
 Paste your HikerAPI token once, then download any public profile's content with a couple of clicks. Because downloads go through the HikerAPI cloud instead of a logged-in Instagram session, there is **no account ban risk** — unlike instaloader or gallery-dl.
 
+![insta-dl-gui — profile download screen](docs/screenshot.png)
+
 ## Features
 
 - **Single posts & reels** — paste an `instagram.com/p/…` or `/reel/…` link
@@ -64,6 +66,15 @@ SMOKE_TOKEN=... cargo test --test live_download   # live smoke (~6 real API call
 ```
 
 The CDN downloader enforces defense-in-depth rules ported from [insto](https://github.com/subzeroid/insto): HTTPS-only, Instagram-CDN host allowlist, manual redirects (≤5), MIME magic-byte cross-checks, per-file byte budget, disk guard, atomic writes and collision suffixes — all covered by tests.
+
+### UI without the backend
+
+The frontend can run in a plain browser with a mocked Tauri IPC — handy for UI work and screenshots:
+
+```sh
+npx vite &
+node scripts/screenshot.mjs "http://localhost:1420/download?mock=1&demo=profile" docs/screenshot.png
+```
 
 ## Related projects
 

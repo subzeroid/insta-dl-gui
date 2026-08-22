@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { useJobsStore } from "../stores/jobs";
 import JobCard from "../components/JobCard.vue";
 import { useAppStore } from "../stores/app";
@@ -36,7 +36,7 @@ const reels = ref(false);
 const stories = ref(false);
 const highlights = ref(false);
 const avatar = ref(true);
-const maxPosts = ref(0); // 0 = all
+const maxPosts = ref<number | null>(null); // null = all
 
 async function submit() {
   const raw = input.value.trim();
@@ -81,6 +81,13 @@ const activeJobs = computed(() =>
 function fmtCount(n?: number) {
   return n === undefined ? "—" : new Intl.NumberFormat("en", { notation: "compact" }).format(n);
 }
+
+onMounted(() => {
+  if (new URLSearchParams(window.location.search).get("demo") === "profile") {
+    input.value = "@instagram";
+    void submit();
+  }
+});
 </script>
 
 <template>
