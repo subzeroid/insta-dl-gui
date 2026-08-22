@@ -17,7 +17,9 @@ impl Target {
         // @username
         let bare = s.strip_prefix('@').unwrap_or(s);
         if !s.contains("instagram.com") && !s.contains('/') && is_username(bare) {
-            return Some(Self::Profile { username: bare.to_lowercase() });
+            return Some(Self::Profile {
+                username: bare.to_lowercase(),
+            });
         }
         if !s.contains("instagram.com") {
             return None;
@@ -33,11 +35,15 @@ impl Target {
         let segments: Vec<&str> = rest.split('/').filter(|p| !p.is_empty()).collect();
 
         match segments.as_slice() {
-            ["stories", username, _story_id] => Some(Self::Profile { username: username.to_lowercase() }),
-            [kind, code] if matches!(*kind, "p" | "reel" | "reels" | "tv") => {
-                Some(Self::Post { code: (*code).to_string() })
-            }
-            [username] => Some(Self::Profile { username: username.to_lowercase() }),
+            ["stories", username, _story_id] => Some(Self::Profile {
+                username: username.to_lowercase(),
+            }),
+            [kind, code] if matches!(*kind, "p" | "reel" | "reels" | "tv") => Some(Self::Post {
+                code: (*code).to_string(),
+            }),
+            [username] => Some(Self::Profile {
+                username: username.to_lowercase(),
+            }),
             _ => None,
         }
     }
@@ -46,17 +52,15 @@ impl Target {
 fn is_username(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 30
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
         && !s.starts_with('.')
         && !s.ends_with('.')
 }
 
 /// Extract the shortcode from a media payload (`code` field or derive from pk).
 pub fn shortcode_of(media: &serde_json::Value) -> Option<String> {
-    media
-        .get("code")
-        .and_then(|v| v.as_str())
-        .map(String::from)
+    media.get("code").and_then(|v| v.as_str()).map(String::from)
 }
 
 #[cfg(test)]
@@ -65,8 +69,18 @@ mod tests {
 
     #[test]
     fn parses_bare_username() {
-        assert_eq!(Target::parse("instagram"), Some(Target::Profile { username: "instagram".into() }));
-        assert_eq!(Target::parse("@NatGeo"), Some(Target::Profile { username: "natgeo".into() }));
+        assert_eq!(
+            Target::parse("instagram"),
+            Some(Target::Profile {
+                username: "instagram".into()
+            })
+        );
+        assert_eq!(
+            Target::parse("@NatGeo"),
+            Some(Target::Profile {
+                username: "natgeo".into()
+            })
+        );
     }
 
     #[test]
@@ -79,7 +93,9 @@ mod tests {
         ] {
             assert_eq!(
                 Target::parse(form),
-                Some(Target::Post { code: "DXZlTiKEpxw".into() }),
+                Some(Target::Post {
+                    code: "DXZlTiKEpxw".into()
+                }),
                 "{form}"
             );
         }
@@ -89,7 +105,9 @@ mod tests {
     fn parses_profile_urls() {
         assert_eq!(
             Target::parse("https://www.instagram.com/natgeo/"),
-            Some(Target::Profile { username: "natgeo".into() })
+            Some(Target::Profile {
+                username: "natgeo".into()
+            })
         );
     }
 

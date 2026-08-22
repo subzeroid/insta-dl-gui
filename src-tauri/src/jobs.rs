@@ -7,9 +7,17 @@ pub struct JobRegistry {
     cancels: Mutex<HashMap<String, watch::Sender<bool>>>,
 }
 
+impl Default for JobRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl JobRegistry {
     pub fn new() -> Self {
-        Self { cancels: Mutex::new(HashMap::new()) }
+        Self {
+            cancels: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Register a job and get its cancel receiver.

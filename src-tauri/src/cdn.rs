@@ -94,7 +94,11 @@ impl Sniffed {
 }
 
 fn normalize_ct(ct: &str) -> String {
-    ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase()
+    ct.split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
 }
 
 /// Content-Type → extension map used when the sniff is inconclusive for ext
@@ -120,15 +124,26 @@ fn ct_compatible(declared: &str, sniffed: Sniffed) -> bool {
 fn validate_url(url: &str) -> Result<(), CdnError> {
     let parsed = url::Url::parse(url).map_err(|_| CdnError::Network(format!("bad url: {url}")))?;
     if parsed.scheme() != "https" {
+        // Unit tests drive the streamer against a local plain-HTTP mock.
+        #[cfg(test)]
+        if parsed.scheme() == "http" && parsed.host_str() == Some("127.0.0.1") {
+            return Ok(());
+        }
         return Err(CdnError::NotHttps);
     }
-    let host = parsed.host().ok_or_else(|| CdnError::HostNotAllowed(url.into()))?;
-    let host_str = host.to_string();
+    let host = match parsed.host() {
+        Some(h) => h.to_string(),
+        None => return Err(CdnError::HostNotAllowed(url.into())),
+    };
+    #[cfg(test)]
+    if host == "127.0.0.1" {
+        return Ok(());
+    }
     if !ALLOWED_HOST_SUFFIXES
         .iter()
-        .any(|s| host_str == *s || host_str.ends_with(&format!(".{s}")))
+        .any(|s| host == *s || host.ends_with(&format!(".{s}")))
     {
-        return Err(CdnError::HostNotAllowed(host_str));
+        return Err(CdnError::HostNotAllowed(host));
     }
     Ok(())
 }
@@ -162,23 +177,49 @@ fn check_disk_space(dir: &Path) -> Result<(), CdnError> {
     Ok(())
 }
 
+#[derive(Debug)]
 pub struct DownloadOutcome {
     pub path: PathBuf,
     pub bytes: u64,
 }
 
-/// Stream `url` into `<dest_base>.<ext>` enforcing all safety rules.
-/// `progress` receives cumulative byte counts per chunk.
-/// Dropping or signalling `cancel` aborts the download (stale `.part`
-/// removed by the caller-visible error path).
+/// Public entry point with the production byte budget.
 #[allow(clippy::too_many_arguments)]
 pub async fn stream_to_file<F>(
     http: &reqwest::Client,
     url: &str,
     dest_base: &Path,
     taken_at_unix: Option<i64>,
+    progress: F,
+    cancel: Option<tokio::sync::watch::Receiver<bool>>,
+) -> Result<DownloadOutcome, CdnError>
+where
+    F: FnMut(u64),
+{
+    stream_to_file_with_budget(
+        http,
+        url,
+        dest_base,
+        taken_at_unix,
+        progress,
+        cancel,
+        DEFAULT_BYTE_BUDGET,
+    )
+    .await
+}
+
+/// Stream `url` into `<dest_base>.<ext>` enforcing all safety rules.
+/// `progress` receives cumulative byte counts per chunk.
+/// Dropping or signalling `cancel` aborts the download (stale `.part`
+/// removed by the caller-visible error path).
+pub async fn stream_to_file_with_budget<F>(
+    http: &reqwest::Client,
+    url: &str,
+    dest_base: &Path,
+    taken_at_unix: Option<i64>,
     mut progress: F,
     mut cancel: Option<tokio::sync::watch::Receiver<bool>>,
+    byte_budget: u64,
 ) -> Result<DownloadOutcome, CdnError>
 where
     F: FnMut(u64),
@@ -191,9 +232,7 @@ where
     let mut current = url.to_string();
     let mut hops = 0usize;
     let resp = loop {
-        let req = http
-            .get(&current)
-            .timeout(Duration::from_secs(30));
+        let req = http.get(&current).timeout(Duration::from_secs(30));
         let r = tokio::select! {
             biased;
             _ = cancel_wait(&mut cancel), if cancel.is_some() => return Err(CdnError::Cancelled),
@@ -249,11 +288,10 @@ where
     if sniff.is_empty() {
         return Err(CdnError::EmptyBody);
     }
-    let kind =
-        Sniffed::detect(&sniff).ok_or(CdnError::UnknownContent {
-            sniffed: None,
-            declared: declared_ct.clone(),
-        })?;
+    let kind = Sniffed::detect(&sniff).ok_or(CdnError::UnknownContent {
+        sniffed: None,
+        declared: declared_ct.clone(),
+    })?;
     if let Some(ct) = &declared_ct {
         if !ct_compatible(ct, kind) {
             return Err(CdnError::UnknownContent {
@@ -271,7 +309,10 @@ where
 
     let part_path = final_path.with_extension(format!(
         "{}.part",
-        final_path.extension().and_then(|e| e.to_str()).unwrap_or("")
+        final_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
     ));
     let _ = fs::remove_file(&part_path);
 
@@ -280,7 +321,7 @@ where
         sniff,
         &part_path,
         &final_path,
-        DEFAULT_BYTE_BUDGET,
+        byte_budget,
         &mut progress,
         &mut cancel,
     )
@@ -292,7 +333,10 @@ where
                     set_mtime(&final_path, ts.timestamp());
                 }
             }
-            Ok(DownloadOutcome { path: final_path, bytes })
+            Ok(DownloadOutcome {
+                path: final_path,
+                bytes,
+            })
         }
         Err(e) => {
             let _ = fs::remove_file(&part_path);
@@ -332,7 +376,9 @@ where
     macro_rules! budget_check {
         () => {
             if written > byte_budget {
-                return Err(CdnError::BudgetExceeded { budget: byte_budget });
+                return Err(CdnError::BudgetExceeded {
+                    budget: byte_budget,
+                });
             }
         };
     }
@@ -370,3 +416,323 @@ fn set_mtime(path: &Path, unix_ts: i64) {
 
 #[cfg(not(unix))]
 fn set_mtime(_path: &Path, _unix_ts: i64) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::path;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const JPEG: [u8; 8] = [0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 4];
+    const PNG: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+    fn client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap()
+    }
+
+    fn tmp_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("idlg-test-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[tokio::test]
+    async fn jpeg_sniffs_to_jpg_extension() {
+        let server = MockServer::start().await;
+        Mock::given(path("/img"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/jpeg")
+                    .set_body_bytes(JPEG),
+            )
+            .mount(&server)
+            .await;
+        let out = stream_to_file_with_budget(
+            &client(),
+            &format!("{}/img", server.uri()),
+            &tmp_dir("jpg").join("2026-01-01_00-00-00_abc"),
+            None,
+            |_| {},
+            None,
+            1024 * 1024,
+        )
+        .await
+        .unwrap();
+        assert!(out.path.ends_with("2026-01-01_00-00-00_abc.jpg"));
+        assert_eq!(out.bytes, 8);
+    }
+
+    #[tokio::test]
+    async fn content_type_mismatch_is_rejected() {
+        let server = MockServer::start().await;
+        Mock::given(path("/liar"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "video/mp4")
+                    .set_body_bytes(JPEG),
+            )
+            .mount(&server)
+            .await;
+        let err = stream_to_file_with_budget(
+            &client(),
+            &format!("{}/liar", server.uri()),
+            &tmp_dir("mismatch").join("x"),
+            None,
+            |_| {},
+            None,
+            1024 * 1024,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, CdnError::UnknownContent { .. }), "{err}");
+    }
+
+    #[tokio::test]
+    async fn unknown_magic_bytes_are_rejected() {
+        let server = MockServer::start().await;
+        Mock::given(path("/weird"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/octet-stream")
+                    .set_body_bytes(b"NOT A REAL FILE FORMAT AT ALL........"),
+            )
+            .mount(&server)
+            .await;
+        let err = stream_to_file_with_budget(
+            &client(),
+            &format!("{}/weird", server.uri()),
+            &tmp_dir("weird").join("x"),
+            None,
+            |_| {},
+            None,
+            1024 * 1024,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, CdnError::UnknownContent { .. }), "{err}");
+    }
+
+    #[tokio::test]
+    async fn empty_body_is_rejected() {
+        let server = MockServer::start().await;
+        Mock::given(path("/empty"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes([]))
+            .mount(&server)
+            .await;
+        let err = stream_to_file_with_budget(
+            &client(),
+            &format!("{}/empty", server.uri()),
+            &tmp_dir("empty").join("x"),
+            None,
+            |_| {},
+            None,
+            1024 * 1024,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, CdnError::EmptyBody), "{err}");
+    }
+
+    #[tokio::test]
+    async fn redirects_are_followed_within_allowlist() {
+        let server = MockServer::start().await;
+        Mock::given(path("/jump"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/final", server.uri())),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(path("/final"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(PNG),
+            )
+            .mount(&server)
+            .await;
+        let out = stream_to_file_with_budget(
+            &client(),
+            &format!("{}/jump", server.uri()),
+            &tmp_dir("redir").join("y"),
+            None,
+            |_| {},
+            None,
+            1024 * 1024,
+        )
+        .await
+        .unwrap();
+        assert!(out.path.ends_with("y.png"));
+    }
+
+    #[tokio::test]
+    async fn cross_host_redirect_is_rejected() {
+        let server = MockServer::start().await;
+        Mock::given(path("/evil"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", "https://evil.example.com/x.jpg"),
+            )
+            .mount(&server)
+            .await;
+        let err = stream_to_file_with_budget(
+            &client(),
+            &format!("{}/evil", server.uri()),
+            &tmp_dir("evil").join("z"),
+            None,
+            |_| {},
+            None,
+            1024 * 1024,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, CdnError::HostNotAllowed(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn redirect_loop_hits_limit() {
+        let server = MockServer::start().await;
+        Mock::given(path("/loop"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/loop", server.uri())),
+            )
+            .mount(&server)
+            .await;
+        let err = stream_to_file_with_budget(
+            &client(),
+            &format!("{}/loop", server.uri()),
+            &tmp_dir("loop").join("l"),
+            None,
+            |_| {},
+            None,
+            1024 * 1024,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, CdnError::TooManyRedirects), "{err}");
+    }
+
+    #[tokio::test]
+    async fn byte_budget_aborts_large_body() {
+        let dir = tmp_dir("budget");
+        let server = MockServer::start().await;
+        let mut big = vec![0xFF, 0xD8, 0xFF, 0xE0];
+        big.resize(4096, 0xEE);
+        Mock::given(path("/big"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/jpeg")
+                    .set_body_bytes(big),
+            )
+            .mount(&server)
+            .await;
+        let err = stream_to_file_with_budget(
+            &client(),
+            &format!("{}/big", server.uri()),
+            &dir.join("b"),
+            None,
+            |_| {},
+            None,
+            100,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, CdnError::BudgetExceeded { .. }), "{err}");
+        assert!(!dir.join("b.part").exists());
+    }
+
+    #[tokio::test]
+    async fn collision_gets_numeric_suffix() {
+        let dir = tmp_dir("collision");
+        let existing = dir.join("c.jpg");
+        fs::write(&existing, b"old").unwrap();
+
+        let server = MockServer::start().await;
+        Mock::given(path("/img"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/jpeg")
+                    .set_body_bytes(JPEG),
+            )
+            .mount(&server)
+            .await;
+
+        let out = stream_to_file_with_budget(
+            &client(),
+            &format!("{}/img", server.uri()),
+            &dir.join("c"),
+            None,
+            |_| {},
+            None,
+            1024 * 1024,
+        )
+        .await
+        .unwrap();
+        assert!(out.path.ends_with("c_1.jpg"), "{:?}", out.path);
+        assert_eq!(fs::read(&existing).unwrap(), b"old");
+    }
+
+    #[tokio::test]
+    async fn cancel_aborts_before_start() {
+        let dir = tmp_dir("cancel");
+        let server = MockServer::start().await;
+        let big = PNG.repeat(64);
+        Mock::given(path("/slow"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(big),
+            )
+            .mount(&server)
+            .await;
+
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        tx.send_replace(true);
+
+        let err = stream_to_file_with_budget(
+            &client(),
+            &format!("{}/slow", server.uri()),
+            &dir.join("s"),
+            None,
+            |_| {},
+            Some(rx),
+            1024 * 1024,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, CdnError::Cancelled), "{err}");
+    }
+
+    #[tokio::test]
+    async fn mtime_is_preserved_from_taken_at() {
+        let dir = tmp_dir("mtime");
+        let server = MockServer::start().await;
+        Mock::given(path("/old"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/jpeg")
+                    .set_body_bytes(JPEG),
+            )
+            .mount(&server)
+            .await;
+        let taken_at = 1_700_000_000; // Nov 2023
+        let out = stream_to_file_with_budget(
+            &client(),
+            &format!("{}/old", server.uri()),
+            &dir.join("m"),
+            Some(taken_at),
+            |_| {},
+            None,
+            1024 * 1024,
+        )
+        .await
+        .unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(out.path.metadata().unwrap().mtime(), taken_at);
+    }
+}

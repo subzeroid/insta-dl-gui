@@ -103,7 +103,10 @@ async fn save_settings(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let cfg = Config::load();
-    let client = cfg.token.as_ref().map(|t| Arc::new(HikerClient::new(t.clone())));
+    let client = cfg
+        .token
+        .as_ref()
+        .map(|t| Arc::new(HikerClient::new(t.clone())));
     let cdn_http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -124,7 +127,6 @@ pub fn run() {
             get_balance,
             save_settings,
             commands::resolve_input,
-
             commands::download_post,
             commands::fetch_profile,
             commands::enqueue_profile_download,

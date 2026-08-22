@@ -95,22 +95,35 @@ pub struct QuotaHeaders {
 pub struct HikerClient {
     http: reqwest::Client,
     token: String,
+    base_url: String,
 }
 
 impl HikerClient {
     pub fn new(token: String) -> Self {
+        Self::with_base_url(token, BASE_URL.to_string())
+    }
+
+    pub fn with_base_url(token: String, base_url: String) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent(concat!("insta-dl-gui/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("reqwest client");
-        Self { http, token }
+        Self {
+            http,
+            token,
+            base_url,
+        }
     }
 
-    pub async fn get(&self, path: &str, params: &[(&str, &str)]) -> Result<(Value, QuotaHeaders), HikerError> {
+    pub async fn get(
+        &self,
+        path: &str,
+        params: &[(&str, &str)],
+    ) -> Result<(Value, QuotaHeaders), HikerError> {
         let mut req = self
             .http
-            .get(format!("{BASE_URL}{path}"))
+            .get(format!("{}{}", self.base_url, path))
             .header("x-access-key", &self.token)
             .header("accept", "application/json");
         for (k, v) in params {
@@ -118,13 +131,10 @@ impl HikerClient {
                 req = req.query(&[(k, v)]);
             }
         }
-        let resp = req.send().await.map_err(|e| {
-            if e.is_timeout() || e.is_connect() {
-                HikerError::Transient(e.to_string())
-            } else {
-                HikerError::Transient(e.to_string())
-            }
-        })?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| HikerError::Transient(e.to_string()))?;
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
         let body = resp.text().await.unwrap_or_default();
@@ -151,7 +161,9 @@ impl HikerClient {
     }
 
     pub async fn user_by_username(&self, username: &str) -> Result<Value, HikerError> {
-        let (v, _) = self.get("/v2/user/by/username", &[("username", username)]).await?;
+        let (v, _) = self
+            .get("/v2/user/by/username", &[("username", username)])
+            .await?;
         Ok(v["user"].clone())
     }
 
@@ -164,19 +176,33 @@ impl HikerClient {
         let (v, _) = self
             .get(
                 "/v1/user/medias/chunk",
-                &[("user_id", user_id), ("end_cursor", end_cursor.unwrap_or(""))],
+                &[
+                    ("user_id", user_id),
+                    ("end_cursor", end_cursor.unwrap_or("")),
+                ],
             )
             .await?;
-        let arr = v.as_array().ok_or_else(|| HikerError::Transient("medias/chunk: expected [items, cursor]".into()))?;
-        let items = arr.first().and_then(|x| x.as_array()).cloned().unwrap_or_default();
+        let arr = v.as_array().ok_or_else(|| {
+            HikerError::Transient("medias/chunk: expected [items, cursor]".into())
+        })?;
+        let items = arr
+            .first()
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default();
         let cursor = arr.get(1).and_then(|x| x.as_str()).map(String::from);
         let posts = items.iter().filter_map(map_post).collect();
-        Ok(crate::models::PostPage { posts, end_cursor: cursor })
+        Ok(crate::models::PostPage {
+            posts,
+            end_cursor: cursor,
+        })
     }
 
     /// GET /v2/user/stories (billed 2 requests) → `{"reel": {"items": [...]}}`.
     pub async fn user_stories(&self, user_id: &str) -> Result<Vec<Value>, HikerError> {
-        let (v, _) = self.get("/v2/user/stories", &[("user_id", user_id)]).await?;
+        let (v, _) = self
+            .get("/v2/user/stories", &[("user_id", user_id)])
+            .await?;
         let empty = Vec::new();
         Ok(v.get("reel")
             .and_then(|r| r.get("items"))
@@ -187,7 +213,9 @@ impl HikerClient {
 
     /// GET /v2/user/highlights (billed 2 requests) → `{"response": {"tray": [...]}}`.
     pub async fn user_highlights(&self, user_id: &str) -> Result<Vec<Value>, HikerError> {
-        let (v, _) = self.get("/v2/user/highlights", &[("user_id", user_id)]).await?;
+        let (v, _) = self
+            .get("/v2/user/highlights", &[("user_id", user_id)])
+            .await?;
         let empty = Vec::new();
         Ok(v["response"]["tray"].as_array().cloned().unwrap_or(empty))
     }
@@ -195,7 +223,9 @@ impl HikerClient {
     /// GET /v2/highlight/by/id (id = bare numeric pk) →
     /// `{"response": {"reels": {"highlight:<pk>": {"items": [...]}}}}`.
     pub async fn highlight_items(&self, highlight_pk: &str) -> Result<Vec<Value>, HikerError> {
-        let (v, _) = self.get("/v2/highlight/by/id", &[("id", highlight_pk)]).await?;
+        let (v, _) = self
+            .get("/v2/highlight/by/id", &[("id", highlight_pk)])
+            .await?;
         let empty = Vec::new();
         let reels = v["response"]["reels"].as_object();
         Ok(reels
@@ -208,7 +238,9 @@ impl HikerClient {
 
     /// GET /v2/media/info/by/code → {"media_or_ad": {...}}
     pub async fn media_by_code(&self, code: &str) -> Result<Value, HikerError> {
-        let (v, _) = self.get("/v2/media/info/by/code", &[("code", code)]).await?;
+        let (v, _) = self
+            .get("/v2/media/info/by/code", &[("code", code)])
+            .await?;
         Ok(v["media_or_ad"].clone())
     }
 }
@@ -254,7 +286,10 @@ pub(crate) fn best_video(item: &serde_json::Value) -> Option<String> {
 /// child). Handles both current HikerAPI shapes (`image_versions2` /
 /// `video_versions`) and legacy flat fields (`thumbnail_url` / `video_url`,
 /// still used by feed chunk endpoints).
-pub fn collect_resources(item: &serde_json::Value, is_video: bool) -> Vec<crate::models::MediaResource> {
+pub fn collect_resources(
+    item: &serde_json::Value,
+    is_video: bool,
+) -> Vec<crate::models::MediaResource> {
     use crate::models::{MediaKind, MediaResource};
     let mut out = Vec::new();
     if is_video {
@@ -263,14 +298,20 @@ pub fn collect_resources(item: &serde_json::Value, is_video: bool) -> Vec<crate:
                 .and_then(|v| v.as_str())
                 .map(String::from)
         }) {
-            out.push(MediaResource { url, kind: MediaKind::Video });
+            out.push(MediaResource {
+                url,
+                kind: MediaKind::Video,
+            });
         }
     } else if let Some(url) = best_image(item).or_else(|| {
         item.get("thumbnail_url")
             .and_then(|v| v.as_str())
             .map(String::from)
     }) {
-        out.push(MediaResource { url, kind: MediaKind::Photo });
+        out.push(MediaResource {
+            url,
+            kind: MediaKind::Photo,
+        });
     }
     out
 }
@@ -287,11 +328,23 @@ pub fn map_profile(user: &serde_json::Value) -> Option<crate::models::Profile> {
     Some(crate::models::Profile {
         pk,
         username,
-        full_name: user.get("full_name").and_then(|v| v.as_str()).map(String::from),
-        media_count: user.get("media_count").and_then(|v| v.as_u64()).unwrap_or(0),
+        full_name: user
+            .get("full_name")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        media_count: user
+            .get("media_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
         follower_count: user.get("follower_count").and_then(|v| v.as_u64()),
-        is_private: user.get("is_private").and_then(|v| v.as_bool()).unwrap_or(false),
-        is_verified: user.get("is_verified").and_then(|v| v.as_bool()).unwrap_or(false),
+        is_private: user
+            .get("is_private")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        is_verified: user
+            .get("is_verified")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         avatar_url,
     })
 }
@@ -300,11 +353,18 @@ pub fn map_profile(user: &serde_json::Value) -> Option<crate::models::Profile> {
 /// Shapes verified live by insta-dl: media_type 1=photo, 2=video,
 /// 8=album (`carousel_media` preferred, `resources` fallback).
 pub fn map_post(media: &serde_json::Value) -> Option<crate::models::Post> {
-    use crate::models::{MediaKind, MediaResource};
+    use crate::models::MediaResource;
 
     let pk = str_or_num(media.get("pk")?)?;
-    let code = media.get("code").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let media_type = media.get("media_type").and_then(|v| v.as_u64()).unwrap_or(0);
+    let code = media
+        .get("code")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let media_type = media
+        .get("media_type")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
 
     let mut resources: Vec<MediaResource> = Vec::new();
     let carousel = media
@@ -334,7 +394,10 @@ pub fn map_post(media: &serde_json::Value) -> Option<crate::models::Post> {
         pk,
         code,
         taken_at: crate::models::parse_taken_at(media.get("taken_at")?),
-        caption: media.get("caption_text").and_then(|v| v.as_str()).map(String::from),
+        caption: media
+            .get("caption_text")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         like_count: media.get("like_count").and_then(|v| v.as_u64()),
         comment_count: media.get("comment_count").and_then(|v| v.as_u64()),
         owner_username: media["user"]["username"].as_str().map(String::from),

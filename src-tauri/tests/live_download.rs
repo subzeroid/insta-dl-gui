@@ -23,7 +23,10 @@ async fn balance_and_single_post_download() {
     println!("balance: {} requests", balance.requests);
     assert!(balance.requests > 0, "no quota left for smoke test");
 
-    let media = client.media_by_code(TEST_POST_CODE).await.expect("media_by_code");
+    let media = client
+        .media_by_code(TEST_POST_CODE)
+        .await
+        .expect("media_by_code");
     let post = map_post(&media).expect("map_post");
     println!(
         "post {}: {} resource(s), owner @{:?}",
@@ -32,7 +35,10 @@ async fn balance_and_single_post_download() {
         post.owner_username
     );
     assert!(!post.code.is_empty());
-    assert!(!post.resources.is_empty(), "post has no downloadable resources");
+    assert!(
+        !post.resources.is_empty(),
+        "post has no downloadable resources"
+    );
 
     let dest_dir = std::env::temp_dir().join(format!("insta-dl-gui-smoke-{}", std::process::id()));
     std::fs::create_dir_all(&dest_dir).unwrap();
@@ -78,7 +84,10 @@ async fn profile_fetch_and_first_page() {
     };
     let client = HikerClient::new(token);
 
-    let user = client.user_by_username(TEST_PROFILE).await.expect("user_by_username");
+    let user = client
+        .user_by_username(TEST_PROFILE)
+        .await
+        .expect("user_by_username");
     let profile = map_profile(&user).expect("map_profile");
     println!(
         "@{} pk={} media_count={} private={}",
@@ -88,8 +97,15 @@ async fn profile_fetch_and_first_page() {
     assert!(!profile.is_private);
     assert!(profile.avatar_url.is_some());
 
-    let page = client.user_medias_chunk(&profile.pk, None).await.expect("medias_chunk");
-    println!("first page: {} posts, cursor={:?}", page.posts.len(), page.end_cursor.is_some());
+    let page = client
+        .user_medias_chunk(&profile.pk, None)
+        .await
+        .expect("medias_chunk");
+    println!(
+        "first page: {} posts, cursor={:?}",
+        page.posts.len(),
+        page.end_cursor.is_some()
+    );
     assert!(!page.posts.is_empty(), "expected posts on first page");
 
     // Stories shape (2 requests) — @instagram usually has none active.
@@ -98,7 +114,8 @@ async fn profile_fetch_and_first_page() {
 
     // Avatar download through the CDN streamer.
     if let Some(url) = &profile.avatar_url {
-        let dest = std::env::temp_dir().join(format!("insta-dl-gui-smoke-avatar-{}", std::process::id()));
+        let dest =
+            std::env::temp_dir().join(format!("insta-dl-gui-smoke-avatar-{}", std::process::id()));
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()

@@ -51,7 +51,7 @@ impl Config {
         };
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            restrictive_dir_perms(&parent);
+            restrictive_dir_perms(parent);
         }
         let json = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
         let tmp = path.with_extension("json.tmp");
@@ -67,7 +67,9 @@ impl Config {
     }
 
     pub fn token_hint(&self) -> Option<String> {
-        self.token.as_ref().map(|t| format!("***{}", &t[t.len().saturating_sub(4)..]))
+        self.token
+            .as_ref()
+            .map(|t| format!("***{}", &t[t.len().saturating_sub(4)..]))
     }
 }
 
