@@ -133,7 +133,8 @@ fn taken_at_name(ts: Option<i64>, fallback_code: &str) -> String {
 }
 
 fn safe_segment(s: &str) -> String {
-    s.chars()
+    let sanitized: String = s
+        .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || "-_.@".contains(c) {
                 c
@@ -141,7 +142,12 @@ fn safe_segment(s: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+        "_".to_string()
+    } else {
+        sanitized
+    }
 }
 
 /// Collect existing file stems so already-downloaded items are skipped.
@@ -1020,5 +1026,13 @@ mod tests {
     #[test]
     fn post_dedupe_preserves_shortcode_case() {
         assert_ne!(post_job_key("AbC123"), post_job_key("abc123"));
+    }
+
+    #[test]
+    fn path_segments_cannot_escape_the_download_directory() {
+        assert_eq!(safe_segment("."), "_");
+        assert_eq!(safe_segment(".."), "_");
+        assert_eq!(safe_segment(""), "_");
+        assert_eq!(safe_segment("valid.name"), "valid.name");
     }
 }
