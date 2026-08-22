@@ -243,11 +243,12 @@ fn post_job_key(code: &str) -> String {
 fn direct_job_key(label: &str, subfolder: &str, items: &[DirectItem]) -> String {
     let mut item_pks: Vec<&str> = items.iter().map(|item| item.pk.as_str()).collect();
     item_pks.sort_unstable();
+    let item_key = serde_json::to_string(&item_pks).expect("serializing string identifiers");
     format!(
         "direct:{}:{}:{}",
         safe_segment(&label.to_ascii_lowercase()),
         safe_segment(&subfolder.to_ascii_lowercase()),
-        item_pks.join(",")
+        item_key
     )
 }
 
@@ -683,10 +684,13 @@ async fn run_profile_job(
             if is_cancelled() {
                 return Err(JobFail::Cancelled);
             }
-            let page = client
+            let page = match client
                 .user_medias_chunk(&profile.pk, cursor.as_deref())
                 .await
-                .map_err(|e| JobFail::Fatal(e.to_string()))?;
+            {
+                Ok(page) => page,
+                Err(error) => return finish_downloads(files_done, Some(error.to_string())),
+            };
             for post in &page.posts {
                 if let Some(max) = opts.max_posts {
                     if considered >= max {
@@ -724,10 +728,12 @@ async fn run_profile_job(
                         &mut bytes_total,
                         cancel.as_ref().cloned(),
                     ));
-                    if idx == 0 {
-                        write_sidecar(cfg, &posts_dir, post, &out)?;
-                    }
                     got += 1;
+                    if idx == 0 {
+                        if let Err(error) = write_sidecar(cfg, &posts_dir, post, &out) {
+                            last_error = Some(error);
+                        }
+                    }
                 }
                 files_done += got;
             }
@@ -792,10 +798,10 @@ async fn run_profile_job(
                 .unwrap_or_else(|| hl_pk.to_string());
             let hl_dir = hl_root.join(format!("{}_{}", safe_segment(hl_pk), title));
             std::fs::create_dir_all(&hl_dir)?;
-            let items = client
-                .highlight_items(hl_pk)
-                .await
-                .map_err(|e| JobFail::Fatal(e.to_string()))?;
+            let items = match client.highlight_items(hl_pk).await {
+                Ok(items) => items,
+                Err(error) => return finish_downloads(files_done, Some(error.to_string())),
+            };
             for item in &items {
                 if is_cancelled() {
                     return Err(JobFail::Cancelled);
@@ -959,10 +965,12 @@ async fn run_single_post(
         .await
         {
             Ok(out) => {
-                if idx == 0 {
-                    write_sidecar(cfg, dir, post, &out)?;
-                }
                 downloaded += 1;
+                if idx == 0 {
+                    if let Err(error) = write_sidecar(cfg, dir, post, &out) {
+                        last_error = Some(error);
+                    }
+                }
             }
             Err(JobFail::Cancelled) => return Err(JobFail::Cancelled),
             Err(JobFail::Fatal(error)) => last_error = Some(error),
@@ -1044,6 +1052,17 @@ mod tests {
         assert_ne!(
             direct_job_key("nike", "stories", &first),
             direct_job_key("adidas", "stories", &first)
+        );
+    }
+
+    #[test]
+    fn direct_dedupe_has_unambiguous_item_boundaries() {
+        let one_item = vec![direct_item("a,b")];
+        let two_items = vec![direct_item("a"), direct_item("b")];
+
+        assert_ne!(
+            direct_job_key("nike", "stories", &one_item),
+            direct_job_key("nike", "stories", &two_items)
         );
     }
 
