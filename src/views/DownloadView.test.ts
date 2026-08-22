@@ -93,6 +93,9 @@ describe("DownloadView concurrency", () => {
     await download!.trigger("click");
 
     expect(ipc.enqueueProfileDownload).toHaveBeenCalledTimes(1);
+    await wrapper.get("input").setValue("adidas");
+    await wrapper.get("form").trigger("submit");
+    expect(ipc.resolveInput).toHaveBeenCalledTimes(1);
     pending.resolve("job-1");
     await flushPromises();
   });
