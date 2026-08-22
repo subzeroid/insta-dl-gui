@@ -34,8 +34,7 @@ Grab an installer from [GitHub Releases](https://github.com/subzeroid/insta-dl-g
 | OS | File |
 |---|---|
 | Windows | `insta-dl-gui_x.y.z_x64-setup.exe` |
-| macOS (Apple Silicon) | `insta-dl-gui_aarch64.dmg` |
-| macOS (Intel) | `insta-dl-gui_x64.dmg` |
+| macOS (Intel and Apple Silicon) | `insta-dl-gui_x.y.z_universal.dmg` |
 | Linux | `.AppImage` / `.deb` / `.rpm` |
 
 > Windows SmartScreen may warn about unsigned binaries — click "More info" → "Run anyway". Code signing is planned.
@@ -61,8 +60,10 @@ npm run tauri build    # installers into src-tauri/target/release/bundle/
 ### Tests
 
 ```sh
+npm test               # frontend unit and component tests
+
 cd src-tauri
-cargo test             # offline unit tests (CDN safety rules, error mapping, parsers)
+cargo test --locked    # offline unit tests (CDN safety rules, error mapping, parsers)
 
 SMOKE_TOKEN=... cargo test --test live_download   # live smoke (~6 real API calls)
 ```
