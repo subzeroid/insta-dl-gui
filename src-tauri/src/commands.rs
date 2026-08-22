@@ -204,7 +204,10 @@ enum JobFail {
 
 impl From<CdnError> for JobFail {
     fn from(e: CdnError) -> Self {
-        Self::Fatal(e.to_string())
+        match e {
+            CdnError::Cancelled => Self::Cancelled,
+            other => Self::Fatal(other.to_string()),
+        }
     }
 }
 
@@ -218,6 +221,28 @@ impl From<String> for JobFail {
     fn from(e: String) -> Self {
         Self::Fatal(e)
     }
+}
+
+fn finish_downloads(succeeded: usize, last_error: Option<String>) -> Result<usize, JobFail> {
+    match (succeeded, last_error) {
+        (0, Some(error)) => Err(JobFail::Fatal(error)),
+        _ => Ok(succeeded),
+    }
+}
+
+fn post_job_key(code: &str) -> String {
+    format!("post:{code}")
+}
+
+fn direct_job_key(label: &str, subfolder: &str, items: &[DirectItem]) -> String {
+    let mut item_pks: Vec<&str> = items.iter().map(|item| item.pk.as_str()).collect();
+    item_pks.sort_unstable();
+    format!(
+        "direct:{}:{}:{}",
+        safe_segment(&label.to_ascii_lowercase()),
+        safe_segment(&subfolder.to_ascii_lowercase()),
+        item_pks.join(",")
+    )
 }
 
 fn is_fatal_api_error(e: &crate::hiker::HikerError) -> bool {
@@ -406,6 +431,16 @@ pub async fn download_direct(
     let cfg = state.cfg.read().await.clone();
     let cdn_http = state.cdn_http.clone();
     let jobs: Arc<JobRegistry> = state.jobs.clone();
+    let in_flight = state.in_flight.clone();
+    let key = direct_job_key(&label, &subfolder, &items);
+    {
+        let mut guard = in_flight.lock().unwrap();
+        if !guard.insert(key.clone()) {
+            return Err(format!(
+                "A download for @{label}/{subfolder} is already running"
+            ));
+        }
+    }
 
     let job_id = uuid::Uuid::new_v4().to_string();
     let cancel_rx = jobs.register(&job_id);
@@ -424,6 +459,7 @@ pub async fn download_direct(
             Err(JobFail::Fatal(e)) => em.failed(e),
         }
         jobs.finish(&job_id);
+        in_flight.lock().unwrap().remove(&key);
     });
 
     Ok(job_id)
@@ -439,6 +475,7 @@ async fn run_direct_job(
     std::fs::create_dir_all(dir)?;
     let skip = existing_stems(dir);
     let mut files_done = 0usize;
+    let mut last_error = None;
     let mut bytes_total = 0u64;
 
     for item in items {
@@ -462,11 +499,11 @@ async fn run_direct_job(
         .await
         {
             Ok(_) => files_done += 1,
-            Err(JobFail::Fatal(e)) if e.contains("Cancelled") => return Err(JobFail::Cancelled),
-            Err(_) => continue, // skip failed file, keep going
+            Err(JobFail::Cancelled) => return Err(JobFail::Cancelled),
+            Err(JobFail::Fatal(error)) => last_error = Some(error),
         }
     }
-    Ok(files_done)
+    finish_downloads(files_done, last_error)
 }
 
 /// Download everything selected from a profile. Emits `job-progress`.
@@ -581,7 +618,7 @@ async fn run_profile_job(
     std::fs::create_dir_all(dir)?;
     let skip = existing_stems(dir);
     let mut files_done = 0usize;
-    let mut failed_files = 0usize;
+    let mut last_error = None;
     let mut bytes_total = 0u64;
     let is_cancelled = || cancel.as_ref().map(|c| *c.borrow()).unwrap_or(false);
 
@@ -592,9 +629,9 @@ async fn run_profile_job(
         ($fut:expr) => {
             match $fut.await {
                 Ok(path) => path,
-                Err(JobFail::Fatal(e)) if e.contains("Cancelled") => return Err(JobFail::Cancelled),
-                Err(_) => {
-                    failed_files += 1;
+                Err(JobFail::Cancelled) => return Err(JobFail::Cancelled),
+                Err(JobFail::Fatal(error)) => {
+                    last_error = Some(error);
                     continue;
                 }
             }
@@ -606,7 +643,7 @@ async fn run_profile_job(
         if let Some(url) = &profile.avatar_url {
             let base = dir.join(format!("avatar_{}", safe_segment(&profile.pk)));
             if !stem_exists(&skip, base.file_name().unwrap().to_string_lossy().as_ref()) {
-                if download_one(
+                match download_one(
                     cdn_http,
                     url,
                     &base,
@@ -617,11 +654,10 @@ async fn run_profile_job(
                     cancel.as_ref().cloned(),
                 )
                 .await
-                .is_ok()
                 {
-                    files_done += 1;
-                } else {
-                    failed_files += 1;
+                    Ok(_) => files_done += 1,
+                    Err(JobFail::Cancelled) => return Err(JobFail::Cancelled),
+                    Err(JobFail::Fatal(error)) => last_error = Some(error),
                 }
             }
         }
@@ -781,12 +817,7 @@ async fn run_profile_job(
         }
     }
 
-    if files_done == 0 && failed_files > 0 {
-        return Err(JobFail::Fatal(format!(
-            "All {failed_files} download(s) failed — check network or retry"
-        )));
-    }
-    Ok(files_done)
+    finish_downloads(files_done, last_error)
 }
 
 fn value_pk(item: &serde_json::Value) -> String {
@@ -827,7 +858,7 @@ pub async fn download_post(
     // Backend dedup: same shortcode cannot run twice at once.
     // Shortcodes are case-sensitive — keep the exact form.
     let in_flight = state.in_flight.clone();
-    let key = format!("post:{code}");
+    let key = post_job_key(&code);
     {
         let mut guard = state.in_flight.lock().unwrap();
         if !guard.insert(key.clone()) {
@@ -898,7 +929,7 @@ async fn run_single_post(
     let total = post.resources.len();
     let mut bytes_total = 0u64;
     let mut downloaded = 0usize;
-    let mut failed_downloads = 0usize;
+    let mut last_error = None;
 
     for (idx, resource) in post.resources.iter().enumerate() {
         if cancel.as_ref().map(|c| *c.borrow()).unwrap_or(false) {
@@ -927,22 +958,67 @@ async fn run_single_post(
                 }
                 downloaded += 1;
             }
-            Err(JobFail::Fatal(e)) if e.contains("Cancelled") => return Err(JobFail::Cancelled),
-            Err(_) => {
-                failed_downloads += 1;
-                continue; // skip failed resource after retries
-            }
+            Err(JobFail::Cancelled) => return Err(JobFail::Cancelled),
+            Err(JobFail::Fatal(error)) => last_error = Some(error),
         }
     }
-    if downloaded == 0 && failed_downloads > 0 {
-        return Err(JobFail::Fatal(format!(
-            "All {failed_downloads} file(s) failed — check network or retry"
-        )));
-    }
-    Ok(downloaded)
+    finish_downloads(downloaded, last_error)
 }
 
 #[tauri::command]
 pub async fn cancel_job(job_id: String, state: State<'_, AppState>) -> Result<bool, String> {
     Ok(state.jobs.cancel(&job_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn direct_item(pk: &str) -> DirectItem {
+        DirectItem {
+            url: format!("https://cdninstagram.com/{pk}.jpg"),
+            taken_at: None,
+            pk: pk.to_string(),
+        }
+    }
+
+    #[test]
+    fn full_failure_preserves_the_concrete_error() {
+        assert!(matches!(
+            finish_downloads(0, Some("HTTP 403".into())),
+            Err(JobFail::Fatal(error)) if error.contains("HTTP 403")
+        ));
+    }
+
+    #[test]
+    fn partial_success_reports_only_written_files() {
+        assert!(matches!(
+            finish_downloads(2, Some("HTTP 403".into())),
+            Ok(2)
+        ));
+    }
+
+    #[test]
+    fn cdn_cancellation_stays_typed() {
+        assert!(matches!(
+            JobFail::from(CdnError::Cancelled),
+            JobFail::Cancelled
+        ));
+    }
+
+    #[test]
+    fn direct_dedupe_is_case_and_order_independent() {
+        let first = vec![direct_item("2"), direct_item("1")];
+        let second = vec![direct_item("1"), direct_item("2")];
+
+        assert_eq!(
+            direct_job_key("Nike", "Stories", &first),
+            direct_job_key("nike", "stories", &second)
+        );
+    }
+
+    #[test]
+    fn post_dedupe_preserves_shortcode_case() {
+        assert_ne!(post_job_key("AbC123"), post_job_key("abc123"));
+    }
 }

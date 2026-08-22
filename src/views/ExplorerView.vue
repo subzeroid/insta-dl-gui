@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import {
   downloadDirect,
   downloadPost,
@@ -14,6 +14,7 @@ import {
   type StoryItem,
 } from "../lib/ipc";
 import { useJobsStore } from "../stores/jobs";
+import { createExplorerRequestState, runOnce } from "../lib/asyncState";
 import JobCard from "../components/JobCard.vue";
 import PostModal from "../components/PostModal.vue";
 
@@ -37,9 +38,8 @@ const storiesLoading = ref(false);
 const modalPost = ref<Post | null>(null);
 const modalStory = ref<StoryItem | null>(null);
 
-// Bumped on every user-intent navigation; async responses from an older
-// epoch are dropped instead of clobbering newer state.
-let epoch = 0;
+const requests = createExplorerRequestState();
+const activeActions = reactive(new Set<string>());
 
 const tabs = [
   { id: "posts", label: "Posts" },
@@ -68,25 +68,33 @@ function fmt(n?: number): string {
 
 function onQueryInput() {
   window.clearTimeout(debounce);
+  const seq = requests.autocomplete.begin();
   const q = query.value.trim();
   if (q.length < 2) {
     suggestions.value = [];
     suggestOpen.value = false;
+    highlight.value = -1;
     return;
   }
-  const seq = ++epoch;
   debounce = window.setTimeout(async () => {
     try {
       const found = await searchUsers(q);
-      if (seq !== epoch) return;
+      if (!requests.autocomplete.isCurrent(seq) || query.value.trim() !== q) return;
       suggestions.value = found;
     } catch {
-      if (seq !== epoch) return;
+      if (!requests.autocomplete.isCurrent(seq) || query.value.trim() !== q) return;
       suggestions.value = [];
     }
     highlight.value = suggestions.value.length > 0 ? 0 : -1;
     suggestOpen.value = true;
   }, 250);
+}
+
+function closeSuggestions() {
+  window.clearTimeout(debounce);
+  requests.autocomplete.invalidate();
+  suggestOpen.value = false;
+  highlight.value = -1;
 }
 
 function moveHighlight(delta: number) {
@@ -106,7 +114,7 @@ function onEnter(e: KeyboardEvent) {
 }
 
 function pickSuggestion(u: SearchUser) {
-  suggestOpen.value = false;
+  closeSuggestions();
   suggestions.value = [];
   query.value = `@${u.username}`;
   void loadProfile(u.username);
@@ -115,12 +123,13 @@ function pickSuggestion(u: SearchUser) {
 async function submit() {
   const raw = query.value.trim();
   if (!raw || loading.value) return;
-  suggestOpen.value = false;
+  closeSuggestions();
   error.value = null;
-  const seq = ++epoch;
+  const seq = requests.profile.begin();
+  loading.value = true;
   try {
     const target = await resolveInput(raw);
-    if (seq !== epoch) return;
+    if (!requests.profile.isCurrent(seq)) return;
     if (target.kind === "post") {
       const id = await downloadPost(target.code);
       jobs.addPlaceholder(id, `Post ${target.code}`);
@@ -128,14 +137,21 @@ async function submit() {
       await loadProfile(target.username);
     }
   } catch (e) {
-    if (seq !== epoch) return;
+    if (!requests.profile.isCurrent(seq)) return;
     error.value = String(e);
+  } finally {
+    if (requests.profile.isCurrent(seq)) {
+      loading.value = false;
+    }
   }
 }
 
 async function loadProfile(username: string) {
-  const seq = ++epoch;
+  const seq = requests.profile.begin();
+  requests.stories.invalidate();
   loading.value = true;
+  loadingMore.value = false;
+  storiesLoading.value = false;
   error.value = null;
   preview.value = null;
   stories.value = null;
@@ -144,13 +160,13 @@ async function loadProfile(username: string) {
   activeTab.value = "posts";
   try {
     const result = await fetchProfile(username, null);
-    if (seq !== epoch) return;
+    if (!requests.profile.isCurrent(seq)) return;
     preview.value = result;
   } catch (e) {
-    if (seq !== epoch) return;
+    if (!requests.profile.isCurrent(seq)) return;
     error.value = String(e);
   } finally {
-    if (seq === epoch) {
+    if (requests.profile.isCurrent(seq)) {
       loading.value = false;
     }
   }
@@ -160,13 +176,13 @@ async function loadMore() {
   const cursor = preview.value?.end_cursor;
   const username = preview.value?.profile.username;
   if (!preview.value || !username || !cursor || loadingMore.value) return;
-  const seq = epoch; // pagination must not outlive a profile switch
+  const seq = requests.profile.snapshot();
   loadingMore.value = true;
   error.value = null;
   try {
     const more = await fetchProfile(username, cursor);
     if (
-      seq !== epoch ||
+      !requests.profile.isCurrent(seq) ||
       preview.value?.profile.username !== username ||
       more.profile.username !== username
     ) {
@@ -178,62 +194,74 @@ async function loadMore() {
       end_cursor: more.end_cursor,
     };
   } catch (e) {
-    if (seq === epoch) {
+    if (requests.profile.isCurrent(seq) && preview.value?.profile.username === username) {
       error.value = String(e);
     }
   } finally {
-    if (seq === epoch) {
+    if (requests.profile.isCurrent(seq) && preview.value?.profile.username === username) {
       loadingMore.value = false;
     }
   }
 }
 
+function actionKey(kind: string, username: string) {
+  return `${kind}:${username.toLowerCase()}`;
+}
+
+function isActionBusy(kind: string, username: string) {
+  return activeActions.has(actionKey(kind, username));
+}
+
 async function downloadAll(kind: "posts" | "reels") {
   if (!preview.value) return;
   const username = preview.value.profile.username;
-  try {
-    const id = await enqueueProfileDownload(username, {
-      posts: kind === "posts",
-      reels: kind === "reels",
-      stories: false,
-      highlights: false,
-      avatar: false,
-      max_posts: null,
-    });
-    jobs.addPlaceholder(id, `@${username} ${kind}`);
-  } catch (e) {
-    error.value = String(e);
-  }
+  await runOnce(activeActions, actionKey(kind, username), async () => {
+    try {
+      const id = await enqueueProfileDownload(username, {
+        posts: kind === "posts",
+        reels: kind === "reels",
+        stories: false,
+        highlights: false,
+        avatar: false,
+        max_posts: null,
+      });
+      jobs.addPlaceholder(id, `@${username} ${kind}`);
+    } catch (e) {
+      if (preview.value?.profile.username === username) error.value = String(e);
+    }
+  });
 }
 
 async function downloadAvatar() {
   const profile = preview.value?.profile;
   if (!profile?.avatar_url) return;
-  try {
-    const id = await downloadDirect(profile.username, "propic", [{ url: profile.avatar_url, pk: profile.pk }]);
-    jobs.addPlaceholder(id, `@${profile.username} avatar`);
-  } catch (e) {
-    error.value = String(e);
-  }
+  await runOnce(activeActions, actionKey("avatar", profile.username), async () => {
+    try {
+      const id = await downloadDirect(profile.username, "propic", [
+        { url: profile.avatar_url!, pk: profile.pk },
+      ]);
+      jobs.addPlaceholder(id, `@${profile.username} avatar`);
+    } catch (e) {
+      if (preview.value?.profile.username === profile.username) error.value = String(e);
+    }
+  });
 }
 
 async function loadStories() {
   const username = preview.value?.profile.username;
   if (!username || storiesLoading.value) return;
-  const seq = epoch;
+  const seq = requests.stories.begin();
   storiesLoading.value = true;
   error.value = null;
   try {
     const items = await fetchStories(username);
-    // Never attach profile A's stories to whatever profile is open now —
-    // downloads would land in the wrong directory otherwise.
-    if (seq !== epoch || preview.value?.profile.username !== username) return;
+    if (!requests.stories.isCurrent(seq) || preview.value?.profile.username !== username) return;
     stories.value = items;
   } catch (e) {
-    if (seq !== epoch || preview.value?.profile.username !== username) return;
+    if (!requests.stories.isCurrent(seq) || preview.value?.profile.username !== username) return;
     error.value = String(e);
   } finally {
-    if (seq === epoch && preview.value?.profile.username === username) {
+    if (requests.stories.isCurrent(seq) && preview.value?.profile.username === username) {
       storiesLoading.value = false;
     }
   }
@@ -242,16 +270,19 @@ async function loadStories() {
 async function downloadAllStories() {
   if (!preview.value || !stories.value || stories.value.length === 0) return;
   const username = preview.value.profile.username;
-  try {
-    const id = await downloadDirect(
-      username,
-      "stories",
-      stories.value.map((s) => ({ url: s.media_url, pk: s.pk, taken_at: s.taken_at })),
-    );
-    jobs.addPlaceholder(id, `@${username} stories`);
-  } catch (e) {
-    error.value = String(e);
-  }
+  const items = stories.value.map((s) => ({
+    url: s.media_url,
+    pk: s.pk,
+    taken_at: s.taken_at,
+  }));
+  await runOnce(activeActions, actionKey("stories", username), async () => {
+    try {
+      const id = await downloadDirect(username, "stories", items);
+      jobs.addPlaceholder(id, `@${username} stories`);
+    } catch (e) {
+      if (preview.value?.profile.username === username) error.value = String(e);
+    }
+  });
 }
 
 function closeModal() {
@@ -266,7 +297,12 @@ onMounted(() => {
   }
 });
 
-onUnmounted(() => window.clearTimeout(debounce));
+onUnmounted(() => {
+  window.clearTimeout(debounce);
+  requests.autocomplete.invalidate();
+  requests.profile.invalidate();
+  requests.stories.invalidate();
+});
 </script>
 
 <template>
@@ -284,8 +320,8 @@ onUnmounted(() => window.clearTimeout(debounce));
           @keydown.down.prevent="moveHighlight(1)"
           @keydown.up.prevent="moveHighlight(-1)"
           @keydown.enter="onEnter"
-          @keydown.escape="suggestOpen = false"
-          @blur="suggestOpen = false"
+          @keydown.escape="closeSuggestions"
+          @blur="closeSuggestions"
         />
         <button class="btn-primary shrink-0" type="submit" :disabled="loading || !query.trim()">Fetch</button>
       </form>
@@ -354,11 +390,17 @@ onUnmounted(() => window.clearTimeout(debounce));
               v-if="preview.profile.avatar_url"
               class="inline-flex items-center gap-1 rounded-lg border border-line bg-surface-3 px-2.5 py-1.5 text-xs text-slate-300 transition-colors hover:bg-line"
               title="Download profile picture"
+              :disabled="isActionBusy('avatar', preview.profile.username)"
               @click="downloadAvatar"
             >
               ↓ Avatar
             </button>
-            <button v-if="!preview.profile.is_private" class="btn-primary" @click="downloadAll('posts')">
+            <button
+              v-if="!preview.profile.is_private"
+              class="btn-primary"
+              :disabled="isActionBusy('posts', preview.profile.username)"
+              @click="downloadAll('posts')"
+            >
               Download all posts
             </button>
           </div>
@@ -386,13 +428,24 @@ onUnmounted(() => window.clearTimeout(debounce));
             {{ t.label }}
           </button>
           <div class="ml-auto">
-            <button v-if="activeTab === 'posts'" class="btn-secondary" @click="downloadAll('posts')">Download all</button>
-            <button v-else-if="activeTab === 'reels'" class="btn-secondary" @click="downloadAll('reels')">
+            <button
+              v-if="activeTab === 'posts'"
+              class="btn-secondary"
+              :disabled="isActionBusy('posts', preview.profile.username)"
+              @click="downloadAll('posts')"
+            >Download all</button>
+            <button
+              v-else-if="activeTab === 'reels'"
+              class="btn-secondary"
+              :disabled="isActionBusy('reels', preview.profile.username)"
+              @click="downloadAll('reels')"
+            >
               Download all
             </button>
             <button
               v-else-if="stories && stories.length > 0"
               class="btn-secondary"
+              :disabled="isActionBusy('stories', preview.profile.username)"
               @click="downloadAllStories"
             >
               Download all stories

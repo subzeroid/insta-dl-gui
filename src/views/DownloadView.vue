@@ -11,6 +11,7 @@ import {
   type ProfileOptions,
   type ProfilePreview,
 } from "../lib/ipc";
+import { buildProfileOptions } from "../lib/profileOptions";
 
 const app = useAppStore();
 const jobs = useJobsStore();
@@ -24,26 +25,14 @@ const previewLoading = ref(false);
 
 const opts = computed<ProfileOptions>(() => {
   const max = maxPosts.value;
-  // Private profiles expose nothing but the avatar; hidden checkboxes must
-  // not leak their previous state into the backend call.
-  if (preview.value?.profile.is_private) {
-    return {
-      posts: false,
-      reels: false,
-      stories: false,
-      highlights: false,
-      avatar: avatar.value,
-      max_posts: null,
-    };
-  }
-  return {
+  return buildProfileOptions(preview.value?.profile.is_private === true, {
     posts: posts.value,
     reels: reels.value,
     stories: stories.value,
     highlights: highlights.value,
     avatar: avatar.value,
     max_posts: max !== null && max > 0 ? max : null,
-  };
+  });
 });
 
 const posts = ref(true);

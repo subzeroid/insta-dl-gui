@@ -16,7 +16,7 @@ The target is private, or the post was deleted. Private profiles expose nothing 
 
 A safety check: the app only downloads from official Instagram CDN hosts (`cdninstagram.com`, `fbcdn.net`). If you see this error on a normal post, the media URL likely expired between fetching and downloading — just retry; a fresh URL is minted per attempt.
 
-## macOS: "Apple could not verify…" / «Файл не был открыт» (Gatekeeper)
+## macOS: "Apple could not verify…" / «Файл не был открыт» (Gatekeeper) {#macos-blocks-the-app}
 
 The app is not code-signed yet, so macOS blocks the first launch. Two ways through:
 

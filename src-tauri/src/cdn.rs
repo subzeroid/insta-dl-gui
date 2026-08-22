@@ -4,9 +4,11 @@
 //! cross-check, extension allowlist, byte budget, disk guard, atomic
 //! `.part` writes with collision suffixes, mtime preservation.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -148,20 +150,46 @@ fn validate_url(url: &str) -> Result<(), CdnError> {
     Ok(())
 }
 
-fn resolve_collision(dest: &Path) -> PathBuf {
-    if !dest.exists() {
-        return dest.to_path_buf();
+static RESERVED_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+struct PathReservation {
+    path: PathBuf,
+}
+
+impl PathReservation {
+    fn path(&self) -> &Path {
+        &self.path
     }
+}
+
+impl Drop for PathReservation {
+    fn drop(&mut self) {
+        if let Some(reservations) = RESERVED_PATHS.get() {
+            reservations.lock().unwrap().remove(&self.path);
+        }
+    }
+}
+
+fn reserve_collision(dest: &Path) -> PathReservation {
     let stem = dest.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
     let parent = dest.parent().unwrap_or(Path::new("."));
     let ext = dest.extension().and_then(|e| e.to_str()).unwrap_or("");
-    for i in 1..1000u32 {
-        let candidate = parent.join(format!("{stem}_{i}.{ext}"));
-        if !candidate.exists() {
-            return candidate;
+    let mut reservations = RESERVED_PATHS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap();
+
+    for i in 0..=u32::MAX {
+        let candidate = match (i, ext.is_empty()) {
+            (0, _) => dest.to_path_buf(),
+            (_, true) => parent.join(format!("{stem}_{i}")),
+            (_, false) => parent.join(format!("{stem}_{i}.{ext}")),
+        };
+        if !candidate.exists() && reservations.insert(candidate.clone()) {
+            return PathReservation { path: candidate };
         }
     }
-    dest.to_path_buf()
+    unreachable!("exhausted collision suffix space")
 }
 
 fn check_disk_space(dir: &Path) -> Result<(), CdnError> {
@@ -301,7 +329,8 @@ where
         }
     }
 
-    let final_path = resolve_collision(&dest_base.with_extension(kind.ext()));
+    let reservation = reserve_collision(&dest_base.with_extension(kind.ext()));
+    let final_path = reservation.path().to_path_buf();
     if let Some(parent) = final_path.parent() {
         fs::create_dir_all(parent).map_err(CdnError::Io)?;
     }
@@ -715,6 +744,23 @@ mod tests {
         .unwrap();
         assert!(out.path.ends_with("c_1.jpg"), "{:?}", out.path);
         assert_eq!(fs::read(&existing).unwrap(), b"old");
+    }
+
+    #[test]
+    fn simultaneous_reservations_get_distinct_paths() {
+        let dir = tmp_dir("reservations");
+        let base = dir.join("c.jpg");
+
+        let first = reserve_collision(&base);
+        let second = reserve_collision(&base);
+
+        assert_eq!(first.path(), base);
+        assert_eq!(second.path(), dir.join("c_1.jpg"));
+        drop(first);
+        drop(second);
+
+        let again = reserve_collision(&base);
+        assert_eq!(again.path(), base);
     }
 
     #[tokio::test]
