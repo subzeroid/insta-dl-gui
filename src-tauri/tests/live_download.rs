@@ -128,3 +128,17 @@ async fn profile_fetch_and_first_page() {
         std::fs::remove_file(&out.path).ok();
     }
 }
+
+#[tokio::test]
+async fn search_autocomplete() {
+    let Some(token) = std::env::var("SMOKE_TOKEN").ok().filter(|t| !t.is_empty()) else {
+        eprintln!("SMOKE_TOKEN not set — skipping");
+        return;
+    };
+    let client = HikerClient::new(token);
+    let users = client.search_accounts("nike").await.expect("search_accounts");
+    assert!(!users.is_empty());
+    let mapped: Vec<_> = users.iter().filter_map(insta_dl_gui_lib::hiker::map_search_user).collect();
+    assert!(mapped.iter().any(|u| u.username == "nike"), "exact match must be present");
+    println!("search 'nike': {} raw → {} mapped, first: {:?}", users.len(), mapped.len(), mapped.first().map(|u| &u.username));
+}

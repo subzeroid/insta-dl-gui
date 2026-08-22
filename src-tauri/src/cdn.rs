@@ -308,11 +308,12 @@ where
     check_disk_space(&final_path)?;
 
     let part_path = final_path.with_extension(format!(
-        "{}.part",
+        "{}.{}.part",
         final_path
             .extension()
             .and_then(|e| e.to_str())
-            .unwrap_or("")
+            .unwrap_or(""),
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
     ));
     let _ = fs::remove_file(&part_path);
 
@@ -416,6 +417,45 @@ fn set_mtime(path: &Path, unix_ts: i64) {
 
 #[cfg(not(unix))]
 fn set_mtime(_path: &Path, _unix_ts: i64) {}
+
+/// `stream_to_file` with transient-error retries: network failures and
+/// HTTP 5xx are retried with linear backoff; safety rejections
+/// (MIME, budget, allowlist, cancel) are never retried.
+pub async fn stream_to_file_retried<F>(
+    http: &reqwest::Client,
+    url: &str,
+    dest_base: &Path,
+    taken_at_unix: Option<i64>,
+    mut progress: F,
+    cancel: Option<tokio::sync::watch::Receiver<bool>>,
+    attempts: usize,
+) -> Result<DownloadOutcome, CdnError>
+where
+    F: FnMut(u64),
+{
+    let mut last: Option<CdnError> = None;
+    for attempt in 0..attempts.max(1) {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(600 * attempt as u64)).await;
+        }
+        let result = stream_to_file(
+            http,
+            url,
+            dest_base,
+            taken_at_unix,
+            |bytes| progress(bytes),
+            cancel.clone(),
+        )
+        .await;
+        match result {
+            Ok(outcome) => return Ok(outcome),
+            Err(e @ CdnError::Network(_)) => last = Some(e),
+            Err(e @ CdnError::Http(status)) if status >= 500 => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or(CdnError::Network("download failed".into())))
+}
 
 #[cfg(test)]
 mod tests {

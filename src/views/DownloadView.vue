@@ -52,7 +52,8 @@ async function submit() {
     if (target.kind === "post") {
       busy.value = true;
       input.value = "";
-      await downloadPost(target.code);
+      const id = await downloadPost(target.code);
+      jobs.addPlaceholder(id, target.code);
     } else {
       previewLoading.value = true;
       const p = await fetchProfile(target.username);
@@ -68,8 +69,10 @@ async function submit() {
 
 async function startProfileDownload() {
   if (!preview.value) return;
+  const username = preview.value.profile.username;
   try {
-    await enqueueProfileDownload(preview.value.profile.username, opts.value);
+    const id = await enqueueProfileDownload(username, opts.value);
+    jobs.addPlaceholder(id, `@${username}`);
     preview.value = null;
     input.value = "";
   } catch (e) {
@@ -136,27 +139,29 @@ onMounted(() => {
         </div>
       </div>
 
-      <div v-if="preview.profile.is_private" class="border-t border-line px-5 py-4 text-sm text-warn">
-        Private profile — only the avatar can be downloaded.
-      </div>
-      <template v-else>
-        <div class="grid grid-cols-2 gap-2 border-t border-line p-5 sm:grid-cols-3">
-          <label class="flex cursor-pointer items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm hover:bg-surface-2" :class="{ 'border-accent/60': posts }">
-            <input v-model="posts" type="checkbox" class="accent-[var(--color-accent)]" /> Posts
-          </label>
-          <label class="flex cursor-pointer items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm hover:bg-surface-2" :class="{ 'border-accent/60': reels }">
-            <input v-model="reels" type="checkbox" class="accent-[var(--color-accent)]" /> Reels
-          </label>
-          <label class="flex cursor-pointer items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm hover:bg-surface-2" :class="{ 'border-accent/60': stories }">
-            <input v-model="stories" type="checkbox" class="accent-[var(--color-accent)]" /> Stories
-          </label>
-          <label class="flex cursor-pointer items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm hover:bg-surface-2" :class="{ 'border-accent/60': highlights }">
-            <input v-model="highlights" type="checkbox" class="accent-[var(--color-accent)]" /> Highlights
-          </label>
+      <div class="border-t border-line p-5">
+        <div v-if="preview.profile.is_private" class="mb-3 text-sm text-warn">
+          Private profile — only the avatar is accessible.
+        </div>
+        <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+          <template v-if="!preview.profile.is_private">
+            <label class="flex cursor-pointer items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm hover:bg-surface-2" :class="{ 'border-accent/60': posts }">
+              <input v-model="posts" type="checkbox" class="accent-[var(--color-accent)]" /> Posts
+            </label>
+            <label class="flex cursor-pointer items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm hover:bg-surface-2" :class="{ 'border-accent/60': reels }">
+              <input v-model="reels" type="checkbox" class="accent-[var(--color-accent)]" /> Reels
+            </label>
+            <label class="flex cursor-pointer items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm hover:bg-surface-2" :class="{ 'border-accent/60': stories }">
+              <input v-model="stories" type="checkbox" class="accent-[var(--color-accent)]" /> Stories
+            </label>
+            <label class="flex cursor-pointer items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm hover:bg-surface-2" :class="{ 'border-accent/60': highlights }">
+              <input v-model="highlights" type="checkbox" class="accent-[var(--color-accent)]" /> Highlights
+            </label>
+          </template>
           <label class="flex cursor-pointer items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm hover:bg-surface-2" :class="{ 'border-accent/60': avatar }">
             <input v-model="avatar" type="checkbox" class="accent-[var(--color-accent)]" /> Avatar
           </label>
-          <label class="flex items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm">
+          <label v-if="!preview.profile.is_private" class="flex items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm">
             <span class="text-slate-500">Max</span>
             <input
               v-model.number="maxPosts"
@@ -167,10 +172,8 @@ onMounted(() => {
             />
           </label>
         </div>
-        <div class="flex items-center justify-between gap-3 border-t border-line bg-surface-2 px-5 py-3">
-          <p class="text-xs text-slate-500">
-            {{ preview.recent_posts.length }} recent shown · saves to <span class="font-mono">{{ app.destDir }}/{{ preview.profile.username }}/</span>
-          </p>
+        <div class="mt-4 flex items-center justify-between gap-3 border-t border-line pt-4">
+          <p class="text-xs text-slate-500">saves to <span class="font-mono">{{ app.destDir }}/{{ preview.profile.username }}/</span></p>
           <button
             class="btn-primary shrink-0"
             :disabled="!(posts || reels || stories || highlights || avatar)"
@@ -179,7 +182,7 @@ onMounted(() => {
             Download
           </button>
         </div>
-      </template>
+      </div>
     </div>
 
     <div v-if="!preview && !notice" class="card flex items-center justify-center p-12 text-sm text-slate-500">

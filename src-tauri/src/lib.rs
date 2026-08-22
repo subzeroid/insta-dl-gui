@@ -41,6 +41,9 @@ pub struct AppState {
     /// manually by `cdn.rs` so every hop gets validated.
     cdn_http: reqwest::Client,
     pub jobs: Arc<JobRegistry>,
+    /// Targets currently being downloaded — backend-side dedup so the same
+    /// profile/post never runs twice concurrently, whatever the UI does.
+    in_flight: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 fn err_string(e: impl std::fmt::Display) -> String {
@@ -120,6 +123,7 @@ pub fn run() {
             client: RwLock::new(client),
             cdn_http,
             jobs: Arc::new(JobRegistry::new()),
+            in_flight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         })
         .invoke_handler(tauri::generate_handler![
             config_state,
@@ -131,6 +135,9 @@ pub fn run() {
             commands::fetch_profile,
             commands::enqueue_profile_download,
             commands::cancel_job,
+            commands::search_users,
+            commands::fetch_stories,
+            commands::download_direct,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

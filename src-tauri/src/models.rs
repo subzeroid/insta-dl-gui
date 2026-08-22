@@ -28,6 +28,18 @@ pub struct Profile {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SearchUser {
+    pub pk: String,
+    pub username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_name: Option<String>,
+    pub is_verified: bool,
+    pub is_private: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct PostPage {
     pub posts: Vec<Post>,
     pub end_cursor: Option<String>,
@@ -43,6 +55,28 @@ pub struct ProfileOptions {
     pub avatar: bool,
     #[serde(default)]
     pub max_posts: Option<u64>,
+}
+
+/// One active-story item for the Explorer grid.
+#[derive(Debug, Clone, Serialize)]
+pub struct StoryItem {
+    pub pk: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub taken_at: Option<i64>,
+    pub kind: String,
+    pub media_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumb_url: Option<String>,
+}
+
+/// An already-fetched resource the frontend wants on disk (single story,
+/// avatar, …) without another HikerAPI call.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DirectItem {
+    pub url: String,
+    #[serde(default)]
+    pub taken_at: Option<i64>,
+    pub pk: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

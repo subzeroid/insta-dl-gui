@@ -50,13 +50,55 @@ function reply(cmd: string, args?: CmdArgs): unknown {
           is_verified: true,
           avatar_url: AVATAR,
         },
-        recent_posts: Array.from({ length: 12 }, (_, i) => ({
-          pk: `p${i}`,
-          code: `DEMO${i}`,
-          resources: [{ url: "", kind: "photo" }],
-        })),
+        recent_posts: Array.from({ length: 12 }, (_, i) => {
+          const hue = Math.round((i * 137) % 360);
+          const thumb =
+            "data:image/svg+xml," +
+            encodeURIComponent(
+              `<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'>
+                 <defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'>
+                   <stop offset='0' stop-color='hsl(${hue},60%,30%)'/>
+                   <stop offset='1' stop-color='hsl(${(hue + 60) % 360},60%,18%)'/>
+                 </linearGradient></defs>
+                 <rect width='400' height='400' fill='url(#g)'/>
+                 <circle cx='${80 + ((i * 97) % 240)}' cy='${100 + ((i * 61) % 200)}' r='56' fill='#ffffff' opacity='.14'/>
+               </svg>`,
+            );
+          const isVideo = i % 3 === 0;
+          return {
+            pk: `p${i}`,
+            code: `DEMO${i}`,
+            caption: `Demo post #${i} — golden hour somewhere far away`,
+            like_count: 1200 * (12 - i),
+            comment_count: 40 + i,
+            taken_at: 1776000000 + i * 86400,
+            owner_username: "natgeo",
+            thumbnail_url: thumb,
+            resources: [
+              { url: "", kind: isVideo ? ("video" as const) : ("photo" as const) },
+            ],
+          };
+        }),
         end_cursor: "cursor",
       };
+    case "search_users": {
+      const q = String(args?.query ?? "").toLowerCase();
+      const pool = [
+        { pk: "25025320", username: "instagram", full_name: "Instagram", is_verified: true, is_private: false, avatar_url: AVATAR },
+        { pk: "1234", username: "nike", full_name: "Nike", is_verified: true, is_private: false, avatar_url: AVATAR },
+        { pk: "5678", username: "nikelife", full_name: "Nike Life", is_verified: false, is_private: false, avatar_url: AVATAR },
+        { pk: "9012", username: "nikita.runs", full_name: "Nikita", is_verified: false, is_private: false, avatar_url: AVATAR },
+        { pk: "3456", username: "nikolciaak", full_name: "Nikol", is_verified: false, is_private: true, avatar_url: AVATAR },
+      ];
+      return pool.filter((u) => u.username.includes(q.replace(/^@/, "")));
+    }
+    case "fetch_stories":
+      return [
+        { pk: "s1", taken_at: 1776787455, kind: "photo", media_url: "", thumb_url: "" },
+        { pk: "s2", taken_at: 1776787500, kind: "video", media_url: "", thumb_url: "" },
+        { pk: "s3", taken_at: 1776787600, kind: "photo", media_url: "", thumb_url: "" },
+      ];
+    case "download_direct":
     case "download_post":
       return "mock-job-id";
     case "enqueue_profile_download":

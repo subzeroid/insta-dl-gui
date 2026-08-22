@@ -7,11 +7,13 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::cdn::{self, CdnError};
 use crate::config::Config;
-use crate::hiker::{map_post, map_profile};
+use crate::hiker::{map_post, map_profile, map_search_user};
 use crate::jobs::JobRegistry;
-use crate::models::{Post, Profile, ProfileOptions};
+use crate::models::{DirectItem, Post, Profile, ProfileOptions, SearchUser, StoryItem};
 use crate::targets::Target;
 use crate::AppState;
+
+const DOWNLOAD_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
@@ -49,11 +51,7 @@ struct JobEvents {
 
 impl JobEvents {
     fn new(app: &AppHandle, job_id: String, label: String) -> Self {
-        Self {
-            app: app.clone(),
-            job_id,
-            label,
-        }
+        Self { app: app.clone(), job_id, label }
     }
 
     fn progress(&self, current_file: usize, total_files: usize, bytes_done: u64, file_name: &str) {
@@ -81,10 +79,7 @@ impl JobEvents {
                 &JobProgress {
                     job_id: self.job_id.clone(),
                     label: self.label.clone(),
-                    state: JobState::Done {
-                        count,
-                        dir: dir.to_string_lossy().into_owned(),
-                    },
+                    state: JobState::Done { count, dir: dir.to_string_lossy().into_owned() },
                 },
             )
             .ok();
@@ -119,11 +114,8 @@ impl JobEvents {
 
 fn taken_at_name(ts: Option<i64>, fallback_code: &str) -> String {
     let base = match ts {
-        Some(unix) => chrono::DateTime::<chrono::Utc>::from_timestamp(unix, 0).map(|u| {
-            u.with_timezone(&chrono::Local)
-                .format("%Y-%m-%d_%H-%M-%S")
-                .to_string()
-        }),
+        Some(unix) => chrono::DateTime::<chrono::Utc>::from_timestamp(unix, 0)
+            .map(|u| u.with_timezone(&chrono::Local).format("%Y-%m-%d_%H-%M-%S").to_string()),
         None => None,
     }
     .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string());
@@ -132,13 +124,7 @@ fn taken_at_name(ts: Option<i64>, fallback_code: &str) -> String {
 
 fn safe_segment(s: &str) -> String {
     s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || "-_.@".contains(c) {
-                c
-            } else {
-                '_'
-            }
-        })
+        .map(|c| if c.is_ascii_alphanumeric() || "-_.@".contains(c) { c } else { '_' })
         .collect()
 }
 
@@ -147,9 +133,7 @@ fn existing_stems(dir: &Path) -> HashSet<String> {
     let mut set = HashSet::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else {
-            continue;
-        };
+        let Ok(entries) = std::fs::read_dir(&d) else { continue };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
@@ -174,10 +158,7 @@ fn write_sidecar(cfg: &Config, dir: &Path, post: &Post, first_file: &Path) -> Re
     if !cfg.sidecar {
         return Ok(());
     }
-    let stem = first_file
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("post");
+    let stem = first_file.file_stem().and_then(|s| s.to_str()).unwrap_or("post");
     let sidecar = serde_json::json!({
         "pk": post.pk,
         "code": post.code,
@@ -218,9 +199,15 @@ impl From<String> for JobFail {
     }
 }
 
-/// Stream one resource into `dest_base`, forwarding progress and honouring
-/// cancellation. Returns the final written path.
-#[allow(clippy::too_many_arguments)]
+fn is_fatal_api_error(e: &crate::hiker::HikerError) -> bool {
+    matches!(
+        e.code(),
+        "AuthInvalid" | "QuotaExhausted" | "Banned" | "NotFound" | "RateLimited"
+    )
+}
+
+/// Stream one resource into `dest_base` with transient-error retries,
+/// forwarding progress and honouring cancellation.
 async fn download_one(
     cdn_http: &reqwest::Client,
     url: &str,
@@ -235,18 +222,33 @@ async fn download_one(
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "file".into());
-    let outcome = cdn::stream_to_file(
+    let outcome = cdn::stream_to_file_retried(
         cdn_http,
         url,
         dest_base,
         taken_at,
         |bytes| em.progress(file_no, 0, *bytes_so_far + bytes, &name),
         cancel,
+        DOWNLOAD_ATTEMPTS,
     )
     .await
     .map_err(JobFail::from)?;
     *bytes_so_far += outcome.bytes;
     Ok(outcome.path)
+}
+
+/// Run an optional section fetch: quota/auth failures abort the whole
+/// enqueue, transient ones degrade to an empty list.
+async fn fetch_soft<F, Fut>(f: F) -> Result<Vec<serde_json::Value>, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<serde_json::Value>, crate::hiker::HikerError>>,
+{
+    match f().await {
+        Ok(items) => Ok(items),
+        Err(e) if is_fatal_api_error(&e) => Err(e.to_string()),
+        Err(_) => Ok(Vec::new()),
+    }
 }
 
 #[tauri::command]
@@ -255,12 +257,20 @@ pub async fn resolve_input(input: String) -> Result<Target, String> {
 }
 
 async fn client(state: &State<'_, AppState>) -> Result<Arc<crate::hiker::HikerClient>, String> {
-    state
-        .client
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| "No HikerAPI token configured".into())
+    state.client.read().await.clone().ok_or_else(|| "No HikerAPI token configured".into())
+}
+
+/// Account autocomplete — same order the API returns (Instagram's own
+/// ranking); no client-side reranking by design.
+#[tauri::command]
+pub async fn search_users(query: String, state: State<'_, AppState>) -> Result<Vec<SearchUser>, String> {
+    let q = query.trim();
+    if q.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let client = client(&state).await?;
+    let users = client.search_accounts(q).await.map_err(|e| e.to_string())?;
+    Ok(users.iter().filter_map(map_search_user).collect())
 }
 
 #[derive(Serialize)]
@@ -273,30 +283,136 @@ pub struct ProfilePreview {
 #[tauri::command]
 pub async fn fetch_profile(
     username: String,
+    end_cursor: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ProfilePreview, String> {
     let client = client(&state).await?;
-    let user = client
-        .user_by_username(&username)
-        .await
-        .map_err(|e| e.to_string())?;
+    let user = client.user_by_username(&username).await.map_err(|e| e.to_string())?;
     let profile = map_profile(&user).ok_or("Could not parse profile payload")?;
-    if profile.is_private {
-        return Ok(ProfilePreview {
-            profile,
-            recent_posts: Vec::new(),
-            end_cursor: None,
-        });
+    if profile.is_private || (profile.media_count == 0 && end_cursor.is_none()) {
+        return Ok(ProfilePreview { profile, recent_posts: Vec::new(), end_cursor: None });
     }
     let page = client
-        .user_medias_chunk(&profile.pk, None)
+        .user_medias_chunk(&profile.pk, end_cursor.as_deref())
         .await
         .map_err(|e| e.to_string())?;
-    Ok(ProfilePreview {
-        end_cursor: page.end_cursor,
-        recent_posts: page.posts,
-        profile,
-    })
+    Ok(ProfilePreview { profile, recent_posts: page.posts, end_cursor: page.end_cursor })
+}
+
+/// Active stories of a profile for the Explorer grid (billed 2 requests).
+#[tauri::command]
+pub async fn fetch_stories(username: String, state: State<'_, AppState>) -> Result<Vec<StoryItem>, String> {
+    let client = client(&state).await?;
+    let user = client.user_by_username(&username).await.map_err(|e| e.to_string())?;
+    let profile = map_profile(&user).ok_or("Could not parse profile payload")?;
+    let items = client.user_stories(&profile.pk).await.map_err(|e| e.to_string())?;
+    Ok(items
+        .iter()
+        .filter_map(|item| {
+            let pk = match item.get("pk") {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(serde_json::Value::Number(n)) => n.to_string(),
+                _ => return None,
+            };
+            let is_video = item
+                .get("video_versions")
+                .and_then(|v| v.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false);
+            let media_url = if is_video {
+                crate::hiker::best_video(item)
+            } else {
+                crate::hiker::best_image(item)
+            }?;
+            let thumb_url = crate::hiker::best_image(item).or_else(|| Some(media_url.clone()));
+            Some(StoryItem {
+                pk,
+                taken_at: parse_ts(item),
+                kind: if is_video { "video".into() } else { "photo".into() },
+                media_url,
+                thumb_url,
+            })
+        })
+        .collect())
+}
+
+/// Download already-fetched resources (e.g. a single story) without
+/// re-fetching them from HikerAPI. Emits `job-progress`.
+#[tauri::command]
+pub async fn download_direct(
+    label: String,
+    subfolder: String,
+    items: Vec<DirectItem>,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    if items.is_empty() {
+        return Err("Nothing to download".into());
+    }
+    let cfg = state.cfg.read().await.clone();
+    let cdn_http = state.cdn_http.clone();
+    let jobs: Arc<JobRegistry> = state.jobs.clone();
+
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let cancel_rx = jobs.register(&job_id);
+    let em = JobEvents::new(&app, job_id.clone(), label.clone());
+    let job_id_task = job_id.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let job_id = job_id_task;
+        let dir = Path::new(&cfg.dest_dir)
+            .join(safe_segment(&label))
+            .join(safe_segment(&subfolder));
+        let result = run_direct_job(&cdn_http, &em, &dir, &items, Some(cancel_rx)).await;
+        match result {
+            Ok(count) => em.done(count, &dir),
+            Err(JobFail::Cancelled) => em.cancelled(),
+            Err(JobFail::Fatal(e)) => em.failed(e),
+        }
+        jobs.finish(&job_id);
+    });
+
+    Ok(job_id)
+}
+
+async fn run_direct_job(
+    cdn_http: &reqwest::Client,
+    em: &JobEvents,
+    dir: &Path,
+    items: &[DirectItem],
+    cancel: Option<tokio::sync::watch::Receiver<bool>>,
+) -> Result<usize, JobFail> {
+    std::fs::create_dir_all(dir)?;
+    let skip = existing_stems(dir);
+    let mut files_done = 0usize;
+    let mut bytes_total = 0u64;
+
+    for item in items {
+        if cancel.as_ref().map(|c| *c.borrow()).unwrap_or(false) {
+            return Err(JobFail::Cancelled);
+        }
+        let base = taken_at_name(item.taken_at, &item.pk);
+        if stem_exists(&skip, &base) {
+            continue;
+        }
+        match download_one(
+            cdn_http,
+            &item.url,
+            &dir.join(&base),
+            item.taken_at,
+            em,
+            files_done + 1,
+            &mut bytes_total,
+            cancel.as_ref().cloned(),
+        )
+        .await
+        {
+            Ok(_) => files_done += 1,
+            Err(JobFail::Fatal(e)) if e.contains("Cancelled") => return Err(JobFail::Cancelled),
+            Err(_) => continue, // skip failed file, keep going
+        }
+    }
+    Ok(files_done)
 }
 
 /// Download everything selected from a profile. Emits `job-progress`.
@@ -312,31 +428,51 @@ pub async fn enqueue_profile_download(
     let cdn_http = state.cdn_http.clone();
     let jobs: Arc<JobRegistry> = state.jobs.clone();
 
+    // Backend dedup: never run two profile jobs for the same username.
+    let in_flight = state.in_flight.clone();
+    let key = format!("profile:{}", username.to_lowercase());
+    {
+        let mut guard = state.in_flight.lock().unwrap();
+        if !guard.insert(key.clone()) {
+            return Err(format!("A download for @{username} is already running"));
+        }
+    }
+
     let job_id = uuid::Uuid::new_v4().to_string();
     let username = username.to_lowercase();
 
     // Resolve profile first so stories/highlights can reuse its pk.
-    let user = client
-        .user_by_username(&username)
-        .await
-        .map_err(|e| e.to_string())?;
-    let profile = map_profile(&user).ok_or("Could not parse profile payload")?;
+    let user = match client.user_by_username(&username).await {
+        Ok(u) => u,
+        Err(e) => {
+            in_flight.lock().unwrap().remove(&key);
+            return Err(e.to_string());
+        }
+    };
+    let profile = match map_profile(&user) {
+        Some(p) => p,
+        None => {
+            in_flight.lock().unwrap().remove(&key);
+            return Err("Could not parse profile payload".into());
+        }
+    };
 
     // Stories (2 req) / highlights (2 req + 1 per reel) fetched up front so
-    // a cancelled job never wastes their quota mid-run.
+    // a cancelled job never wastes their quota mid-run. Fatal API errors
+    // abort the enqueue; anything transient degrades to an empty section.
     let stories_items = if opts.stories {
-        client
-            .user_stories(&profile.pk)
-            .await
-            .map_err(|e| e.to_string())?
+        fetch_soft(|| client.user_stories(&profile.pk)).await.map_err(|e| {
+            in_flight.lock().unwrap().remove(&key);
+            e
+        })?
     } else {
         Vec::new()
     };
     let highlights_tray = if opts.highlights {
-        client
-            .user_highlights(&profile.pk)
-            .await
-            .map_err(|e| e.to_string())?
+        fetch_soft(|| client.user_highlights(&profile.pk)).await.map_err(|e| {
+            in_flight.lock().unwrap().remove(&key);
+            e
+        })?
     } else {
         Vec::new()
     };
@@ -344,21 +480,12 @@ pub async fn enqueue_profile_download(
     let cancel_rx = jobs.register(&job_id);
     let em = JobEvents::new(&app, job_id.clone(), format!("@{}", profile.username));
     let dir = Path::new(&cfg.dest_dir).join(safe_segment(&profile.username));
-
     let job_id_task = job_id.clone();
+
     tauri::async_runtime::spawn(async move {
         let job_id = job_id_task;
         let result = run_profile_job(
-            &client,
-            &cdn_http,
-            &cfg,
-            &em,
-            &dir,
-            &profile,
-            &opts,
-            stories_items,
-            highlights_tray,
-            Some(cancel_rx),
+            &client, &cdn_http, &cfg, &em, &dir, &profile, &opts, stories_items, highlights_tray, Some(cancel_rx),
         )
         .await;
         match result {
@@ -367,6 +494,7 @@ pub async fn enqueue_profile_download(
             Err(JobFail::Fatal(e)) => em.failed(e),
         }
         jobs.finish(&job_id);
+        in_flight.lock().unwrap().remove(&key);
     });
 
     Ok(job_id)
@@ -391,12 +519,26 @@ async fn run_profile_job(
     let mut bytes_total = 0u64;
     let is_cancelled = || cancel.as_ref().map(|c| *c.borrow()).unwrap_or(false);
 
+    /// Per-file failures are logged-and-skipped so one dead CDN link or a
+    /// flaky network never kills the whole archive run.
+    macro_rules! try_file {
+        ($fut:expr) => {
+            match $fut.await {
+                Ok(path) => path,
+                Err(JobFail::Fatal(e)) if e.contains("Cancelled") => {
+                    return Err(JobFail::Cancelled)
+                }
+                Err(_) => continue,
+            }
+        };
+    }
+
     // ---- avatar ----
     if opts.avatar {
         if let Some(url) = &profile.avatar_url {
             let base = dir.join(format!("avatar_{}", safe_segment(&profile.pk)));
             if !stem_exists(&skip, base.file_name().unwrap().to_string_lossy().as_ref()) {
-                download_one(
+                if download_one(
                     cdn_http,
                     url,
                     &base,
@@ -406,8 +548,11 @@ async fn run_profile_job(
                     &mut bytes_total,
                     cancel.as_ref().cloned(),
                 )
-                .await?;
-                files_done += 1;
+                .await
+                .is_ok()
+                {
+                    files_done += 1;
+                }
             }
         }
     }
@@ -437,12 +582,7 @@ async fn run_profile_job(
                     }
                 }
                 considered += 1;
-                if reels_only
-                    && !post
-                        .resources
-                        .iter()
-                        .any(|r| r.kind == crate::models::MediaKind::Video)
-                {
+                if reels_only && !post.resources.iter().any(|r| r.kind == crate::models::MediaKind::Video) {
                     continue;
                 }
                 let base = taken_at_name(post.taken_at, &post.code);
@@ -456,7 +596,7 @@ async fn run_profile_job(
                     } else {
                         posts_dir.join(&base)
                     };
-                    let out = download_one(
+                    let out = try_file!(download_one(
                         cdn_http,
                         &resource.url,
                         &dest_base,
@@ -465,8 +605,7 @@ async fn run_profile_job(
                         files_done + idx + 1,
                         &mut bytes_total,
                         cancel.as_ref().cloned(),
-                    )
-                    .await?;
+                    ));
                     if idx == 0 {
                         write_sidecar(cfg, &posts_dir, post, &out)?;
                     }
@@ -500,7 +639,7 @@ async fn run_profile_job(
                 continue;
             }
             for resource in &crate::hiker::collect_resources(item, infer_video(item)) {
-                download_one(
+                try_file!(download_one(
                     cdn_http,
                     &resource.url,
                     &stories_dir.join(&base),
@@ -509,8 +648,7 @@ async fn run_profile_job(
                     files_done + 1,
                     &mut bytes_total,
                     cancel.as_ref().cloned(),
-                )
-                .await?;
+                ));
                 files_done += 1;
             }
         }
@@ -524,9 +662,7 @@ async fn run_profile_job(
             if is_cancelled() {
                 return Err(JobFail::Cancelled);
             }
-            let Some(hl_pk) = tray.get("pk").and_then(|v| v.as_str()) else {
-                continue;
-            };
+            let Some(hl_pk) = tray.get("pk").and_then(|v| v.as_str()) else { continue };
             let title = tray
                 .get("title")
                 .and_then(|v| v.as_str())
@@ -550,7 +686,7 @@ async fn run_profile_job(
                     continue;
                 }
                 for resource in &crate::hiker::collect_resources(item, infer_video(item)) {
-                    download_one(
+                    try_file!(download_one(
                         cdn_http,
                         &resource.url,
                         &hl_dir.join(&base),
@@ -559,8 +695,7 @@ async fn run_profile_job(
                         files_done + 1,
                         &mut bytes_total,
                         cancel.as_ref().cloned(),
-                    )
-                    .await?;
+                    ));
                     files_done += 1;
                 }
             }
@@ -605,26 +740,40 @@ pub async fn download_post(
     let cdn_http = state.cdn_http.clone();
     let jobs: Arc<JobRegistry> = state.jobs.clone();
 
-    let media = client
-        .media_by_code(&code)
-        .await
-        .map_err(|e| e.to_string())?;
-    let post = map_post(&media).ok_or("Could not parse media payload")?;
+    // Backend dedup: same shortcode cannot run twice at once.
+    let in_flight = state.in_flight.clone();
+    let key = format!("post:{}", code.to_lowercase());
+    {
+        let mut guard = state.in_flight.lock().unwrap();
+        if !guard.insert(key.clone()) {
+            return Err(format!("Post {code} is already downloading"));
+        }
+    }
+
+    let media = match client.media_by_code(&code).await {
+        Ok(m) => m,
+        Err(e) => {
+            in_flight.lock().unwrap().remove(&key);
+            return Err(e.to_string());
+        }
+    };
+    let post = match map_post(&media) {
+        Some(p) => p,
+        None => {
+            state.in_flight.lock().unwrap().remove(&key);
+            return Err("Could not parse media payload".into());
+        }
+    };
     let job_id = uuid::Uuid::new_v4().to_string();
 
     let cancel_rx = jobs.register(&job_id);
     let em = JobEvents::new(
         &app,
         job_id.clone(),
-        format!(
-            "@{}",
-            post.owner_username
-                .clone()
-                .unwrap_or_else(|| post.code.clone())
-        ),
+        format!("@{}", post.owner_username.clone().unwrap_or_else(|| post.code.clone())),
     );
-
     let job_id_task = job_id.clone();
+
     tauri::async_runtime::spawn(async move {
         let job_id = job_id_task;
         let dir = Path::new(&cfg.dest_dir).join(safe_segment(
@@ -640,6 +789,7 @@ pub async fn download_post(
             Err(JobFail::Fatal(e)) => em.failed(e),
         }
         jobs.finish(&job_id);
+        in_flight.lock().unwrap().remove(&key);
     });
 
     Ok(job_id)
@@ -657,14 +807,18 @@ async fn run_single_post(
     let base = taken_at_name(post.taken_at, &post.code);
     let total = post.resources.len();
     let mut bytes_total = 0u64;
+    let mut downloaded = 0usize;
 
     for (idx, resource) in post.resources.iter().enumerate() {
+        if cancel.as_ref().map(|c| *c.borrow()).unwrap_or(false) {
+            return Err(JobFail::Cancelled);
+        }
         let dest_base = if total > 1 {
             dir.join(format!("{base}_{}", idx + 1))
         } else {
             dir.join(&base)
         };
-        let out = download_one(
+        match download_one(
             cdn_http,
             &resource.url,
             &dest_base,
@@ -674,12 +828,19 @@ async fn run_single_post(
             &mut bytes_total,
             cancel.as_ref().cloned(),
         )
-        .await?;
-        if idx == 0 {
-            write_sidecar(cfg, dir, post, &out)?;
+        .await
+        {
+            Ok(out) => {
+                if idx == 0 {
+                    write_sidecar(cfg, dir, post, &out)?;
+                }
+                downloaded += 1;
+            }
+            Err(JobFail::Fatal(e)) if e.contains("Cancelled") => return Err(JobFail::Cancelled),
+            Err(_) => continue, // skip failed resource after retries
         }
     }
-    Ok(total.min(1))
+    Ok(downloaded)
 }
 
 #[tauri::command]

@@ -58,6 +58,25 @@ export const useJobsStore = defineStore("jobs", () => {
     await onJobProgress(apply);
   }
 
+  /** Insert a card before the first backend event arrives so the job is
+      visible immediately (merge-on-event by id keeps it consistent). */
+  function addPlaceholder(id: string, label: string) {
+    if (!jobs.has(id)) {
+      jobs.set(id, reactive({
+        id,
+        label,
+        state: "fetching",
+        currentFile: 0,
+        totalFiles: 0,
+        bytesDone: 0,
+        fileName: "",
+        error: undefined,
+        resultCount: undefined,
+        resultDir: undefined,
+      }));
+    }
+  }
+
   async function cancel(id: string) {
     await cancelJob(id);
   }
@@ -70,5 +89,5 @@ export const useJobsStore = defineStore("jobs", () => {
     }
   }
 
-  return { jobs, init, cancel, clearFinished };
+  return { jobs, init, addPlaceholder, cancel, clearFinished };
 });

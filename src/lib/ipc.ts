@@ -75,6 +75,29 @@ export interface ProfilePreview {
   end_cursor: string | null;
 }
 
+export interface SearchUser {
+  pk: string;
+  username: string;
+  full_name?: string;
+  is_verified: boolean;
+  is_private: boolean;
+  avatar_url?: string;
+}
+
+export interface StoryItem {
+  pk: string;
+  taken_at?: number;
+  kind: "photo" | "video";
+  media_url: string;
+  thumb_url?: string;
+}
+
+export interface DirectItem {
+  url: string;
+  taken_at?: number;
+  pk: string;
+}
+
 export interface ProfileOptions {
   posts: boolean;
   reels: boolean;
@@ -88,8 +111,24 @@ export async function resolveInput(input: string): Promise<Target> {
   return invoke("resolve_input", { input });
 }
 
-export async function fetchProfile(username: string): Promise<ProfilePreview> {
-  return invoke("fetch_profile", { username });
+export async function fetchProfile(username: string, endCursor?: string | null): Promise<ProfilePreview> {
+  return invoke("fetch_profile", { username, endCursor: endCursor ?? null });
+}
+
+export async function searchUsers(query: string): Promise<SearchUser[]> {
+  return invoke("search_users", { query });
+}
+
+export async function fetchStories(username: string): Promise<StoryItem[]> {
+  return invoke("fetch_stories", { username });
+}
+
+export async function downloadDirect(
+  label: string,
+  subfolder: string,
+  items: DirectItem[],
+): Promise<string> {
+  return invoke("download_direct", { label, subfolder, items });
 }
 
 export async function downloadPost(code: string): Promise<string> {

@@ -211,6 +211,20 @@ impl HikerClient {
             .unwrap_or(empty))
     }
 
+    /// GET /v3/fbsearch/accounts — account autocomplete. Order is the API's
+    /// own (same surface Instagram's search uses); we deliberately do NOT
+    /// rerank it client-side so results feel identical to the real app.
+    pub async fn search_accounts(&self, query: &str) -> Result<Vec<Value>, HikerError> {
+        let (v, _) = self
+            .get("/v3/fbsearch/accounts", &[("query", query)])
+            .await?;
+        let empty = Vec::new();
+        Ok(v.get("users")
+            .and_then(|u| u.as_array())
+            .cloned()
+            .unwrap_or(empty))
+    }
+
     /// GET /v2/user/highlights (billed 2 requests) → `{"response": {"tray": [...]}}`.
     pub async fn user_highlights(&self, user_id: &str) -> Result<Vec<Value>, HikerError> {
         let (v, _) = self
@@ -404,5 +418,19 @@ pub fn map_post(media: &serde_json::Value) -> Option<crate::models::Post> {
         owner_pk: media["user"]["pk"].as_str().map(String::from),
         resources,
         thumbnail_url,
+    })
+}
+
+/// Map an fbsearch user object onto our SearchUser DTO.
+pub fn map_search_user(u: &Value) -> Option<crate::models::SearchUser> {
+    let pk = str_or_num(u.get("pk")?)?;
+    let username = u.get("username").and_then(|v| v.as_str())?.to_string();
+    Some(crate::models::SearchUser {
+        pk,
+        username,
+        full_name: u.get("full_name").and_then(|v| v.as_str()).map(String::from),
+        is_verified: u.get("is_verified").and_then(|v| v.as_bool()).unwrap_or(false),
+        is_private: u.get("is_private").and_then(|v| v.as_bool()).unwrap_or(false),
+        avatar_url: u.get("profile_pic_url").and_then(|v| v.as_str()).map(String::from),
     })
 }

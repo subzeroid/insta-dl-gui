@@ -6,6 +6,7 @@ export const router = createRouter({
     { path: "/", redirect: "/download" },
     { path: "/onboarding", component: () => import("./views/OnboardingView.vue") },
     { path: "/download", component: () => import("./views/DownloadView.vue") },
+    { path: "/explore", component: () => import("./views/ExplorerView.vue") },
     { path: "/queue", component: () => import("./views/QueueView.vue") },
     { path: "/settings", component: () => import("./views/SettingsView.vue") },
   ],
