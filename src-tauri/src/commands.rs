@@ -1005,6 +1005,11 @@ mod tests {
     }
 
     #[test]
+    fn all_skipped_downloads_are_a_successful_noop() {
+        assert!(matches!(finish_downloads(0, None), Ok(0)));
+    }
+
+    #[test]
     fn cdn_cancellation_stays_typed() {
         assert!(matches!(
             JobFail::from(CdnError::Cancelled),
@@ -1020,6 +1025,25 @@ mod tests {
         assert_eq!(
             direct_job_key("Nike", "Stories", &first),
             direct_job_key("nike", "stories", &second)
+        );
+    }
+
+    #[test]
+    fn direct_dedupe_distinguishes_destinations_and_item_sets() {
+        let first = vec![direct_item("1")];
+        let second = vec![direct_item("2")];
+
+        assert_ne!(
+            direct_job_key("nike", "stories", &first),
+            direct_job_key("nike", "stories", &second)
+        );
+        assert_ne!(
+            direct_job_key("nike", "stories", &first),
+            direct_job_key("nike", "avatar", &first)
+        );
+        assert_ne!(
+            direct_job_key("nike", "stories", &first),
+            direct_job_key("adidas", "stories", &first)
         );
     }
 

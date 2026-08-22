@@ -746,6 +746,36 @@ mod tests {
         assert_eq!(fs::read(&existing).unwrap(), b"old");
     }
 
+    #[tokio::test]
+    async fn simultaneous_streams_commit_to_distinct_final_paths() {
+        let dir = tmp_dir("concurrent-streams");
+        let server = MockServer::start().await;
+        Mock::given(path("/img"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/jpeg")
+                    .set_body_bytes(JPEG),
+            )
+            .mount(&server)
+            .await;
+
+        let http = client();
+        let url = format!("{}/img", server.uri());
+        let base = dir.join("same");
+        let (first, second) = tokio::join!(
+            stream_to_file_with_budget(&http, &url, &base, None, |_| {}, None, 1024 * 1024),
+            stream_to_file_with_budget(&http, &url, &base, None, |_| {}, None, 1024 * 1024),
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+
+        assert_ne!(first.path, second.path);
+        assert!(first.path.exists());
+        assert!(second.path.exists());
+        assert_eq!(fs::read(first.path).unwrap(), JPEG);
+        assert_eq!(fs::read(second.path).unwrap(), JPEG);
+    }
+
     #[test]
     fn simultaneous_reservations_get_distinct_paths() {
         let dir = tmp_dir("reservations");
