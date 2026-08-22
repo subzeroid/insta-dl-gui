@@ -11,7 +11,7 @@ import {
   type ProfileOptions,
   type ProfilePreview,
 } from "../lib/ipc";
-import { buildProfileOptions } from "../lib/profileOptions";
+import { buildProfileOptions, hasProfileSelection } from "../lib/profileOptions";
 
 const app = useAppStore();
 const jobs = useJobsStore();
@@ -34,6 +34,7 @@ const opts = computed<ProfileOptions>(() => {
     max_posts: max !== null && max > 0 ? max : null,
   });
 });
+const canDownload = computed(() => hasProfileSelection(opts.value));
 
 const posts = ref(true);
 const reels = ref(false);
@@ -69,7 +70,7 @@ async function submit() {
 }
 
 async function startProfileDownload() {
-  if (!preview.value) return;
+  if (!preview.value || !canDownload.value) return;
   const username = preview.value.profile.username;
   try {
     const id = await enqueueProfileDownload(username, opts.value);
@@ -177,7 +178,7 @@ onMounted(() => {
           <p class="text-xs text-slate-500">saves to <span class="font-mono">{{ app.destDir }}/{{ preview.profile.username }}/</span></p>
           <button
             class="btn-primary shrink-0"
-            :disabled="!(posts || reels || stories || highlights || avatar)"
+            :disabled="!canDownload"
             @click="startProfileDownload"
           >
             Download

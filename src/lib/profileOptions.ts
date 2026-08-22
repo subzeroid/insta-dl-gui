@@ -14,3 +14,7 @@ export function buildProfileOptions(
     max_posts: null,
   };
 }
+
+export function hasProfileSelection(options: Readonly<ProfileOptions>): boolean {
+  return options.posts || options.reels || options.stories || options.highlights || options.avatar;
+}

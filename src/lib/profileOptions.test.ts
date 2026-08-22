@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildProfileOptions } from "./profileOptions";
+import { buildProfileOptions, hasProfileSelection } from "./profileOptions";
 
 const selections = {
   posts: true,
@@ -24,5 +24,11 @@ describe("buildProfileOptions", () => {
 
   it("preserves public-profile selections", () => {
     expect(buildProfileOptions(false, selections)).toEqual(selections);
+  });
+
+  it("does not treat hidden private-profile choices as downloadable", () => {
+    const privateOptions = buildProfileOptions(true, selections);
+
+    expect(hasProfileSelection(privateOptions)).toBe(false);
   });
 });
