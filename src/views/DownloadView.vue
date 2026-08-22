@@ -46,7 +46,7 @@ const maxPosts = ref<number | null>(null); // null = all
 
 async function submit() {
   const raw = input.value.trim();
-  if (!raw || busy.value) return;
+  if (!raw || busy.value || profileDownloadBusy.value) return;
   error.value = null;
   notice.value = null;
   preview.value = null;
@@ -112,7 +112,7 @@ onMounted(() => {
         spellcheck="false"
         autocomplete="off"
       />
-      <button class="btn-primary shrink-0" type="submit" :disabled="busy || !input.trim()">
+      <button class="btn-primary shrink-0" type="submit" :disabled="busy || profileDownloadBusy || !input.trim()">
         {{ previewLoading ? "…" : "Fetch" }}
       </button>
     </form>
