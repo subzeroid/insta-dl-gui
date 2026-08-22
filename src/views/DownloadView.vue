@@ -22,14 +22,17 @@ const notice = ref<string | null>(null);
 const preview = ref<ProfilePreview | null>(null);
 const previewLoading = ref(false);
 
-const opts = computed<ProfileOptions>(() => ({
-  posts: posts.value,
-  reels: reels.value,
-  stories: stories.value,
-  highlights: highlights.value,
-  avatar: avatar.value,
-  max_posts: maxPosts.value > 0 ? maxPosts.value : null,
-}));
+const opts = computed<ProfileOptions>(() => {
+  const max = maxPosts.value;
+  return {
+    posts: posts.value,
+    reels: reels.value,
+    stories: stories.value,
+    highlights: highlights.value,
+    avatar: avatar.value,
+    max_posts: max !== null && max > 0 ? max : null,
+  };
+});
 
 const posts = ref(true);
 const reels = ref(false);
