@@ -677,7 +677,9 @@ async fn run_profile_job(
     if opts.posts || opts.reels {
         let reels_only = opts.reels && !opts.posts;
         let posts_dir = dir.join("posts");
-        std::fs::create_dir_all(&posts_dir)?;
+        if let Err(error) = std::fs::create_dir_all(&posts_dir) {
+            return finish_downloads(files_done, Some(error.to_string()));
+        }
         let mut cursor: Option<String> = None;
         let mut considered: u64 = 0;
         loop {
@@ -752,7 +754,9 @@ async fn run_profile_job(
     // ---- stories ----
     if opts.stories && !stories_items.is_empty() {
         let stories_dir = dir.join("stories");
-        std::fs::create_dir_all(&stories_dir)?;
+        if let Err(error) = std::fs::create_dir_all(&stories_dir) {
+            return finish_downloads(files_done, Some(error.to_string()));
+        }
         for item in &stories_items {
             if is_cancelled() {
                 return Err(JobFail::Cancelled);
@@ -782,7 +786,9 @@ async fn run_profile_job(
     // ---- highlights ----
     if opts.highlights && !highlights_tray.is_empty() {
         let hl_root = dir.join("highlights");
-        std::fs::create_dir_all(&hl_root)?;
+        if let Err(error) = std::fs::create_dir_all(&hl_root) {
+            return finish_downloads(files_done, Some(error.to_string()));
+        }
         for tray in &highlights_tray {
             if is_cancelled() {
                 return Err(JobFail::Cancelled);
@@ -797,7 +803,9 @@ async fn run_profile_job(
                 .filter(|t| !t.trim_matches('_').is_empty())
                 .unwrap_or_else(|| hl_pk.to_string());
             let hl_dir = hl_root.join(format!("{}_{}", safe_segment(hl_pk), title));
-            std::fs::create_dir_all(&hl_dir)?;
+            if let Err(error) = std::fs::create_dir_all(&hl_dir) {
+                return finish_downloads(files_done, Some(error.to_string()));
+            }
             let items = match client.highlight_items(hl_pk).await {
                 Ok(items) => items,
                 Err(error) => return finish_downloads(files_done, Some(error.to_string())),
