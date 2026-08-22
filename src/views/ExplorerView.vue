@@ -69,11 +69,16 @@ function fmt(n?: number): string {
 function onQueryInput() {
   window.clearTimeout(debounce);
   const seq = requests.autocomplete.begin();
+  requests.profile.invalidate();
+  requests.stories.invalidate();
+  loading.value = false;
+  loadingMore.value = false;
+  storiesLoading.value = false;
+  suggestions.value = [];
+  suggestOpen.value = false;
+  highlight.value = -1;
   const q = query.value.trim();
   if (q.length < 2) {
-    suggestions.value = [];
-    suggestOpen.value = false;
-    highlight.value = -1;
     return;
   }
   debounce = window.setTimeout(async () => {

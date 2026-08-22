@@ -69,6 +69,7 @@ describe("DownloadView concurrency", () => {
     await wrapper.get("input").setValue("nike");
 
     await wrapper.get("form").trigger("submit");
+    expect(wrapper.get("input").attributes("disabled")).toBeDefined();
     await wrapper.get("form").trigger("submit");
 
     expect(ipc.resolveInput).toHaveBeenCalledTimes(1);
@@ -90,6 +91,7 @@ describe("DownloadView concurrency", () => {
     expect(download).toBeDefined();
 
     await download!.trigger("click");
+    expect(wrapper.get("input").attributes("disabled")).toBeDefined();
     await download!.trigger("click");
 
     expect(ipc.enqueueProfileDownload).toHaveBeenCalledTimes(1);

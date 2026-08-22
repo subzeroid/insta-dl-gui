@@ -111,6 +111,7 @@ onMounted(() => {
         placeholder="@username or instagram.com/p/… link"
         spellcheck="false"
         autocomplete="off"
+        :disabled="busy || profileDownloadBusy"
       />
       <button class="btn-primary shrink-0" type="submit" :disabled="busy || profileDownloadBusy || !input.trim()">
         {{ previewLoading ? "…" : "Fetch" }}

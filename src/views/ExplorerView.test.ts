@@ -86,6 +86,42 @@ describe("ExplorerView async wiring", () => {
     expect(wrapper.findAll("button").some((button) => button.text() === "nike")).toBe(false);
   });
 
+  it("closes old suggestions as soon as a new query intent starts", async () => {
+    vi.useFakeTimers();
+    ipc.searchUsers.mockResolvedValueOnce([
+      { pk: "1", username: "nike", is_verified: true, is_private: false },
+    ]);
+    ipc.fetchProfile.mockResolvedValue(preview);
+    const wrapper = render();
+    const input = wrapper.get("input");
+    await input.setValue("nike");
+    vi.advanceTimersByTime(250);
+    await flushPromises();
+    expect(wrapper.findAll("button").some((button) => button.text().includes("nike"))).toBe(true);
+
+    await input.setValue("nikex");
+    await input.trigger("keydown", { key: "Enter" });
+
+    expect(ipc.fetchProfile).not.toHaveBeenCalled();
+    expect(wrapper.findAll("button").some((button) => button.text().includes("nike"))).toBe(false);
+  });
+
+  it("does not commit a pending profile after the user edits the query", async () => {
+    ipc.resolveInput.mockResolvedValue({ kind: "profile", username: "nike" });
+    const pending = deferred<typeof preview>();
+    ipc.fetchProfile.mockReturnValue(pending.promise);
+    const wrapper = render();
+    const input = wrapper.get("input");
+    await input.setValue("nike");
+    await wrapper.get("form").trigger("submit");
+    await input.setValue("adidas");
+    pending.resolve(preview);
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("Nike");
+    expect(wrapper.text()).not.toContain("Loading profile");
+  });
+
   it("suppresses duplicate profile actions and releases the busy state after failure", async () => {
     ipc.resolveInput.mockResolvedValue({ kind: "profile", username: "nike" });
     ipc.fetchProfile.mockResolvedValue(preview);
