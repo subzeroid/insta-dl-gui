@@ -1,5 +1,9 @@
-mod config;
-mod hiker;
+pub mod cdn;
+pub mod commands;
+pub mod config;
+pub mod hiker;
+pub mod models;
+pub mod targets;
 
 use std::sync::Arc;
 
@@ -28,22 +32,16 @@ impl From<&Config> for ConfigState {
     }
 }
 
-struct AppState {
+pub struct AppState {
     cfg: RwLock<Config>,
     client: RwLock<Option<Arc<HikerClient>>>,
+    /// Separate HTTP client for CDN downloads: redirects are followed
+    /// manually by `cdn.rs` so every hop gets validated.
+    cdn_http: reqwest::Client,
 }
 
 fn err_string(e: impl std::fmt::Display) -> String {
     e.to_string()
-}
-
-async fn require_client(state: &AppState) -> Result<Arc<HikerClient>, String> {
-    state
-        .client
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| "No HikerAPI token configured".to_string())
 }
 
 #[tauri::command]
@@ -71,7 +69,12 @@ async fn validate_token(
 
 #[tauri::command]
 async fn get_balance(state: tauri::State<'_, AppState>) -> Result<Balance, String> {
-    let client = require_client(&state).await?;
+    let client = state
+        .client
+        .read()
+        .await
+        .clone()
+        .ok_or_else(|| "No HikerAPI token configured".to_string())?;
     client.balance().await.map_err(err_string)
 }
 
@@ -98,6 +101,10 @@ async fn save_settings(
 pub fn run() {
     let cfg = Config::load();
     let client = cfg.token.as_ref().map(|t| Arc::new(HikerClient::new(t.clone())));
+    let cdn_http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("cdn http client");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -105,12 +112,16 @@ pub fn run() {
         .manage(AppState {
             cfg: RwLock::new(cfg),
             client: RwLock::new(client),
+            cdn_http,
         })
         .invoke_handler(tauri::generate_handler![
             config_state,
             validate_token,
             get_balance,
             save_settings,
+            commands::resolve_input,
+            commands::fetch_post,
+            commands::download_post,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

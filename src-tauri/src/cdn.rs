@@ -1,0 +1,334 @@
+//! CDN streamer: the single place every Instagram CDN download goes through.
+//! Port of insto's `_cdn.py` safety rules:
+//! HTTPS-only, host allowlist, manual redirects (≤5), MIME magic-byte
+//! cross-check, extension allowlist, byte budget, disk guard, atomic
+//! `.part` writes with collision suffixes, mtime preservation.
+
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use futures_util::StreamExt;
+
+pub const ALLOWED_HOST_SUFFIXES: [&str; 2] = ["cdninstagram.com", "fbcdn.net"];
+const MAX_REDIRECTS: usize = 5;
+const SNIFF_SIZE: usize = 512;
+const DEFAULT_BYTE_BUDGET: u64 = 500 * 1024 * 1024;
+const MIN_FREE_DISK: u64 = 1024 * 1024 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+pub enum CdnError {
+    #[error("CDN URL must be https")]
+    NotHttps,
+    #[error("CDN host {0} is not allowed")]
+    HostNotAllowed(String),
+    #[error("Too many redirects")]
+    TooManyRedirects,
+    #[error("Redirect without Location header")]
+    BadRedirect,
+    #[error("CDN GET failed: HTTP {0}")]
+    Http(u16),
+    #[error("Empty response body")]
+    EmptyBody,
+    #[error("Unknown content type (sniffed {sniffed:?}, declared {declared:?})")]
+    UnknownContent {
+        sniffed: Option<String>,
+        declared: Option<String>,
+    },
+    #[error("File exceeds byte budget ({budget} bytes)")]
+    BudgetExceeded { budget: u64 },
+    #[error("Not enough free disk space in {}", .0.display())]
+    NoDiskSpace(PathBuf),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Network error: {0}")]
+    Network(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Sniffed {
+    Jpeg,
+    Png,
+    Webp,
+    Mp4,
+}
+
+impl Sniffed {
+    fn detect(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+            return Some(Self::Jpeg);
+        }
+        if bytes.len() >= 8 && bytes[..8] == [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A] {
+            return Some(Self::Png);
+        }
+        if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+            return Some(Self::Webp);
+        }
+        // ISOBMFF: box size at [0..4], brand at [4..8]
+        if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+            return Some(Self::Mp4);
+        }
+        None
+    }
+
+    fn mime(self) -> &'static str {
+        match self {
+            Self::Jpeg => "image/jpeg",
+            Self::Png => "image/png",
+            Self::Webp => "image/webp",
+            Self::Mp4 => "video/mp4",
+        }
+    }
+
+    fn ext(self) -> &'static str {
+        match self {
+            Self::Jpeg => "jpg",
+            Self::Png => "png",
+            Self::Webp => "webp",
+            Self::Mp4 => "mp4",
+        }
+    }
+}
+
+fn normalize_ct(ct: &str) -> String {
+    ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase()
+}
+
+/// Content-Type → extension map used when the sniff is inconclusive for ext
+/// decisions but valid for cross-checking. jpeg/jpg treated as aliases.
+fn ct_compatible(declared: &str, sniffed: Sniffed) -> bool {
+    let d = normalize_ct(declared);
+    if d.is_empty() || d == "application/octet-stream" || d == "binary/octet-stream" {
+        return true; // no usable declaration to contradict the sniff
+    }
+    let s = sniffed.mime();
+    if d == s {
+        return true;
+    }
+    if sniffed == Sniffed::Jpeg && (d == "image/jpg" || d == "image/pjpeg") {
+        return true;
+    }
+    if sniffed == Sniffed::Mp4 && (d == "video/quicktime" || d == "video/mp4") {
+        return true;
+    }
+    false
+}
+
+fn validate_url(url: &str) -> Result<(), CdnError> {
+    let parsed = url::Url::parse(url).map_err(|_| CdnError::Network(format!("bad url: {url}")))?;
+    if parsed.scheme() != "https" {
+        return Err(CdnError::NotHttps);
+    }
+    let host = parsed.host().ok_or_else(|| CdnError::HostNotAllowed(url.into()))?;
+    let host_str = host.to_string();
+    if !ALLOWED_HOST_SUFFIXES
+        .iter()
+        .any(|s| host_str == *s || host_str.ends_with(&format!(".{s}")))
+    {
+        return Err(CdnError::HostNotAllowed(host_str));
+    }
+    Ok(())
+}
+
+fn resolve_collision(dest: &Path) -> PathBuf {
+    if !dest.exists() {
+        return dest.to_path_buf();
+    }
+    let stem = dest.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+    let parent = dest.parent().unwrap_or(Path::new("."));
+    let ext = dest.extension().and_then(|e| e.to_str()).unwrap_or("");
+    for i in 1..1000u32 {
+        let candidate = parent.join(format!("{stem}_{i}.{ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    dest.to_path_buf()
+}
+
+fn check_disk_space(dir: &Path) -> Result<(), CdnError> {
+    if let Some(parent) = dir.parent() {
+        let _ = fs::create_dir_all(parent);
+        let target = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+        if let Ok(free) = fs2::free_space(&target) {
+            if free < MIN_FREE_DISK {
+                return Err(CdnError::NoDiskSpace(target));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub struct DownloadOutcome {
+    pub path: PathBuf,
+    pub bytes: u64,
+}
+
+/// Stream `url` into `<dest_base>.<ext>` enforcing all safety rules.
+/// `progress` receives cumulative byte counts per chunk.
+#[allow(clippy::too_many_arguments)]
+pub async fn stream_to_file<F>(
+    http: &reqwest::Client,
+    url: &str,
+    dest_base: &Path,
+    taken_at_unix: Option<i64>,
+    mut progress: F,
+) -> Result<DownloadOutcome, CdnError>
+where
+    F: FnMut(u64),
+{
+    validate_url(url)?;
+
+    let mut current = url.to_string();
+    let mut hops = 0usize;
+    let resp = loop {
+        let r = http
+            .get(&current)
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| CdnError::Network(e.to_string()))?;
+        if r.status().is_redirection() {
+            hops += 1;
+            if hops > MAX_REDIRECTS {
+                return Err(CdnError::TooManyRedirects);
+            }
+            let loc = r
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .ok_or(CdnError::BadRedirect)?
+                .to_string();
+            validate_url(&loc)?;
+            current = loc;
+            continue;
+        }
+        break r;
+    };
+
+    if !resp.status().is_success() {
+        return Err(CdnError::Http(resp.status().as_u16()));
+    }
+
+    let declared_ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(normalize_ct);
+
+    // Buffer up to SNIFF_SIZE before touching disk so MIME checks happen
+    // before any file exists.
+    let mut stream = resp.bytes_stream();
+    let mut sniff = Vec::with_capacity(SNIFF_SIZE);
+    while sniff.len() < SNIFF_SIZE {
+        match stream.next().await {
+            Some(Ok(chunk)) => {
+                let take = (SNIFF_SIZE - sniff.len()).min(chunk.len());
+                sniff.extend_from_slice(&chunk[..take]);
+                if chunk.len() > take {
+                    // keep remainder for writing below
+                    sniff.extend_from_slice(&chunk[take..]);
+                    break;
+                }
+            }
+            Some(Err(e)) => return Err(CdnError::Network(e.to_string())),
+            None => break,
+        }
+    }
+    if sniff.is_empty() {
+        return Err(CdnError::EmptyBody);
+    }
+    let kind =
+        Sniffed::detect(&sniff).ok_or(CdnError::UnknownContent {
+            sniffed: None,
+            declared: declared_ct.clone(),
+        })?;
+    if let Some(ct) = &declared_ct {
+        if !ct_compatible(ct, kind) {
+            return Err(CdnError::UnknownContent {
+                sniffed: Some(kind.mime().into()),
+                declared: Some(ct.clone()),
+            });
+        }
+    }
+
+    let final_path = resolve_collision(&dest_base.with_extension(kind.ext()));
+    if let Some(parent) = final_path.parent() {
+        fs::create_dir_all(parent).map_err(CdnError::Io)?;
+    }
+    check_disk_space(&final_path)?;
+
+    let part_path = final_path.with_extension(format!(
+        "{}.part",
+        final_path.extension().and_then(|e| e.to_str()).unwrap_or("")
+    ));
+    let _ = fs::remove_file(&part_path);
+
+    let result = write_stream(stream, sniff, &part_path, &final_path, DEFAULT_BYTE_BUDGET, &mut progress).await;
+    match result {
+        Ok(bytes) => {
+            if let Some(unix) = taken_at_unix {
+                if let Some(ts) = chrono::DateTime::<chrono::Utc>::from_timestamp(unix, 0) {
+                    set_mtime(&final_path, ts.timestamp());
+                }
+            }
+            Ok(DownloadOutcome { path: final_path, bytes })
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&part_path);
+            Err(e)
+        }
+    }
+}
+
+async fn write_stream<S, F>(
+    mut stream: S,
+    first_chunk: Vec<u8>,
+    part_path: &Path,
+    final_path: &Path,
+    byte_budget: u64,
+    progress: &mut F,
+) -> Result<u64, CdnError>
+where
+    S: futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+    F: FnMut(u64),
+{
+    let mut file = fs::File::create(part_path).map_err(CdnError::Io)?;
+    let mut written: u64 = 0;
+
+    macro_rules! budget_check {
+        () => {
+            if written > byte_budget {
+                return Err(CdnError::BudgetExceeded { budget: byte_budget });
+            }
+        };
+    }
+
+    file.write_all(&first_chunk).map_err(CdnError::Io)?;
+    written += first_chunk.len() as u64;
+    budget_check!();
+    progress(written);
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| CdnError::Network(e.to_string()))?;
+        file.write_all(&chunk).map_err(CdnError::Io)?;
+        written += chunk.len() as u64;
+        budget_check!();
+        progress(written);
+    }
+    file.flush().map_err(CdnError::Io)?;
+    file.sync_all().map_err(CdnError::Io)?;
+    drop(file);
+    fs::rename(part_path, final_path).map_err(CdnError::Io)?;
+    Ok(written)
+}
+
+#[cfg(unix)]
+fn set_mtime(path: &Path, unix_ts: i64) {
+    let t = filetime::FileTime::from_unix_time(unix_ts, 0);
+    let _ = filetime::set_file_times(path, t, t);
+}
+
+#[cfg(not(unix))]
+fn set_mtime(_path: &Path, _unix_ts: i64) {}

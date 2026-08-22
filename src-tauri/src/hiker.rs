@@ -154,4 +154,120 @@ impl HikerClient {
         let (v, _) = self.get("/v2/user/by/username", &[("username", username)]).await?;
         Ok(v["user"].clone())
     }
+
+    /// GET /v2/media/info/by/code → {"media_or_ad": {...}}
+    pub async fn media_by_code(&self, code: &str) -> Result<Value, HikerError> {
+        let (v, _) = self.get("/v2/media/info/by/code", &[("code", code)]).await?;
+        Ok(v["media_or_ad"].clone())
+    }
+}
+
+fn str_or_num(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// Best-quality URL from `image_versions2.candidates[]` (max width).
+fn best_image(item: &serde_json::Value) -> Option<String> {
+    item.get("image_versions2")?
+        .get("candidates")?
+        .as_array()?
+        .iter()
+        .filter_map(|c| {
+            let url = c.get("url")?.as_str()?;
+            let width = c.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
+            Some((width, url))
+        })
+        .max_by_key(|(w, _)| *w)
+        .map(|(_, u)| u.to_string())
+}
+
+/// Best-quality URL from `video_versions[]` (max width).
+fn best_video(item: &serde_json::Value) -> Option<String> {
+    item.get("video_versions")?
+        .as_array()?
+        .iter()
+        .filter_map(|c| {
+            let url = c.get("url")?.as_str()?;
+            let width = c.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
+            Some((width, url))
+        })
+        .max_by_key(|(w, _)| *w)
+        .map(|(_, u)| u.to_string())
+}
+
+/// Collect every downloadable URL from one media object (post or carousel
+/// child). Handles both current HikerAPI shapes (`image_versions2` /
+/// `video_versions`) and legacy flat fields (`thumbnail_url` / `video_url`,
+/// still used by feed chunk endpoints).
+fn collect_resources(item: &serde_json::Value, is_video: bool) -> Vec<crate::models::MediaResource> {
+    use crate::models::{MediaKind, MediaResource};
+    let mut out = Vec::new();
+    if is_video {
+        if let Some(url) = best_video(item).or_else(|| {
+            item.get("video_url")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        }) {
+            out.push(MediaResource { url, kind: MediaKind::Video });
+        }
+    } else if let Some(url) = best_image(item).or_else(|| {
+        item.get("thumbnail_url")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    }) {
+        out.push(MediaResource { url, kind: MediaKind::Photo });
+    }
+    out
+}
+
+/// Map a raw HikerAPI media object onto our Post DTO.
+/// Shapes verified live by insta-dl: media_type 1=photo, 2=video,
+/// 8=album (`carousel_media` preferred, `resources` fallback).
+pub fn map_post(media: &serde_json::Value) -> Option<crate::models::Post> {
+    use crate::models::{MediaKind, MediaResource};
+
+    let pk = str_or_num(media.get("pk")?)?;
+    let code = media.get("code").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let media_type = media.get("media_type").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    let mut resources: Vec<MediaResource> = Vec::new();
+    let carousel = media
+        .get("carousel_media")
+        .and_then(|v| v.as_array())
+        .or_else(|| media.get("resources").and_then(|v| v.as_array()));
+    match carousel {
+        Some(items) => {
+            for item in items {
+                let is_video = item.get("media_type").and_then(|v| v.as_u64()) == Some(2);
+                resources.extend(collect_resources(item, is_video));
+            }
+        }
+        None => {
+            resources.extend(collect_resources(media, media_type == 2));
+        }
+    }
+
+    let thumbnail_url = best_image(media).or_else(|| {
+        media
+            .get("thumbnail_url")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    });
+
+    Some(crate::models::Post {
+        pk,
+        code,
+        taken_at: crate::models::parse_taken_at(media.get("taken_at")?),
+        caption: media.get("caption_text").and_then(|v| v.as_str()).map(String::from),
+        like_count: media.get("like_count").and_then(|v| v.as_u64()),
+        comment_count: media.get("comment_count").and_then(|v| v.as_u64()),
+        owner_username: media["user"]["username"].as_str().map(String::from),
+        owner_pk: media["user"]["pk"].as_str().map(String::from),
+        resources,
+        thumbnail_url,
+    })
 }
