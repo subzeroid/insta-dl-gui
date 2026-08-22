@@ -14,6 +14,38 @@ pub struct MediaResource {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct Profile {
+    pub pk: String,
+    pub username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_name: Option<String>,
+    pub media_count: u64,
+    pub follower_count: Option<u64>,
+    pub is_private: bool,
+    pub is_verified: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PostPage {
+    pub posts: Vec<Post>,
+    pub end_cursor: Option<String>,
+}
+
+/// What the user asked to download from a profile.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProfileOptions {
+    pub posts: bool,
+    pub reels: bool,
+    pub stories: bool,
+    pub highlights: bool,
+    pub avatar: bool,
+    #[serde(default)]
+    pub max_posts: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Post {
     pub pk: String,
     pub code: String,

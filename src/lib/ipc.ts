@@ -33,26 +33,75 @@ export async function saveSettings(opts: { dest_dir?: string; sidecar?: boolean 
 
 export interface JobProgress {
   job_id: string;
-  state: "fetching" | "downloading" | "done" | "failed";
+  state: "fetching" | "downloading" | "done" | "failed" | "cancelled";
   label: string;
   current_file?: number;
   total_files?: number;
   bytes_done?: number;
   file_name?: string;
   error?: string;
-  files?: string[];
+  count?: number;
+  dir?: string;
 }
 
 export type Target =
   | { kind: "profile"; username: string }
   | { kind: "post"; code: string };
 
+export interface Post {
+  pk: string;
+  code: string;
+  taken_at?: number;
+  caption?: string;
+  owner_username?: string;
+  resources: { url: string; kind: "photo" | "video" }[];
+  thumbnail_url?: string;
+}
+
+export interface Profile {
+  pk: string;
+  username: string;
+  full_name?: string;
+  media_count: number;
+  follower_count?: number;
+  is_private: boolean;
+  is_verified: boolean;
+  avatar_url?: string;
+}
+
+export interface ProfilePreview {
+  profile: Profile;
+  recent_posts: Post[];
+  end_cursor: string | null;
+}
+
+export interface ProfileOptions {
+  posts: boolean;
+  reels: boolean;
+  stories: boolean;
+  highlights: boolean;
+  avatar: boolean;
+  max_posts?: number | null;
+}
+
 export async function resolveInput(input: string): Promise<Target> {
   return invoke("resolve_input", { input });
 }
 
+export async function fetchProfile(username: string): Promise<ProfilePreview> {
+  return invoke("fetch_profile", { username });
+}
+
 export async function downloadPost(code: string): Promise<string> {
   return invoke("download_post", { code });
+}
+
+export async function enqueueProfileDownload(username: string, opts: ProfileOptions): Promise<string> {
+  return invoke("enqueue_profile_download", { username, opts });
+}
+
+export async function cancelJob(jobId: string): Promise<boolean> {
+  return invoke("cancel_job", { jobId });
 }
 
 export async function onJobProgress(cb: (p: JobProgress) => void): Promise<() => void> {

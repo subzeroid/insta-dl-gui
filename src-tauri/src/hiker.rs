@@ -155,6 +155,57 @@ impl HikerClient {
         Ok(v["user"].clone())
     }
 
+    /// GET /v1/user/medias/chunk → `[items, end_cursor]` (a list, not dict).
+    pub async fn user_medias_chunk(
+        &self,
+        user_id: &str,
+        end_cursor: Option<&str>,
+    ) -> Result<crate::models::PostPage, HikerError> {
+        let (v, _) = self
+            .get(
+                "/v1/user/medias/chunk",
+                &[("user_id", user_id), ("end_cursor", end_cursor.unwrap_or(""))],
+            )
+            .await?;
+        let arr = v.as_array().ok_or_else(|| HikerError::Transient("medias/chunk: expected [items, cursor]".into()))?;
+        let items = arr.first().and_then(|x| x.as_array()).cloned().unwrap_or_default();
+        let cursor = arr.get(1).and_then(|x| x.as_str()).map(String::from);
+        let posts = items.iter().filter_map(map_post).collect();
+        Ok(crate::models::PostPage { posts, end_cursor: cursor })
+    }
+
+    /// GET /v2/user/stories (billed 2 requests) → `{"reel": {"items": [...]}}`.
+    pub async fn user_stories(&self, user_id: &str) -> Result<Vec<Value>, HikerError> {
+        let (v, _) = self.get("/v2/user/stories", &[("user_id", user_id)]).await?;
+        let empty = Vec::new();
+        Ok(v.get("reel")
+            .and_then(|r| r.get("items"))
+            .and_then(|i| i.as_array())
+            .cloned()
+            .unwrap_or(empty))
+    }
+
+    /// GET /v2/user/highlights (billed 2 requests) → `{"response": {"tray": [...]}}`.
+    pub async fn user_highlights(&self, user_id: &str) -> Result<Vec<Value>, HikerError> {
+        let (v, _) = self.get("/v2/user/highlights", &[("user_id", user_id)]).await?;
+        let empty = Vec::new();
+        Ok(v["response"]["tray"].as_array().cloned().unwrap_or(empty))
+    }
+
+    /// GET /v2/highlight/by/id (id = bare numeric pk) →
+    /// `{"response": {"reels": {"highlight:<pk>": {"items": [...]}}}}`.
+    pub async fn highlight_items(&self, highlight_pk: &str) -> Result<Vec<Value>, HikerError> {
+        let (v, _) = self.get("/v2/highlight/by/id", &[("id", highlight_pk)]).await?;
+        let empty = Vec::new();
+        let reels = v["response"]["reels"].as_object();
+        Ok(reels
+            .and_then(|m| m.values().next())
+            .and_then(|reel| reel.get("items"))
+            .and_then(|i| i.as_array())
+            .cloned()
+            .unwrap_or(empty))
+    }
+
     /// GET /v2/media/info/by/code → {"media_or_ad": {...}}
     pub async fn media_by_code(&self, code: &str) -> Result<Value, HikerError> {
         let (v, _) = self.get("/v2/media/info/by/code", &[("code", code)]).await?;
@@ -171,7 +222,7 @@ fn str_or_num(v: &serde_json::Value) -> Option<String> {
 }
 
 /// Best-quality URL from `image_versions2.candidates[]` (max width).
-fn best_image(item: &serde_json::Value) -> Option<String> {
+pub(crate) fn best_image(item: &serde_json::Value) -> Option<String> {
     item.get("image_versions2")?
         .get("candidates")?
         .as_array()?
@@ -186,7 +237,7 @@ fn best_image(item: &serde_json::Value) -> Option<String> {
 }
 
 /// Best-quality URL from `video_versions[]` (max width).
-fn best_video(item: &serde_json::Value) -> Option<String> {
+pub(crate) fn best_video(item: &serde_json::Value) -> Option<String> {
     item.get("video_versions")?
         .as_array()?
         .iter()
@@ -203,7 +254,7 @@ fn best_video(item: &serde_json::Value) -> Option<String> {
 /// child). Handles both current HikerAPI shapes (`image_versions2` /
 /// `video_versions`) and legacy flat fields (`thumbnail_url` / `video_url`,
 /// still used by feed chunk endpoints).
-fn collect_resources(item: &serde_json::Value, is_video: bool) -> Vec<crate::models::MediaResource> {
+pub fn collect_resources(item: &serde_json::Value, is_video: bool) -> Vec<crate::models::MediaResource> {
     use crate::models::{MediaKind, MediaResource};
     let mut out = Vec::new();
     if is_video {
@@ -222,6 +273,27 @@ fn collect_resources(item: &serde_json::Value, is_video: bool) -> Vec<crate::mod
         out.push(MediaResource { url, kind: MediaKind::Photo });
     }
     out
+}
+
+/// Map a raw HikerAPI user object onto our Profile DTO.
+pub fn map_profile(user: &serde_json::Value) -> Option<crate::models::Profile> {
+    let pk = str_or_num(user.get("pk")?)?;
+    let username = user.get("username").and_then(|v| v.as_str())?.to_string();
+    let avatar_url = user
+        .get("profile_pic_url_hd")
+        .and_then(|v| v.as_str())
+        .or_else(|| user.get("profile_pic_url").and_then(|v| v.as_str()))
+        .map(String::from);
+    Some(crate::models::Profile {
+        pk,
+        username,
+        full_name: user.get("full_name").and_then(|v| v.as_str()).map(String::from),
+        media_count: user.get("media_count").and_then(|v| v.as_u64()).unwrap_or(0),
+        follower_count: user.get("follower_count").and_then(|v| v.as_u64()),
+        is_private: user.get("is_private").and_then(|v| v.as_bool()).unwrap_or(false),
+        is_verified: user.get("is_verified").and_then(|v| v.as_bool()).unwrap_or(false),
+        avatar_url,
+    })
 }
 
 /// Map a raw HikerAPI media object onto our Post DTO.

@@ -2,14 +2,17 @@
 import { computed, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useAppStore } from "./stores/app";
+import { useJobsStore } from "./stores/jobs";
 import { formatBalance } from "./lib/ipc";
 
 const app = useAppStore();
+const jobs = useJobsStore();
 const route = useRoute();
 const router = useRouter();
 
 onMounted(async () => {
   await app.init();
+  jobs.init().catch(() => {});
   if (!app.hasToken && route.path !== "/onboarding") {
     router.push("/onboarding");
   }

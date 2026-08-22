@@ -1,88 +1,85 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, ref } from "vue";
+import { useJobsStore } from "../stores/jobs";
+import JobCard from "../components/JobCard.vue";
 import { useAppStore } from "../stores/app";
 import {
   downloadPost,
-  formatBytes,
+  enqueueProfileDownload,
+  fetchProfile,
   resolveInput,
-  onJobProgress,
-  type JobProgress,
+  type ProfileOptions,
+  type ProfilePreview,
 } from "../lib/ipc";
 
 const app = useAppStore();
+const jobs = useJobsStore();
 const input = ref("");
 const busy = ref(false);
 const error = ref<string | null>(null);
-const profileNotice = ref<string | null>(null);
+const notice = ref<string | null>(null);
 
-interface JobView {
-  id: string;
-  label: string;
-  state: JobProgress["state"];
-  currentFile: number;
-  totalFiles: number;
-  bytesDone: number;
-  fileName: string;
-  error?: string;
-}
+const preview = ref<ProfilePreview | null>(null);
+const previewLoading = ref(false);
 
-const jobs = reactive(new Map<string, JobView>());
+const opts = computed<ProfileOptions>(() => ({
+  posts: posts.value,
+  reels: reels.value,
+  stories: stories.value,
+  highlights: highlights.value,
+  avatar: avatar.value,
+  max_posts: maxPosts.value > 0 ? maxPosts.value : null,
+}));
 
-let unlisten: (() => void) | null = null;
-
-onMounted(async () => {
-  unlisten = await onJobProgress((p) => {
-    const existing = jobs.get(p.job_id);
-    const job =
-      existing ??
-      reactive({
-        id: p.job_id,
-        label: p.label,
-        state: "fetching" as JobProgress["state"],
-        currentFile: 0,
-        totalFiles: 0,
-        bytesDone: 0,
-        fileName: "",
-        error: undefined,
-      });
-    if (!existing) jobs.set(p.job_id, job);
-    job.state = p.state;
-    if (p.state === "downloading") {
-      job.currentFile = p.current_file ?? job.currentFile;
-      job.totalFiles = p.total_files ?? job.totalFiles;
-      job.bytesDone = Math.max(job.bytesDone, p.bytes_done ?? 0);
-      job.fileName = p.file_name ?? job.fileName;
-    }
-    if (p.state === "done" || p.state === "failed") {
-      if (p.error) job.error = p.error;
-      app.refreshBalance().catch(() => {});
-    }
-  });
-});
-
-onBeforeUnmount(() => {
-  unlisten?.();
-});
+const posts = ref(true);
+const reels = ref(false);
+const stories = ref(false);
+const highlights = ref(false);
+const avatar = ref(true);
+const maxPosts = ref(0); // 0 = all
 
 async function submit() {
   const raw = input.value.trim();
   if (!raw || busy.value) return;
-  busy.value = true;
   error.value = null;
-  profileNotice.value = null;
+  notice.value = null;
+  preview.value = null;
   try {
     const target = await resolveInput(raw);
     if (target.kind === "post") {
+      busy.value = true;
       input.value = "";
       await downloadPost(target.code);
     } else {
-      profileNotice.value = `@${target.username}: profile downloads arrive in the next build.`;
+      previewLoading.value = true;
+      const p = await fetchProfile(target.username);
+      preview.value = p;
     }
   } catch (e) {
     error.value = String(e);
   } finally {
     busy.value = false;
+    previewLoading.value = false;
   }
+}
+
+async function startProfileDownload() {
+  if (!preview.value) return;
+  try {
+    await enqueueProfileDownload(preview.value.profile.username, opts.value);
+    preview.value = null;
+    input.value = "";
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+
+const activeJobs = computed(() =>
+  [...jobs.jobs.values()].filter((j) => j.state === "downloading" || j.state === "fetching"),
+);
+
+function fmtCount(n?: number) {
+  return n === undefined ? "—" : new Intl.NumberFormat("en", { notation: "compact" }).format(n);
 }
 </script>
 
@@ -97,64 +94,93 @@ async function submit() {
         autocomplete="off"
       />
       <button class="btn-primary shrink-0" type="submit" :disabled="busy || !input.trim()">
-        {{ busy ? "…" : "Fetch" }}
+        {{ previewLoading ? "…" : "Fetch" }}
       </button>
     </form>
 
     <p v-if="error" class="rounded-lg border border-err/40 bg-err/10 px-3 py-2 text-sm text-err">{{ error }}</p>
-    <p v-if="profileNotice" class="rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-sm text-warn">
-      {{ profileNotice }}
-    </p>
 
-    <div v-if="jobs.size > 0" class="space-y-3">
-      <TransitionGroup name="job">
-        <div v-for="[id, job] in jobs" :key="id" class="card p-4">
-          <div class="flex items-center justify-between gap-3">
-            <span class="truncate font-medium text-slate-200">{{ job.label }}</span>
-            <span
-              v-if="job.state === 'downloading' || job.state === 'fetching'"
-              class="shrink-0 animate-pulse text-xs text-accent"
-              >downloading…</span
-            >
-            <span v-else-if="job.state === 'done'" class="shrink-0 text-xs text-ok">✓ done</span>
-            <span v-else class="shrink-0 text-xs text-err">failed</span>
+    <!-- Active downloads -->
+    <div v-if="activeJobs.length > 0" class="space-y-3">
+      <JobCard v-for="job in activeJobs" :key="job.id" :job="job" />
+    </div>
+
+    <!-- Profile preview -->
+    <div v-if="preview" class="card overflow-hidden">
+      <div class="flex items-center gap-4 p-5">
+        <img
+          v-if="preview.profile.avatar_url"
+          :src="preview.profile.avatar_url"
+          class="h-16 w-16 rounded-full border border-line object-cover"
+          referrerpolicy="no-referrer"
+        />
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-1.5">
+            <span class="truncate font-semibold text-slate-100">{{ preview.profile.username }}</span>
+            <span v-if="preview.profile.is_verified" class="text-xs text-sky-400">✔</span>
           </div>
-          <div v-if="job.state === 'downloading'" class="mt-2 space-y-1.5">
-            <div class="h-1.5 overflow-hidden rounded-full bg-surface-3">
-              <div class="h-full w-1/3 animate-[slide_1.2s_ease-in-out_infinite] rounded-full bg-gradient-to-r from-[var(--color-accent-2)] to-[var(--color-accent)]"></div>
-            </div>
-            <div class="flex justify-between text-xs tabular-nums text-slate-500">
-              <span>{{ job.fileName }}</span>
-              <span>file {{ job.currentFile }}/{{ job.totalFiles }} · {{ formatBytes(job.bytesDone) }}</span>
-            </div>
-          </div>
-          <p v-if="job.error" class="mt-2 text-xs text-err">{{ job.error }}</p>
+          <p class="truncate text-sm text-slate-400">{{ preview.profile.full_name || "\u00A0" }}</p>
+          <p class="mt-0.5 text-xs tabular-nums text-slate-500">
+            {{ fmtCount(preview.profile.media_count) }} posts · {{ fmtCount(preview.profile.follower_count) }} followers
+          </p>
         </div>
-      </TransitionGroup>
+      </div>
+
+      <div v-if="preview.profile.is_private" class="border-t border-line px-5 py-4 text-sm text-warn">
+        Private profile — only the avatar can be downloaded.
+      </div>
+      <template v-else>
+        <div class="grid grid-cols-2 gap-2 border-t border-line p-5 sm:grid-cols-3">
+          <label class="flex cursor-pointer items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm hover:bg-surface-2" :class="{ 'border-accent/60': posts }">
+            <input v-model="posts" type="checkbox" class="accent-[var(--color-accent)]" /> Posts
+          </label>
+          <label class="flex cursor-pointer items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm hover:bg-surface-2" :class="{ 'border-accent/60': reels }">
+            <input v-model="reels" type="checkbox" class="accent-[var(--color-accent)]" /> Reels
+          </label>
+          <label class="flex cursor-pointer items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm hover:bg-surface-2" :class="{ 'border-accent/60': stories }">
+            <input v-model="stories" type="checkbox" class="accent-[var(--color-accent)]" /> Stories
+          </label>
+          <label class="flex cursor-pointer items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm hover:bg-surface-2" :class="{ 'border-accent/60': highlights }">
+            <input v-model="highlights" type="checkbox" class="accent-[var(--color-accent)]" /> Highlights
+          </label>
+          <label class="flex cursor-pointer items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm hover:bg-surface-2" :class="{ 'border-accent/60': avatar }">
+            <input v-model="avatar" type="checkbox" class="accent-[var(--color-accent)]" /> Avatar
+          </label>
+          <label class="flex items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm">
+            <span class="text-slate-500">Max</span>
+            <input
+              v-model.number="maxPosts"
+              type="number"
+              min="0"
+              class="w-full bg-transparent tabular-nums outline-none placeholder-slate-600"
+              placeholder="all"
+            />
+          </label>
+        </div>
+        <div class="flex items-center justify-between gap-3 border-t border-line bg-surface-2 px-5 py-3">
+          <p class="text-xs text-slate-500">
+            {{ preview.recent_posts.length }} recent shown · saves to <span class="font-mono">{{ app.destDir }}/{{ preview.profile.username }}/</span>
+          </p>
+          <button
+            class="btn-primary shrink-0"
+            :disabled="!(posts || reels || stories || highlights || avatar)"
+            @click="startProfileDownload"
+          >
+            Download
+          </button>
+        </div>
+      </template>
     </div>
 
-    <div v-if="jobs.size === 0" class="card flex items-center justify-center p-12 text-sm text-slate-500">
-      Paste a post or reel link to download it.
+    <div v-if="!preview && !notice" class="card flex items-center justify-center p-12 text-sm text-slate-500">
+      Paste a post link or a username to get started.
     </div>
+    <p v-if="notice" class="text-sm text-warn">{{ notice }}</p>
   </div>
 </template>
 
-<style>
-.job-enter-active,
-.job-leave-active {
-  transition: all 0.25s ease;
-}
-.job-enter-from,
-.job-leave-to {
-  opacity: 0;
-  transform: translateY(6px);
-}
-@keyframes slide {
-  0% {
-    transform: translateX(-100%);
-  }
-  100% {
-    transform: translateX(300%);
-  }
+<style scoped>
+input[type="number"]::-webkit-inner-spin-button {
+  opacity: 0.4;
 }
 </style>

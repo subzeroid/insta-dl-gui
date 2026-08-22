@@ -44,6 +44,8 @@ pub enum CdnError {
     Io(#[from] std::io::Error),
     #[error("Network error: {0}")]
     Network(String),
+    #[error("Cancelled")]
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -167,6 +169,8 @@ pub struct DownloadOutcome {
 
 /// Stream `url` into `<dest_base>.<ext>` enforcing all safety rules.
 /// `progress` receives cumulative byte counts per chunk.
+/// Dropping or signalling `cancel` aborts the download (stale `.part`
+/// removed by the caller-visible error path).
 #[allow(clippy::too_many_arguments)]
 pub async fn stream_to_file<F>(
     http: &reqwest::Client,
@@ -174,21 +178,27 @@ pub async fn stream_to_file<F>(
     dest_base: &Path,
     taken_at_unix: Option<i64>,
     mut progress: F,
+    mut cancel: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> Result<DownloadOutcome, CdnError>
 where
     F: FnMut(u64),
 {
+    if cancel.as_ref().map(|c| *c.borrow()).unwrap_or(false) {
+        return Err(CdnError::Cancelled);
+    }
     validate_url(url)?;
 
     let mut current = url.to_string();
     let mut hops = 0usize;
     let resp = loop {
-        let r = http
+        let req = http
             .get(&current)
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await
-            .map_err(|e| CdnError::Network(e.to_string()))?;
+            .timeout(Duration::from_secs(30));
+        let r = tokio::select! {
+            biased;
+            _ = cancel_wait(&mut cancel), if cancel.is_some() => return Err(CdnError::Cancelled),
+            r = req.send() => r.map_err(|e| CdnError::Network(e.to_string()))?,
+        };
         if r.status().is_redirection() {
             hops += 1;
             if hops > MAX_REDIRECTS {
@@ -265,7 +275,16 @@ where
     ));
     let _ = fs::remove_file(&part_path);
 
-    let result = write_stream(stream, sniff, &part_path, &final_path, DEFAULT_BYTE_BUDGET, &mut progress).await;
+    let result = write_stream(
+        stream,
+        sniff,
+        &part_path,
+        &final_path,
+        DEFAULT_BYTE_BUDGET,
+        &mut progress,
+        &mut cancel,
+    )
+    .await;
     match result {
         Ok(bytes) => {
             if let Some(unix) = taken_at_unix {
@@ -282,6 +301,18 @@ where
     }
 }
 
+async fn cancel_wait(cancel: &mut Option<tokio::sync::watch::Receiver<bool>>) {
+    match cancel {
+        Some(rx) => {
+            if *rx.borrow() {
+                return;
+            }
+            let _ = rx.changed().await;
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
 async fn write_stream<S, F>(
     mut stream: S,
     first_chunk: Vec<u8>,
@@ -289,6 +320,7 @@ async fn write_stream<S, F>(
     final_path: &Path,
     byte_budget: u64,
     progress: &mut F,
+    cancel: &mut Option<tokio::sync::watch::Receiver<bool>>,
 ) -> Result<u64, CdnError>
 where
     S: futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
@@ -310,7 +342,13 @@ where
     budget_check!();
     progress(written);
 
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            _ = cancel_wait(cancel), if cancel.is_some() => return Err(CdnError::Cancelled),
+            c = stream.next() => c,
+        };
+        let Some(chunk) = chunk else { break };
         let chunk = chunk.map_err(|e| CdnError::Network(e.to_string()))?;
         file.write_all(&chunk).map_err(CdnError::Io)?;
         written += chunk.len() as u64;

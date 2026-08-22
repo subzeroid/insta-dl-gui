@@ -2,6 +2,7 @@ pub mod cdn;
 pub mod commands;
 pub mod config;
 pub mod hiker;
+pub mod jobs;
 pub mod models;
 pub mod targets;
 
@@ -12,6 +13,7 @@ use tokio::sync::RwLock;
 
 use crate::config::Config;
 use crate::hiker::{Balance, HikerClient};
+use crate::jobs::JobRegistry;
 
 #[derive(Debug, Clone, Serialize)]
 struct ConfigState {
@@ -38,6 +40,7 @@ pub struct AppState {
     /// Separate HTTP client for CDN downloads: redirects are followed
     /// manually by `cdn.rs` so every hop gets validated.
     cdn_http: reqwest::Client,
+    pub jobs: Arc<JobRegistry>,
 }
 
 fn err_string(e: impl std::fmt::Display) -> String {
@@ -113,6 +116,7 @@ pub fn run() {
             cfg: RwLock::new(cfg),
             client: RwLock::new(client),
             cdn_http,
+            jobs: Arc::new(JobRegistry::new()),
         })
         .invoke_handler(tauri::generate_handler![
             config_state,
@@ -120,8 +124,11 @@ pub fn run() {
             get_balance,
             save_settings,
             commands::resolve_input,
-            commands::fetch_post,
+
             commands::download_post,
+            commands::fetch_profile,
+            commands::enqueue_profile_download,
+            commands::cancel_job,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
