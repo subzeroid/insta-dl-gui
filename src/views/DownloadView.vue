@@ -22,6 +22,7 @@ const notice = ref<string | null>(null);
 
 const preview = ref<ProfilePreview | null>(null);
 const previewLoading = ref(false);
+const profileDownloadBusy = ref(false);
 
 const opts = computed<ProfileOptions>(() => {
   const max = maxPosts.value;
@@ -49,10 +50,10 @@ async function submit() {
   error.value = null;
   notice.value = null;
   preview.value = null;
+  busy.value = true;
   try {
     const target = await resolveInput(raw);
     if (target.kind === "post") {
-      busy.value = true;
       input.value = "";
       const id = await downloadPost(target.code);
       jobs.addPlaceholder(id, target.code);
@@ -70,8 +71,9 @@ async function submit() {
 }
 
 async function startProfileDownload() {
-  if (!preview.value || !canDownload.value) return;
+  if (!preview.value || !canDownload.value || profileDownloadBusy.value) return;
   const username = preview.value.profile.username;
+  profileDownloadBusy.value = true;
   try {
     const id = await enqueueProfileDownload(username, opts.value);
     jobs.addPlaceholder(id, `@${username}`);
@@ -79,6 +81,8 @@ async function startProfileDownload() {
     input.value = "";
   } catch (e) {
     error.value = String(e);
+  } finally {
+    profileDownloadBusy.value = false;
   }
 }
 
@@ -178,7 +182,7 @@ onMounted(() => {
           <p class="text-xs text-slate-500">saves to <span class="font-mono">{{ app.destDir }}/{{ preview.profile.username }}/</span></p>
           <button
             class="btn-primary shrink-0"
-            :disabled="!canDownload"
+            :disabled="!canDownload || profileDownloadBusy"
             @click="startProfileDownload"
           >
             Download
