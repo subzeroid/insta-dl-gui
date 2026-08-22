@@ -1,0 +1,25 @@
+[package]
+name = "insta-dl-gui"
+version = "0.1.0"
+description = "Instagram downloader with HikerAPI backend"
+authors = ["subzeroid"]
+edition = "2021"
+
+[lib]
+name = "insta_dl_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+dirs = "6"
+thiserror = "2"
+futures-util = "0.3"
