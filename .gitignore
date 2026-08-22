@@ -26,3 +26,6 @@ dist-ssr
 # Rust
 target/
 src-tauri/gen/schemas
+
+# mkdocs
+site/

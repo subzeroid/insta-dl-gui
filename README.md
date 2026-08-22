@@ -6,6 +6,8 @@ A simple desktop app to download Instagram posts, reels, stories and highlights 
 
 Powered by [HikerAPI](https://hikerapi.com) · built with [Tauri 2](https://tauri.app) + Vue 3
 
+📖 **[Documentation](https://subzeroid.github.io/insta-dl-gui/)** — installation, token setup, usage, troubleshooting.
+
 </div>
 
 ---

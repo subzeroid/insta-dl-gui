@@ -1,0 +1,58 @@
+site_name: insta-dl-gui
+site_description: Desktop Instagram downloader — posts, reels, stories, highlights via HikerAPI. No login required.
+site_url: https://subzeroid.github.io/insta-dl-gui/
+repo_url: https://github.com/subzeroid/insta-dl-gui
+repo_name: subzeroid/insta-dl-gui
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: pink
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: pink
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Getting a token: token.md
+  - Usage: usage.md
+  - Troubleshooting: troubleshooting.md
+  - Contributing: contributing.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  - search
