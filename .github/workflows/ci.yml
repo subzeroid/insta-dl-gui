@@ -44,7 +44,7 @@ jobs:
         run: cargo fmt --check
       - name: Clippy
         working-directory: src-tauri
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --locked -- -D warnings
       - name: Tests (offline)
         working-directory: src-tauri
         env:
