@@ -21,7 +21,7 @@ One request ≈ one API call. Typical costs:
 | Highlights listing | 2 |
 | Each highlight reel's items | 1 per reel |
 
-The remaining balance is always visible in the app header; click it to refresh. When you run out, downloads stop with a clear error and a link to top up — media CDN downloads themselves are free and unlimited.
+The remaining balance is always visible in the app header; click it to refresh. If quota runs out before any file is saved, the job fails with a link to top up. If some files were already saved, the job finishes with that exact count; top up and re-run to fetch the rest. Media CDN downloads themselves are free and unlimited.
 
 !!! tip
     Use the **Max** field to cap how many posts a profile job considers — handy for testing a big profile before committing quota to the whole archive.

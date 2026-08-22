@@ -10,11 +10,15 @@ Your balance hit zero mid-run (HTTP 402). Top up at [hikerapi.com](https://hiker
 
 ## "Not found on Instagram (private profile or deleted post)"
 
-The target is private, or the post was deleted. Private profiles expose nothing but their avatar through any public API.
+For a post link, the post may be deleted or belong to an inaccessible private account. A private profile lookup should still show its public avatar; its posts, reels, stories and highlights remain unavailable.
 
 ## Downloads fail with "CDN host … is not allowed"
 
 A safety check: the app only downloads from official Instagram CDN hosts (`cdninstagram.com`, `fbcdn.net`). If you see this error on a normal post, the media URL likely expired between fetching and downloading — just retry; a fresh URL is minted per attempt.
+
+## A download saved fewer files than expected
+
+Transient network errors and CDN server errors are retried automatically, up to three attempts per file. Permanent errors such as an expired URL, invalid media type, disk-space limit or cancellation are not retried. If at least one file was saved, the job finishes with the exact saved count; fix the reported cause if present and re-run to fetch the rest.
 
 ## macOS: "Apple could not verify…" / «Файл не был открыт» (Gatekeeper) {#macos-blocks-the-app}
 

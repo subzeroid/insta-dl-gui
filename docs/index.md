@@ -30,6 +30,8 @@ Powered by [HikerAPI](https://hikerapi.com), built with [Tauri 2](https://tauri.
 - **Original timestamps** — file mtime is set from `taken_at`, so Photos/Finder sort correctly
 - **JSON metadata sidecars** — caption, like/comment counts and owner saved next to every post
 - **Live queue** — per-job progress, byte counters and cancellation
+- **Explore first** — autocomplete usernames, browse posts/reels/stories, preview individual items, then download one or all
+- **Automatic recovery** — transient network and CDN server errors retry automatically, and partial jobs report only saved files
 
 ## Links
 

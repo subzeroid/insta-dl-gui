@@ -27,6 +27,17 @@ All media of the post (including carousels) downloads immediately with live prog
 
 3. Press **Download**. Progress appears live; switch to the **Queue** tab for all jobs.
 
+For a private profile, only **Avatar** is available. Posts, reels, stories and highlights remain hidden because the public API cannot access them.
+
+## Explore before downloading
+
+Open **Explore** and type at least two characters of a username. Pick an autocomplete result with the mouse or arrow keys and **Enter**, then switch between **Posts**, **Reels** and **Stories**.
+
+- Click a post, reel or story to open its preview, then press **Download** for that item.
+- Use **Download all** for the current Posts or Reels tab, or **Download all stories** after loading active stories.
+- Press **Load more** at the bottom of Posts to fetch the next page.
+- Press **Escape** to close autocomplete or an open preview.
+
 ## Where files end up
 
 Default destination is `~/Downloads/insta-dl` (change it in **Settings**). Layout matches [insta-dl CLI](https://subzeroid.github.io/insta-dl/) exactly, so both tools can maintain the same archive:
@@ -52,3 +63,5 @@ Re-running the same profile skips everything already on disk — file stems are 
 ## Queue
 
 The **Queue** tab lists all jobs with per-file progress and byte counters. Failed jobs show the reason (private profile, quota exhausted, deleted post). Cancelled and finished jobs can be cleared.
+
+If a batch saves some files before a later item fails, it finishes with the exact number saved. Re-run the same target after fixing the cause; existing files are skipped.

@@ -20,8 +20,10 @@ Paste your HikerAPI token once, then download any public profile's content with 
 
 - **Single posts & reels** — paste an `instagram.com/p/…` or `/reel/…` link
 - **Full profiles** — posts, reels-only, active stories, highlights, and HD avatar, each selectable
+- **Explore before downloading** — search with autocomplete, browse posts/reels/stories, preview an item, then download one or all
 - **No login, no ban risk** — HikerAPI token only; your Instagram account never touches the flow
 - **Live progress** — per-job byte counts, file counters and cancel support
+- **Resilient downloads** — transient network and CDN server failures retry automatically; partial jobs count only files actually saved
 - **Incremental archives** — already-downloaded files are skipped on re-runs (like `--fast-update`)
 - **Original timestamps** — file mtime is set from `taken_at`, so Photos/Finder sort correctly
 - **JSON metadata sidecars** — caption, like/comment counts and owner saved next to every post (toggleable)
@@ -65,7 +67,7 @@ npm test               # frontend unit and component tests
 cd src-tauri
 cargo test --locked    # offline unit tests (CDN safety rules, error mapping, parsers)
 
-SMOKE_TOKEN=... cargo test --test live_download   # live smoke (~6 real API calls)
+SMOKE_TOKEN=... cargo test --locked --test live_download   # live smoke (~6 real API calls)
 ```
 
 The CDN downloader enforces defense-in-depth rules ported from [insto](https://github.com/subzeroid/insto): HTTPS-only, Instagram-CDN host allowlist, manual redirects (≤5), MIME magic-byte cross-checks, per-file byte budget, disk guard, atomic writes and collision suffixes — all covered by tests.
