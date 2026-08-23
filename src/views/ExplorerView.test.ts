@@ -38,6 +38,16 @@ const preview = {
   end_cursor: null,
 };
 
+function videoPost(pk: string, thumbnail_url: string) {
+  return {
+    pk,
+    code: pk.toUpperCase(),
+    caption: pk,
+    resources: [{ url: `${thumbnail_url}.mp4`, kind: "video" as const }],
+    thumbnail_url,
+  };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -145,5 +155,32 @@ describe("ExplorerView async wiring", () => {
     await download!.trigger("click");
     await flushPromises();
     expect(ipc.enqueueProfileDownload).toHaveBeenCalledTimes(2);
+  });
+
+  it("deduplicates overlapping pages before rendering reels", async () => {
+    const firstPosts = [videoPost("p1", "https://cdninstagram.com/first.jpg")];
+    const secondPosts = [
+      videoPost("p1", "https://cdninstagram.com/replacement.jpg"),
+      videoPost("p2", "https://cdninstagram.com/second.jpg"),
+    ];
+    ipc.resolveInput.mockResolvedValue({ kind: "profile", username: "nike" });
+    ipc.fetchProfile
+      .mockResolvedValueOnce({ ...preview, recent_posts: firstPosts, end_cursor: "next" })
+      .mockResolvedValueOnce({ ...preview, recent_posts: secondPosts, end_cursor: null });
+
+    const wrapper = render();
+    await wrapper.get("input").setValue("nike");
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+    await wrapper.findAll("button").find((button) => button.text() === "Load more")!.trigger("click");
+    await flushPromises();
+    await wrapper.findAll("button").find((button) => button.text() === "Reels")!.trigger("click");
+
+    expect(wrapper.findAll("button.aspect-square img").map((image) => image.attributes("src"))).toEqual([
+      "https://cdninstagram.com/first.jpg",
+      "https://cdninstagram.com/second.jpg",
+    ]);
+    expect(firstPosts.map((post) => post.pk)).toEqual(["p1"]);
+    expect(secondPosts.map((post) => post.pk)).toEqual(["p1", "p2"]);
   });
 });
