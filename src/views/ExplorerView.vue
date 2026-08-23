@@ -15,6 +15,7 @@ import {
 } from "../lib/ipc";
 import { useJobsStore } from "../stores/jobs";
 import { createExplorerRequestState, runOnce } from "../lib/asyncState";
+import { mergeUniquePosts } from "../lib/mediaPages";
 import JobCard from "../components/JobCard.vue";
 import PostModal from "../components/PostModal.vue";
 
@@ -195,7 +196,7 @@ async function loadMore() {
     }
     preview.value = {
       profile: more.profile,
-      recent_posts: [...preview.value.recent_posts, ...more.recent_posts],
+      recent_posts: mergeUniquePosts(preview.value.recent_posts, more.recent_posts),
       end_cursor: more.end_cursor,
     };
   } catch (e) {

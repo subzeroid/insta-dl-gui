@@ -38,7 +38,8 @@ function reply(cmd: string, args?: CmdArgs): unknown {
       const username = input.replace(/^@/, "").trim() || "instagram";
       return { kind: "profile", username };
     }
-    case "fetch_profile":
+    case "fetch_profile": {
+      const pageStart = args?.endCursor ? 12 : 0;
       return {
         profile: {
           pk: "25025320",
@@ -51,7 +52,8 @@ function reply(cmd: string, args?: CmdArgs): unknown {
           avatar_url: AVATAR,
         },
         recent_posts: Array.from({ length: 12 }, (_, i) => {
-          const hue = Math.round((i * 137) % 360);
+          const index = pageStart + i;
+          const hue = Math.round((index * 137) % 360);
           const thumb =
             "data:image/svg+xml," +
             encodeURIComponent(
@@ -61,17 +63,17 @@ function reply(cmd: string, args?: CmdArgs): unknown {
                    <stop offset='1' stop-color='hsl(${(hue + 60) % 360},60%,18%)'/>
                  </linearGradient></defs>
                  <rect width='400' height='400' fill='url(#g)'/>
-                 <circle cx='${80 + ((i * 97) % 240)}' cy='${100 + ((i * 61) % 200)}' r='56' fill='#ffffff' opacity='.14'/>
+                 <circle cx='${80 + ((index * 97) % 240)}' cy='${100 + ((index * 61) % 200)}' r='56' fill='#ffffff' opacity='.14'/>
                </svg>`,
             );
-          const isVideo = i % 3 === 0;
+          const isVideo = index % 3 === 0;
           return {
-            pk: `p${i}`,
-            code: `DEMO${i}`,
-            caption: `Demo post #${i} — golden hour somewhere far away`,
-            like_count: 1200 * (12 - i),
-            comment_count: 40 + i,
-            taken_at: 1776000000 + i * 86400,
+            pk: `p${index}`,
+            code: `DEMO${index}`,
+            caption: `Demo post #${index} — golden hour somewhere far away`,
+            like_count: 1200 * (24 - index),
+            comment_count: 40 + index,
+            taken_at: 1776000000 + index * 86400,
             owner_username: "natgeo",
             thumbnail_url: thumb,
             resources: [
@@ -79,8 +81,9 @@ function reply(cmd: string, args?: CmdArgs): unknown {
             ],
           };
         }),
-        end_cursor: "cursor",
+        end_cursor: args?.endCursor ? null : "cursor",
       };
+    }
     case "search_users": {
       const q = String(args?.query ?? "").toLowerCase();
       const pool = [
