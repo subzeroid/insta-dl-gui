@@ -51,8 +51,8 @@ async function submit() {
         <input id="token" v-model="token" class="input font-mono" type="password" placeholder="Paste your token…" autocomplete="off" />
         <p class="text-xs text-slate-500">
           Get a free token at
-          <a href="#" class="text-accent hover:underline" @click.prevent="openUrl('https://hikerapi.com/tokens')"
-            >hikerapi.com/tokens</a
+          <a href="#" class="text-accent hover:underline" @click.prevent="openUrl('https://hikerapi.com/p/uk064a1b')"
+            >hikerapi.com</a
           >
           — first 100 requests are free.
         </p>

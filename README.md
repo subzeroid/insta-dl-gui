@@ -4,7 +4,7 @@
 
 A simple desktop app to download Instagram posts, reels, stories and highlights — **no Instagram login required**.
 
-Powered by [HikerAPI](https://hikerapi.com) · built with [Tauri 2](https://tauri.app) + Vue 3
+Powered by [HikerAPI](https://hikerapi.com/p/uk064a1b) · built with [Tauri 2](https://tauri.app) + Vue 3
 
 📖 **[Documentation](https://subzeroid.github.io/insta-dl-gui/)** — installation, token setup, usage, troubleshooting.
 
@@ -43,8 +43,8 @@ Grab an installer from [GitHub Releases](https://github.com/subzeroid/insta-dl-g
 
 ## Getting a token
 
-1. Sign up at [hikerapi.com](https://hikerapi.com) — **the first 100 requests are free**, no card needed.
-2. Copy the token from <https://hikerapi.com/tokens>.
+1. Sign up at [hikerapi.com](https://hikerapi.com/p/uk064a1b) — **the first 100 requests are free**, no card needed.
+2. Copy the token from your [HikerAPI dashboard](https://hikerapi.com/p/uk064a1b).
 3. Paste it into the app on first launch.
 
 One request ≈ one API call: fetching a post costs 1, stories 2, highlights 2 + 1 per highlight reel. A typical "download everything from a profile" run costs a handful of requests plus one per feed page.

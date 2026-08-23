@@ -1,9 +1,9 @@
 # Getting a HikerAPI token
 
-insta-dl-gui talks to Instagram exclusively through [HikerAPI](https://hikerapi.com) — a paid managed API. Your Instagram account is never involved: no login, no session, nothing to ban.
+insta-dl-gui talks to Instagram exclusively through [HikerAPI](https://hikerapi.com/p/uk064a1b) — a paid managed API. Your Instagram account is never involved: no login, no session, nothing to ban.
 
-1. Sign up at <https://hikerapi.com> — **the first 100 requests are free**, no credit card required.
-2. Open <https://hikerapi.com/tokens> and copy your token.
+1. Sign up at [hikerapi.com](https://hikerapi.com/p/uk064a1b) — **the first 100 requests are free**, no credit card required.
+2. Open your [HikerAPI dashboard](https://hikerapi.com/p/uk064a1b) and copy your token.
 3. In insta-dl-gui, paste the token into the first-launch screen and press **Connect**.
 
 The token is stored locally in the app config (`0600` permissions on macOS/Linux) and never leaves your machine except in requests to `api.hikerapi.com`.

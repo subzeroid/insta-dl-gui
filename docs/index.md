@@ -4,7 +4,7 @@ A simple desktop app to download Instagram posts, reels, stories and highlights 
 
 ![insta-dl-gui](screenshot.png)
 
-Powered by [HikerAPI](https://hikerapi.com), built with [Tauri 2](https://tauri.app) + Vue 3. Downloads run through the HikerAPI cloud instead of a logged-in Instagram session, so there is **no account ban risk** — unlike tools that drive your own account (instaloader, gallery-dl).
+Powered by [HikerAPI](https://hikerapi.com/p/uk064a1b), built with [Tauri 2](https://tauri.app) + Vue 3. Downloads run through the HikerAPI cloud instead of a logged-in Instagram session, so there is **no account ban risk** — unlike tools that drive your own account (instaloader, gallery-dl).
 
 ## Quick start
 
@@ -37,7 +37,7 @@ Powered by [HikerAPI](https://hikerapi.com), built with [Tauri 2](https://tauri.
 
 - Source: [github.com/subzeroid/insta-dl-gui](https://github.com/subzeroid/insta-dl-gui)
 - CLI sibling: [insta-dl](https://github.com/subzeroid/insta-dl) (same output layout, terminal-based)
-- Get a token: [hikerapi.com](https://hikerapi.com)
+- Get a token: [hikerapi.com](https://hikerapi.com/p/uk064a1b)
 
 ## Disclaimer
 

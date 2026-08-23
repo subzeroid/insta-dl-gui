@@ -2,11 +2,11 @@
 
 ## "Invalid token — get a new one at hikerapi.com"
 
-The stored token was rejected (HTTP 401). Copy a fresh token from <https://hikerapi.com/tokens> and paste it again. Tokens can be revoked from the same page.
+The stored token was rejected (HTTP 401). Copy a fresh token from your [HikerAPI dashboard](https://hikerapi.com/p/uk064a1b) and paste it again. Tokens can be revoked from the same page.
 
 ## "Quota exhausted — top up at hikerapi.com"
 
-Your balance hit zero mid-run (HTTP 402). Top up at [hikerapi.com](https://hikerapi.com), then re-run the job — already-downloaded files are skipped, so you only pay for what's missing.
+Your balance hit zero mid-run (HTTP 402). Top up at [hikerapi.com](https://hikerapi.com/p/uk064a1b), then re-run the job — already-downloaded files are skipped, so you only pay for what's missing.
 
 ## "Not found on Instagram (private profile or deleted post)"
 
