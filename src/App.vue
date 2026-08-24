@@ -38,6 +38,7 @@ const showChrome = computed(() => route.path !== "/onboarding");
           v-for="r in [
             { path: '/download', label: 'Download' },
             { path: '/explore', label: 'Explore' },
+            { path: '/library', label: 'Library' },
             { path: '/queue', label: 'Queue' },
             { path: '/settings', label: 'Settings' },
           ]"
