@@ -1,6 +1,6 @@
 [package]
 name = "insta-dl-gui"
-version = "0.1.4"
+version = "0.2.0"
 description = "Instagram downloader with HikerAPI backend"
 authors = ["subzeroid"]
 edition = "2021"
