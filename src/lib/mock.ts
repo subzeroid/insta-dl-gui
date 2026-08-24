@@ -54,6 +54,12 @@ const LIBRARY_ROOT: LibraryRoot = {
   last_scan_completed_at: 1_776_000_120,
 };
 
+const FIRST_SCAN_LIBRARY_ROOT: LibraryRoot = {
+  ...LIBRARY_ROOT,
+  last_scan_started_at: null,
+  last_scan_completed_at: null,
+};
+
 const LIBRARY_CARDS: MockLibraryCard[] = [
   {
     id: 1,
@@ -145,9 +151,23 @@ function mockDetail(card: LibraryCard): LibraryItemDetail {
   };
 }
 
+function isLibraryFirstScanDemo(): boolean {
+  return (
+    new URLSearchParams(window.location.search).get("demo") === "library-first-scan"
+  );
+}
+
+function mockLibraryRoot(): LibraryRoot {
+  return isLibraryFirstScanDemo() ? FIRST_SCAN_LIBRARY_ROOT : LIBRARY_ROOT;
+}
+
+function mockLibraryCards(): MockLibraryCard[] {
+  return isLibraryFirstScanDemo() ? [] : LIBRARY_CARDS;
+}
+
 function mockLibraryPage(query: LibraryQuery): LibraryPage {
   const search = query.search?.trim().toLocaleLowerCase() ?? "";
-  const items = LIBRARY_CARDS.filter((card) => {
+  const items = mockLibraryCards().filter((card) => {
     if (query.kinds.length > 0 && !query.kinds.includes(card.kind)) return false;
     if (query.availability !== null && card.availability !== query.availability) return false;
     if (query.taken_after !== null && (card.taken_at ?? 0) < query.taken_after) return false;
@@ -179,9 +199,9 @@ function reply(cmd: string, args?: CmdArgs): unknown {
     case "__balance":
       return { requests: 14_700_000, rate: 10, amount: 123.45, currency: "usd" };
     case "ensure_configured_library_root":
-      return LIBRARY_ROOT;
+      return mockLibraryRoot();
     case "list_library_roots":
-      return [LIBRARY_ROOT];
+      return [mockLibraryRoot()];
     case "start_library_scan":
       return "mock-library-scan";
     case "cancel_library_scan":
@@ -190,7 +210,7 @@ function reply(cmd: string, args?: CmdArgs): unknown {
       return mockLibraryPage(args?.query as LibraryQuery);
     case "get_library_item": {
       const id = Number(args?.id);
-      const card = LIBRARY_CARDS.find((candidate) => candidate.id === id);
+      const card = mockLibraryCards().find((candidate) => candidate.id === id);
       if (!card) throw new Error("Library item was not found");
       return mockDetail(card);
     }

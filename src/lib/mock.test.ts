@@ -30,6 +30,7 @@ afterEach(() => {
   delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   delete (window as unknown as { __TAURI_EVENT_PLUGIN_INTERNALS__?: unknown })
     .__TAURI_EVENT_PLUGIN_INTERNALS__;
+  window.history.replaceState({}, "", "/");
 });
 
 describe("profile pagination mock", () => {
@@ -98,6 +99,24 @@ describe("library mock", () => {
     );
     expect(detail.id).toBe(page.items[0].id);
     expect(libraryMediaUrl(42)).toBe("library://localhost/media/42");
+  });
+
+  it("provides an unscanned empty root for the first-scan library demo", async () => {
+    window.history.replaceState({}, "", "/library?mock=1&demo=library-first-scan");
+    installTauriMock();
+
+    const configured = await ensureConfiguredLibraryRoot();
+    const roots = await listLibraryRoots();
+    const page = await queryLibrary(query);
+
+    expect(configured).toEqual(
+      expect.objectContaining({
+        last_scan_started_at: null,
+        last_scan_completed_at: null,
+      }),
+    );
+    expect(roots).toEqual([configured]);
+    expect(page).toEqual({ items: [], next_cursor: null });
   });
 
   it("emits the same deterministic scan result after starting a scan", async () => {
