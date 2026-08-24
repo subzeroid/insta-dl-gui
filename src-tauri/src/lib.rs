@@ -4,6 +4,7 @@ pub mod commands;
 pub mod config;
 pub mod hiker;
 pub mod jobs;
+pub mod library_commands;
 pub mod models;
 pub mod scanner;
 pub mod targets;
@@ -18,7 +19,7 @@ use tokio::sync::RwLock;
 use crate::catalog::Catalog;
 use crate::config::Config;
 use crate::hiker::{Balance, HikerClient};
-use crate::jobs::JobRegistry;
+use crate::jobs::{JobRegistry, ScanRegistry};
 
 #[derive(Debug, Clone, Serialize)]
 struct ConfigState {
@@ -47,6 +48,7 @@ pub struct AppState {
     /// manually by `cdn.rs` so every hop gets validated.
     cdn_http: reqwest::Client,
     pub jobs: Arc<JobRegistry>,
+    pub scans: Arc<ScanRegistry>,
     /// Targets currently being downloaded — backend-side dedup so the same
     /// profile/post never runs twice concurrently, whatever the UI does.
     in_flight: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
@@ -162,6 +164,7 @@ pub fn run() {
                 client: RwLock::new(client),
                 cdn_http,
                 jobs: Arc::new(JobRegistry::new()),
+                scans: Arc::new(ScanRegistry::new()),
                 in_flight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             });
             Ok(())
@@ -179,6 +182,9 @@ pub fn run() {
             commands::search_users,
             commands::fetch_stories,
             commands::download_direct,
+            library_commands::ensure_configured_library_root,
+            library_commands::start_library_scan,
+            library_commands::cancel_library_scan,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

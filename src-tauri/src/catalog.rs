@@ -67,6 +67,8 @@ pub enum CatalogError {
     InvalidCursor { message: String },
     #[error("catalog batch has {size} items; maximum is {max}")]
     BatchTooLarge { size: usize, max: usize },
+    #[error("catalog operation cancelled while {operation}")]
+    Cancelled { operation: &'static str },
 }
 
 impl Catalog {

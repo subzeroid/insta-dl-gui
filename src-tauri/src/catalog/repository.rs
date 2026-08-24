@@ -211,6 +211,14 @@ impl Catalog {
         &self,
         inputs: &[CatalogMediaInput],
     ) -> Result<Vec<UpsertResult>, CatalogError> {
+        self.upsert_media_batch_cancellable(inputs, || false)
+    }
+
+    pub fn upsert_media_batch_cancellable(
+        &self,
+        inputs: &[CatalogMediaInput],
+        should_cancel: impl FnOnce() -> bool,
+    ) -> Result<Vec<UpsertResult>, CatalogError> {
         if inputs.len() > MAX_BATCH_SIZE {
             return Err(CatalogError::BatchTooLarge {
                 size: inputs.len(),
@@ -249,6 +257,11 @@ impl Catalog {
         for (input, relative_paths) in inputs.iter().zip(&validated) {
             results.push(upsert_one(&transaction, input, relative_paths)?);
         }
+        if should_cancel() {
+            return Err(CatalogError::Cancelled {
+                operation: "committing media upsert",
+            });
+        }
         transaction
             .commit()
             .map_err(|source| sql_error("committing media upsert", source))?;
@@ -270,6 +283,48 @@ impl Catalog {
             )
             .map_err(|source| sql_error("marking unseen files missing", source))?;
         Ok(changed as u64)
+    }
+
+    pub fn finalize_scan_cancellable(
+        &self,
+        root_id: i64,
+        scan_started_at: i64,
+        scan_completed_at: i64,
+        should_cancel: impl FnOnce() -> bool,
+    ) -> Result<u64, CatalogError> {
+        let mut conn = self.connect()?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| sql_error("starting scan finalization", source))?;
+        ensure_root_exists(&transaction, root_id)?;
+        let missing = transaction
+            .execute(
+                "UPDATE media_files SET exists_on_disk = 0
+                 WHERE library_root_id = ?1 AND last_seen_at < ?2 AND exists_on_disk = 1",
+                params![root_id, scan_started_at],
+            )
+            .map_err(|source| sql_error("reconciling unseen files", source))?;
+        let changed = transaction
+            .execute(
+                "UPDATE library_roots SET last_scan_completed_at = ?1 WHERE id = ?2",
+                params![scan_completed_at, root_id],
+            )
+            .map_err(|source| sql_error("recording scan completion", source))?;
+        if changed == 0 {
+            return Err(CatalogError::NotFound {
+                entity: "library root",
+                id: root_id,
+            });
+        }
+        if should_cancel() {
+            return Err(CatalogError::Cancelled {
+                operation: "committing scan finalization",
+            });
+        }
+        transaction
+            .commit()
+            .map_err(|source| sql_error("committing scan finalization", source))?;
+        Ok(missing as u64)
     }
 
     pub fn query_library(&self, query: &LibraryQuery) -> Result<LibraryPage, CatalogError> {
@@ -1404,6 +1459,44 @@ mod tests {
     }
 
     #[test]
+    fn cancellable_batch_rolls_back_rows_when_cancelled_at_precommit() {
+        let fixture = Fixture::new();
+        let inputs = vec![
+            fixture.input("post:first", "first.jpg", 10),
+            fixture.input("post:second", "second.jpg", 10),
+        ];
+        let mut precommit_checks = 0;
+
+        let result = fixture.catalog.upsert_media_batch_cancellable(&inputs, || {
+            precommit_checks += 1;
+            true
+        });
+
+        assert!(matches!(
+            result,
+            Err(CatalogError::Cancelled {
+                operation: "committing media upsert"
+            })
+        ));
+        assert_eq!(precommit_checks, 1);
+        let conn = fixture.catalog.connect().unwrap();
+        for table in ["media_items", "media_files"] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table} escaped the cancelled transaction");
+        }
+
+        let committed = fixture.catalog.upsert_media_batch(&inputs).unwrap();
+        assert_eq!(committed.len(), 2);
+        assert!(committed
+            .iter()
+            .all(|result| result.disposition == UpsertDisposition::Inserted));
+    }
+
+    #[test]
     fn batch_preflights_all_roots_before_persisting_any_rows() {
         let fixture = Fixture::new();
         let mut valid = fixture.input("post:valid", "valid.jpg", 10);
@@ -1921,5 +2014,116 @@ mod tests {
         let resolved = fixture.catalog.resolve_file(inserted.file_ids[0]).unwrap();
         assert_eq!(resolved.root_path, fixture.first_root.path);
         assert_eq!(resolved.relative_path, PathBuf::from("one.jpg"));
+    }
+
+    #[test]
+    fn cancellable_scan_finalization_rolls_back_missing_and_completion_together() {
+        let fixture = Fixture::new();
+        let old = fixture
+            .catalog
+            .upsert_media(&fixture.input("post:old", "old.jpg", 10))
+            .unwrap();
+        let recent = fixture
+            .catalog
+            .upsert_media(&fixture.input("post:recent", "recent.jpg", 30))
+            .unwrap();
+        fixture
+            .catalog
+            .begin_scan(fixture.first_root.id, 20)
+            .unwrap();
+        let mut precommit_checks = 0;
+
+        let cancelled =
+            fixture
+                .catalog
+                .finalize_scan_cancellable(fixture.first_root.id, 20, 25, || {
+                    precommit_checks += 1;
+                    true
+                });
+
+        assert!(matches!(
+            cancelled,
+            Err(CatalogError::Cancelled {
+                operation: "committing scan finalization"
+            })
+        ));
+        assert_eq!(precommit_checks, 1);
+        for id in [old.media_item_id, recent.media_item_id] {
+            assert!(fixture.catalog.get_library_item(id).unwrap().unwrap().files[0].exists_on_disk);
+        }
+        assert_eq!(
+            fixture.catalog.list_roots().unwrap()[0].last_scan_completed_at,
+            None
+        );
+
+        let missing = fixture
+            .catalog
+            .finalize_scan_cancellable(fixture.first_root.id, 20, 25, || false)
+            .unwrap();
+        assert_eq!(missing, 1);
+        assert!(
+            !fixture
+                .catalog
+                .get_library_item(old.media_item_id)
+                .unwrap()
+                .unwrap()
+                .files[0]
+                .exists_on_disk
+        );
+        assert!(
+            fixture
+                .catalog
+                .get_library_item(recent.media_item_id)
+                .unwrap()
+                .unwrap()
+                .files[0]
+                .exists_on_disk
+        );
+        assert_eq!(
+            fixture.catalog.list_roots().unwrap()[0].last_scan_completed_at,
+            Some(25)
+        );
+    }
+
+    #[test]
+    fn scan_finalization_sql_failure_rolls_back_missing_changes() {
+        let fixture = Fixture::new();
+        let old = fixture
+            .catalog
+            .upsert_media(&fixture.input("post:old", "old.jpg", 10))
+            .unwrap();
+        fixture
+            .catalog
+            .begin_scan(fixture.first_root.id, 20)
+            .unwrap();
+        let conn = fixture.catalog.connect().unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER reject_scan_completion
+             BEFORE UPDATE OF last_scan_completed_at ON library_roots
+             BEGIN
+               SELECT RAISE(ABORT, 'forced scan completion failure');
+             END;",
+        )
+        .unwrap();
+
+        let result =
+            fixture
+                .catalog
+                .finalize_scan_cancellable(fixture.first_root.id, 20, 25, || false);
+
+        assert!(matches!(result, Err(CatalogError::Sql { .. })));
+        assert!(
+            fixture
+                .catalog
+                .get_library_item(old.media_item_id)
+                .unwrap()
+                .unwrap()
+                .files[0]
+                .exists_on_disk
+        );
+        assert_eq!(
+            fixture.catalog.list_roots().unwrap()[0].last_scan_completed_at,
+            None
+        );
     }
 }

@@ -7,7 +7,10 @@ use insta_dl_gui_lib::catalog::{Catalog, MediaFileKind, MediaItemKind};
 use insta_dl_gui_lib::scanner::parser::{carousel_base, parse_group};
 #[cfg(target_os = "macos")]
 use insta_dl_gui_lib::scanner::walk::validate_catalog_relative_path;
-use insta_dl_gui_lib::scanner::{discover_archive, DiscoveredFile, ScanError};
+use insta_dl_gui_lib::scanner::{
+    discover_archive, run_scan, DiscoveredFile, LibraryScanProgress, ScanCancellation, ScanError,
+    ScanSummary,
+};
 use tempfile::TempDir;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -76,6 +79,59 @@ fn discovered_file(root: &Path, relative: &str, ordinal: i64) -> DiscoveredFile 
         mtime: 1,
         ordinal,
     }
+}
+
+#[test]
+fn scan_service_imports_with_progress_without_mutating_the_archive() {
+    let database = tempfile::tempdir().unwrap();
+    let root = fixture();
+    write(root.path(), "posts/first.jpg", b"first photo");
+    write(root.path(), "posts/second.jpg", b"second photo");
+    write(root.path(), "posts/second.json", b"{broken-json");
+    let before = snapshot(root.path());
+    let catalog = Catalog::open(database.path().join("catalog.sqlite3")).unwrap();
+    let library_root = catalog.register_root(root.path(), "Archive").unwrap();
+    catalog.begin_scan(library_root.id, 1234).unwrap();
+    let mut events = Vec::new();
+
+    let terminal = run_scan(
+        &catalog,
+        &library_root,
+        "integration-scan",
+        1234,
+        &ScanCancellation::new(),
+        |event| {
+            events.push(event.clone());
+            Ok(())
+        },
+    );
+
+    assert_eq!(
+        terminal,
+        LibraryScanProgress::Done {
+            scan_id: "integration-scan".into(),
+            root_id: library_root.id,
+            summary: ScanSummary {
+                imported: 2,
+                updated: 0,
+                missing: 0,
+                warnings: 1,
+            },
+        }
+    );
+    assert!(matches!(
+        events.as_slice(),
+        [
+            LibraryScanProgress::Scanning {
+                discovered: 2,
+                processed: 2,
+                warnings: 1,
+                ..
+            },
+            LibraryScanProgress::Done { .. }
+        ]
+    ));
+    assert_eq!(snapshot(root.path()), before);
 }
 
 #[test]

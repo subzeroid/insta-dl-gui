@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::catalog::{CatalogFileInput, CatalogMediaInput, MediaFileKind, MediaItemKind};
 
-use super::{extension_is, DiscoveredFile, ScanWarning};
+use super::{extension_is, DiscoveredFile, ScanError, ScanWarning};
 
 const MAX_SIDECAR_BYTES: i64 = 4 * 1024 * 1024;
 
@@ -22,14 +22,38 @@ pub struct DiscoveredGroup {
 }
 
 pub fn parse_group(root_id: i64, root: &Path, files: &[DiscoveredFile]) -> DiscoveredGroup {
+    parse_group_cancellable(root_id, root, files, &mut || false)
+        .expect("the public parser uses a non-cancelling predicate")
+}
+
+pub(crate) fn parse_group_cancellable(
+    root_id: i64,
+    root: &Path,
+    files: &[DiscoveredFile],
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<DiscoveredGroup, ScanError> {
     let mut warnings = Vec::new();
-    let sidecar = files
-        .iter()
-        .find(|file| extension_is(&file.relative_path, "json"))
-        .and_then(|file| read_sidecar(root, file, &mut warnings));
-    let first_media = files
-        .iter()
-        .find(|file| !extension_is(&file.relative_path, "json"));
+    let mut sidecar_file = None;
+    for file in files {
+        if should_cancel() {
+            return Err(ScanError::Cancelled);
+        }
+        if extension_is(&file.relative_path, "json") {
+            sidecar_file = Some(file);
+            break;
+        }
+    }
+    let sidecar = sidecar_file.and_then(|file| read_sidecar(root, file, &mut warnings));
+    let mut first_media = None;
+    for file in files {
+        if should_cancel() {
+            return Err(ScanError::Cancelled);
+        }
+        if !extension_is(&file.relative_path, "json") {
+            first_media = Some(file);
+            break;
+        }
+    }
     let relative_path = first_media
         .map(|file| file.relative_path.as_path())
         .unwrap_or_else(|| Path::new("unknown"));
@@ -46,16 +70,20 @@ pub fn parse_group(root_id: i64, root: &Path, files: &[DiscoveredFile]) -> Disco
             (kind, Some(remote_pk), remote_key)
         }
         None => {
-            let local_path = carousel_identity_path(files).unwrap_or_else(|| relative_path.into());
+            let local_path = carousel_identity_path_cancellable(files, should_cancel)?
+                .unwrap_or_else(|| relative_path.into());
             let encoded = percent_encode_relative(&local_path);
             (inferred_kind, None, format!("local:{root_id}:{encoded}"))
         }
     };
     let now = unix_now();
 
-    let item_files = files
-        .iter()
-        .map(|file| CatalogFileInput {
+    let mut item_files = Vec::with_capacity(files.len());
+    for file in files {
+        if should_cancel() {
+            return Err(ScanError::Cancelled);
+        }
+        item_files.push(CatalogFileInput {
             root_id,
             relative_path: file.relative_path.clone(),
             ordinal: file.ordinal,
@@ -63,8 +91,8 @@ pub fn parse_group(root_id: i64, root: &Path, files: &[DiscoveredFile]) -> Disco
             byte_size: file.byte_size,
             mtime: file.mtime,
             last_seen_at: now,
-        })
-        .collect();
+        });
+    }
     let owner = sidecar.as_ref().and_then(|sidecar| sidecar.get("owner"));
     let item = CatalogMediaInput {
         remote_key: remote_key.clone(),
@@ -82,19 +110,31 @@ pub fn parse_group(root_id: i64, root: &Path, files: &[DiscoveredFile]) -> Disco
         caption: sidecar
             .as_ref()
             .and_then(|sidecar| value_string(sidecar.get("caption"))),
-        like_count: nonnegative_count(&sidecar, "like_count", files, &mut warnings),
-        comment_count: nonnegative_count(&sidecar, "comment_count", files, &mut warnings),
+        like_count: nonnegative_count_cancellable(
+            &sidecar,
+            "like_count",
+            files,
+            &mut warnings,
+            should_cancel,
+        )?,
+        comment_count: nonnegative_count_cancellable(
+            &sidecar,
+            "comment_count",
+            files,
+            &mut warnings,
+            should_cancel,
+        )?,
         imported_at: now,
         updated_at: now,
         files: item_files,
         source_id: None,
     };
 
-    DiscoveredGroup {
+    Ok(DiscoveredGroup {
         remote_key,
         item,
         warnings,
-    }
+    })
 }
 
 pub fn carousel_base(stem: &str) -> (String, u32) {
@@ -253,59 +293,75 @@ fn valid_story_timestamp(timestamp: &str) -> bool {
     exact_writer_shape && NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d_%H-%M-%S").is_ok()
 }
 
-fn carousel_identity_path(files: &[DiscoveredFile]) -> Option<PathBuf> {
-    let media = files
-        .iter()
-        .filter(|file| !extension_is(&file.relative_path, "json"))
-        .collect::<Vec<_>>();
-    if media.len() < 2 {
-        return None;
-    }
-    let first = media.first()?;
-    let parent = first
-        .relative_path
-        .parent()
-        .unwrap_or_else(|| Path::new(""));
-    let first_stem = first.relative_path.file_stem()?.to_string_lossy();
-    let (base, first_suffix) = carousel_base(&first_stem);
-    let mut has_numeric_suffix = first_suffix > 0;
-    for file in media.iter().skip(1) {
-        if file.relative_path.parent().unwrap_or_else(|| Path::new("")) != parent {
-            return None;
+fn carousel_identity_path_cancellable(
+    files: &[DiscoveredFile],
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<Option<PathBuf>, ScanError> {
+    let mut media_count = 0_usize;
+    let mut parent = None::<PathBuf>;
+    let mut base = None::<String>;
+    let mut has_numeric_suffix = false;
+    for file in files {
+        if should_cancel() {
+            return Err(ScanError::Cancelled);
         }
-        let stem = file.relative_path.file_stem()?.to_string_lossy();
-        let (candidate_base, suffix) = carousel_base(&stem);
-        if candidate_base != base {
-            return None;
+        if extension_is(&file.relative_path, "json") {
+            continue;
         }
+        let candidate_parent = file.relative_path.parent().unwrap_or_else(|| Path::new(""));
+        let Some(stem) = file.relative_path.file_stem() else {
+            return Ok(None);
+        };
+        let (candidate_base, suffix) = carousel_base(&stem.to_string_lossy());
+        if media_count == 0 {
+            parent = Some(candidate_parent.to_path_buf());
+            base = Some(candidate_base);
+        } else if parent.as_deref() != Some(candidate_parent)
+            || base.as_deref() != Some(candidate_base.as_str())
+        {
+            return Ok(None);
+        }
+        media_count += 1;
         has_numeric_suffix |= suffix > 0;
     }
-    has_numeric_suffix.then(|| parent.join(base))
+    if media_count < 2 || !has_numeric_suffix {
+        return Ok(None);
+    }
+    Ok(Some(
+        parent.unwrap_or_default().join(base.unwrap_or_default()),
+    ))
 }
 
-fn nonnegative_count(
+fn nonnegative_count_cancellable(
     sidecar: &Option<Value>,
     field: &str,
     files: &[DiscoveredFile],
     warnings: &mut Vec<ScanWarning>,
-) -> Option<i64> {
-    let value = sidecar
+    should_cancel: &mut impl FnMut() -> bool,
+) -> Result<Option<i64>, ScanError> {
+    let Some(value) = sidecar
         .as_ref()
         .and_then(|sidecar| sidecar.get(field))
-        .and_then(value_i64)?;
+        .and_then(value_i64)
+    else {
+        return Ok(None);
+    };
     if value < 0 {
-        if let Some(metadata) = files
-            .iter()
-            .find(|file| extension_is(&file.relative_path, "json"))
-        {
-            warnings.push(sidecar_warning(
-                metadata,
-                format!("metadata field {field} must not be negative; ignored"),
-            ));
+        for file in files {
+            if should_cancel() {
+                return Err(ScanError::Cancelled);
+            }
+            if extension_is(&file.relative_path, "json") {
+                warnings.push(sidecar_warning(
+                    file,
+                    format!("metadata field {field} must not be negative; ignored"),
+                ));
+                break;
+            }
         }
-        None
+        Ok(None)
     } else {
-        Some(value)
+        Ok(Some(value))
     }
 }
 

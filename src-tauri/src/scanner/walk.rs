@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,6 +16,13 @@ pub struct WalkedArchive {
 }
 
 pub fn walk_archive(root: &Path) -> Result<WalkedArchive, ScanError> {
+    walk_archive_with_cancel(root, || false)
+}
+
+pub(crate) fn walk_archive_with_cancel(
+    root: &Path,
+    mut should_cancel: impl FnMut() -> bool,
+) -> Result<WalkedArchive, ScanError> {
     let metadata = fs::metadata(root).map_err(|source| ScanError::Io {
         operation: "inspect library root",
         path: root.to_path_buf(),
@@ -31,7 +39,7 @@ pub fn walk_archive(root: &Path) -> Result<WalkedArchive, ScanError> {
         source,
     })?;
 
-    let mut files = Vec::new();
+    let mut files_by_path = BTreeMap::new();
     let mut warnings = Vec::new();
     let mut complete = true;
     for entry in WalkDir::new(&canonical_root)
@@ -39,6 +47,9 @@ pub fn walk_archive(root: &Path) -> Result<WalkedArchive, ScanError> {
         .into_iter()
         .filter_entry(|entry| !is_hidden_below_root(entry, &canonical_root))
     {
+        if should_cancel() {
+            return Err(ScanError::Cancelled);
+        }
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -133,18 +144,27 @@ pub fn walk_archive(root: &Path) -> Result<WalkedArchive, ScanError> {
             }
         };
 
-        files.push(DiscoveredFile {
-            relative_path,
-            byte_size,
-            mtime: metadata
-                .modified()
-                .map(system_time_seconds)
-                .unwrap_or_default(),
-            ordinal: 0,
-        });
+        files_by_path.insert(
+            relative_path.clone(),
+            DiscoveredFile {
+                relative_path,
+                byte_size,
+                mtime: metadata
+                    .modified()
+                    .map(system_time_seconds)
+                    .unwrap_or_default(),
+                ordinal: 0,
+            },
+        );
     }
 
-    files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    let mut files = Vec::with_capacity(files_by_path.len());
+    for (_, file) in files_by_path {
+        if should_cancel() {
+            return Err(ScanError::Cancelled);
+        }
+        files.push(file);
+    }
     Ok(WalkedArchive {
         canonical_root,
         files,
@@ -211,10 +231,12 @@ fn system_time_seconds(time: SystemTime) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::io;
     use std::path::Path;
 
-    use super::{record_incomplete_io, ScanWarning};
+    use super::{record_incomplete_io, walk_archive_with_cancel, ScanWarning};
+    use crate::scanner::ScanError;
 
     #[test]
     fn scanner_walk_gap_marks_discovery_incomplete_without_absolute_warning_path() {
@@ -242,5 +264,24 @@ mod tests {
         assert!(!warnings[0].message.contains("/private/library-root"));
         assert!(!warnings[0].message.contains("unreadable.jpg"));
         assert!(warnings[0].message.contains("PermissionDenied"));
+    }
+
+    #[test]
+    fn scanner_walk_stops_when_cancellation_is_observed() {
+        let root = tempfile::tempdir().unwrap();
+        let posts = root.path().join("posts");
+        fs::create_dir_all(&posts).unwrap();
+        for index in 0..50 {
+            fs::write(posts.join(format!("item-{index}.jpg")), b"photo").unwrap();
+        }
+        let mut checks = 0;
+
+        let result = walk_archive_with_cancel(root.path(), || {
+            checks += 1;
+            checks > 4
+        });
+
+        assert!(matches!(result, Err(ScanError::Cancelled)));
+        assert_eq!(checks, 5);
     }
 }
