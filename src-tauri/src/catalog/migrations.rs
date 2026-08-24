@@ -75,6 +75,8 @@ CREATE TRIGGER media_items_au AFTER UPDATE ON media_items BEGIN
 END;
 
 CREATE INDEX media_items_taken_at_idx ON media_items(taken_at DESC, id DESC);
+CREATE INDEX media_items_effective_taken_at_idx
+ON media_items(COALESCE(taken_at, imported_at) DESC, id DESC);
 CREATE INDEX media_items_imported_at_idx ON media_items(imported_at DESC, id DESC);
 CREATE INDEX media_items_kind_idx ON media_items(kind);
 CREATE INDEX media_files_item_idx ON media_files(media_item_id);
@@ -195,6 +197,7 @@ mod tests {
         }
         for index in [
             "media_items_taken_at_idx",
+            "media_items_effective_taken_at_idx",
             "media_items_imported_at_idx",
             "media_items_kind_idx",
             "media_files_item_idx",

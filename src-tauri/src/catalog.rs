@@ -1,4 +1,9 @@
 pub mod migrations;
+pub mod models;
+mod repository;
+
+pub use models::*;
+pub use repository::local_remote_key;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -37,6 +42,31 @@ pub enum CatalogError {
         #[source]
         source: migrations::MigrationError,
     },
+    #[error("I/O error while {operation} {path}: {source}")]
+    Io {
+        operation: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("SQLite error while {operation}: {source}")]
+    Sql {
+        operation: &'static str,
+        #[source]
+        source: rusqlite::Error,
+    },
+    #[error("{entity} {id} was not found")]
+    NotFound { entity: &'static str, id: i64 },
+    #[error("invalid relative path {path}")]
+    InvalidRelativePath { path: PathBuf },
+    #[error("path is not valid UTF-8: {path}")]
+    NonUtf8Path { path: PathBuf },
+    #[error("invalid catalog input: {message}")]
+    InvalidInput { message: String },
+    #[error("invalid library cursor: {message}")]
+    InvalidCursor { message: String },
+    #[error("catalog batch has {size} items; maximum is {max}")]
+    BatchTooLarge { size: usize, max: usize },
 }
 
 impl Catalog {
