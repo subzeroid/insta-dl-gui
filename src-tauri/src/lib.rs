@@ -51,15 +51,17 @@ fn save_settings_with_catalog(
     persist: impl FnOnce(&Config) -> Result<(), String>,
     catalog: &Catalog,
 ) -> Result<ConfigState, String> {
+    let mut candidate = config.clone();
     if let Some(destination) = dest_dir {
         if !destination.trim().is_empty() {
-            config.dest_dir = destination.trim().to_owned();
+            candidate.dest_dir = destination.trim().to_owned();
         }
     }
     if let Some(enabled) = sidecar {
-        config.sidecar = enabled;
+        candidate.sidecar = enabled;
     }
-    persist(config)?;
+    persist(&candidate)?;
+    *config = candidate;
 
     let mut state = ConfigState::from(&*config);
     if catalog
@@ -74,9 +76,27 @@ fn save_settings_with_catalog(
     Ok(state)
 }
 
+async fn save_settings_on_blocking_thread<Persist>(
+    config: Arc<RwLock<Config>>,
+    catalog: Catalog,
+    dest_dir: Option<String>,
+    sidecar: Option<bool>,
+    persist: Persist,
+) -> Result<ConfigState, String>
+where
+    Persist: FnOnce(&Config) -> Result<(), String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut config = config.blocking_write();
+        save_settings_with_catalog(&mut config, dest_dir, sidecar, persist, &catalog)
+    })
+    .await
+    .map_err(|_| "Settings could not be saved".to_owned())?
+}
+
 pub struct AppState {
     pub catalog: Catalog,
-    cfg: RwLock<Config>,
+    cfg: Arc<RwLock<Config>>,
     client: RwLock<Option<Arc<HikerClient>>>,
     /// Separate HTTP client for CDN downloads: redirects are followed
     /// manually by `cdn.rs` so every hop gets validated.
@@ -132,14 +152,14 @@ async fn save_settings(
     sidecar: Option<bool>,
     state: tauri::State<'_, AppState>,
 ) -> Result<ConfigState, String> {
-    let mut cfg = state.cfg.write().await;
-    save_settings_with_catalog(
-        &mut cfg,
+    save_settings_on_blocking_thread(
+        Arc::clone(&state.cfg),
+        state.catalog.clone(),
         dest_dir,
         sidecar,
         |config| config.save(),
-        &state.catalog,
     )
+    .await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -201,7 +221,7 @@ pub fn run() {
 
             app.manage(AppState {
                 catalog,
-                cfg: RwLock::new(cfg),
+                cfg: Arc::new(RwLock::new(cfg)),
                 client: RwLock::new(client),
                 cdn_http,
                 jobs: Arc::new(JobRegistry::new()),
@@ -239,10 +259,13 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     use tempfile::tempdir;
 
-    use super::{save_settings_with_catalog, Catalog, Config};
+    use super::{save_settings_on_blocking_thread, save_settings_with_catalog, Catalog, Config};
+    use tokio::sync::RwLock;
 
     #[test]
     fn save_settings_registers_library_root_and_preserves_previous_root() {
@@ -308,5 +331,64 @@ mod tests {
             .as_deref()
             .is_some_and(|warning| { warning.contains("Library") && warning.contains("saved") }));
         assert!(catalog.list_roots().unwrap().is_empty());
+    }
+
+    #[test]
+    fn save_settings_persistence_failure_leaves_runtime_config_unchanged() {
+        let directory = tempdir().unwrap();
+        let catalog = Catalog::open(directory.path().join("catalog.sqlite3")).unwrap();
+        let old_destination = directory.path().join("old-downloads");
+        let new_destination = directory.path().join("new-downloads");
+        let mut config = Config {
+            dest_dir: old_destination.to_string_lossy().into_owned(),
+            sidecar: true,
+            ..Config::default()
+        };
+
+        let error = save_settings_with_catalog(
+            &mut config,
+            Some(new_destination.to_string_lossy().into_owned()),
+            Some(false),
+            |_| Err("config disk is full".to_owned()),
+            &catalog,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "config disk is full");
+        assert_eq!(config.dest_dir, old_destination.to_string_lossy());
+        assert!(config.sidecar);
+        assert!(catalog.list_roots().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn save_settings_runs_blocking_work_off_async_worker() {
+        let directory = tempdir().unwrap();
+        let catalog = Catalog::open(directory.path().join("catalog.sqlite3")).unwrap();
+        let destination = directory.path().join("downloads");
+        let config = Arc::new(RwLock::new(Config::default()));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        let save = save_settings_on_blocking_thread(
+            Arc::clone(&config),
+            catalog,
+            Some(destination.to_string_lossy().into_owned()),
+            None,
+            move |_| {
+                started_tx.send(()).unwrap();
+                release_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .map_err(|_| "async worker did not make progress".to_owned())?;
+                Ok(())
+            },
+        );
+        let heartbeat = async {
+            started_rx.await.unwrap();
+            tokio::task::yield_now().await;
+            release_tx.send(()).unwrap();
+        };
+        let (state, ()) = tokio::join!(save, heartbeat);
+
+        assert_eq!(state.unwrap().dest_dir, destination.to_string_lossy());
     }
 }

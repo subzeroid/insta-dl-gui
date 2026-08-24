@@ -21,6 +21,25 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: dialog.open }));
 import { useAppStore } from "../stores/app";
 import SettingsView from "./SettingsView.vue";
 
+async function renderSettings() {
+  const pinia = createPinia();
+  setActivePinia(pinia);
+  const app = useAppStore();
+  await app.init();
+  const wrapper = mount(SettingsView, {
+    global: {
+      plugins: [pinia],
+      stubs: {
+        RouterLink: {
+          props: ["to"],
+          template: '<a :href="to"><slot /></a>',
+        },
+      },
+    },
+  });
+  return { app, wrapper };
+}
+
 describe("Settings Library registration warning", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
@@ -43,21 +62,7 @@ describe("Settings Library registration warning", () => {
       sidecar: true,
       catalog_warning: "Settings were saved, but the folder could not be added to the Library.",
     });
-    const pinia = createPinia();
-    setActivePinia(pinia);
-    const app = useAppStore();
-    await app.init();
-    const wrapper = mount(SettingsView, {
-      global: {
-        plugins: [pinia],
-        stubs: {
-          RouterLink: {
-            props: ["to"],
-            template: '<a :href="to"><slot /></a>',
-          },
-        },
-      },
-    });
+    const { wrapper } = await renderSettings();
 
     await wrapper.get("button").trigger("click");
     await flushPromises();
@@ -66,5 +71,37 @@ describe("Settings Library registration warning", () => {
     expect(wrapper.text()).toContain("Settings were saved");
     const link = wrapper.get('a[href="/library"]');
     expect(link.text()).toContain("Library");
+  });
+
+  it("keeps the previous destination and shows a sanitized error when saving fails", async () => {
+    dialog.open.mockResolvedValue("/archive/new");
+    ipc.saveSettings.mockRejectedValue(
+      new Error("failed to write /Users/private/.config/insta-dl-gui/config.json"),
+    );
+    const { wrapper } = await renderSettings();
+
+    await wrapper.get("button").trigger("click");
+    await flushPromises();
+
+    expect(ipc.saveSettings).toHaveBeenCalledOnce();
+    expect(ipc.saveSettings).toHaveBeenCalledWith({ dest_dir: "/archive/new" });
+    expect(wrapper.get("input[readonly]").attributes("value")).toBe("/archive/old");
+    const alert = wrapper.get('[role="alert"]');
+    expect(alert.text()).toContain("Settings could not be saved");
+    expect(alert.text()).not.toContain("/Users/private");
+  });
+
+  it("restores the sidecar control after a rejected save without retrying", async () => {
+    ipc.saveSettings.mockRejectedValue(new Error("database connection failed"));
+    const { wrapper } = await renderSettings();
+    const checkbox = wrapper.get<HTMLInputElement>('input[type="checkbox"]');
+
+    await checkbox.setValue(false);
+    await flushPromises();
+
+    expect(ipc.saveSettings).toHaveBeenCalledOnce();
+    expect(ipc.saveSettings).toHaveBeenCalledWith({ sidecar: false });
+    expect(checkbox.element.checked).toBe(true);
+    expect(wrapper.get('[role="alert"]').text()).toContain("Settings could not be saved");
   });
 });

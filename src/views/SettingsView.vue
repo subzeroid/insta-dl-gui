@@ -5,19 +5,37 @@ import { useAppStore } from "../stores/app";
 
 const app = useAppStore();
 const sidecar = ref(app.sidecar);
+const saveError = ref<string | null>(null);
+let restoringSidecar = false;
 
 onMounted(() => {
   sidecar.value = app.sidecar;
 });
 
 watch(sidecar, async (v) => {
-  await app.saveSettings({ sidecar: v });
+  if (restoringSidecar) {
+    restoringSidecar = false;
+    return;
+  }
+  saveError.value = null;
+  try {
+    await app.saveSettings({ sidecar: v });
+  } catch {
+    saveError.value = "Settings could not be saved. Your previous settings are still active.";
+    restoringSidecar = true;
+    sidecar.value = app.sidecar;
+  }
 });
 
 async function pickDir() {
   const dir = await open({ directory: true });
   if (typeof dir === "string") {
-    await app.saveSettings({ dest_dir: dir });
+    saveError.value = null;
+    try {
+      await app.saveSettings({ dest_dir: dir });
+    } catch {
+      saveError.value = "Settings could not be saved. Your previous settings are still active.";
+    }
   }
 }
 </script>
@@ -34,6 +52,14 @@ async function pickDir() {
         <button class="btn-secondary shrink-0" @click="pickDir">Browse…</button>
       </div>
     </div>
+
+    <p
+      v-if="saveError"
+      class="rounded-lg border border-err/40 bg-err/10 px-4 py-3 text-sm text-err"
+      role="alert"
+    >
+      {{ saveError }}
+    </p>
 
     <div
       v-if="app.catalogWarning"
