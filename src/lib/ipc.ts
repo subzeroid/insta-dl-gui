@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 export interface ConfigState {
@@ -15,6 +15,113 @@ export interface Balance {
   currency: string | null;
 }
 
+export type MediaItemKind = "post" | "reel" | "story" | "avatar";
+export type MediaFileKind = "photo" | "video" | "metadata" | "unknown";
+export type FileAvailability = "available" | "missing";
+export type LibrarySort = "taken_at_desc" | "imported_at_desc";
+
+export interface LibraryRoot {
+  id: number;
+  path: string;
+  label: string;
+  created_at: number;
+  last_scan_started_at: number | null;
+  last_scan_completed_at: number | null;
+}
+
+export interface LibraryQuery {
+  search: string | null;
+  kinds: MediaItemKind[];
+  source_id: number | null;
+  availability: FileAvailability | null;
+  taken_after: number | null;
+  taken_before: number | null;
+  sort: LibrarySort;
+  cursor: string | null;
+  limit: number;
+}
+
+export interface LibraryCard {
+  id: number;
+  kind: MediaItemKind;
+  shortcode: string | null;
+  owner_username: string | null;
+  taken_at: number | null;
+  caption: string | null;
+  imported_at: number;
+  updated_at: number;
+  preview_file_id: number | null;
+  resource_count: number;
+  availability: FileAvailability;
+}
+
+export interface LibraryPage {
+  items: LibraryCard[];
+  next_cursor: string | null;
+}
+
+export interface LibraryFile {
+  id: number;
+  ordinal: number;
+  kind: MediaFileKind;
+  byte_size: number;
+  mtime: number;
+  exists_on_disk: boolean;
+  last_seen_at: number;
+}
+
+export interface LibraryItemDetail {
+  id: number;
+  kind: MediaItemKind;
+  remote_pk: string | null;
+  shortcode: string | null;
+  owner_pk: string | null;
+  owner_username: string | null;
+  taken_at: number | null;
+  caption: string | null;
+  like_count: number | null;
+  comment_count: number | null;
+  imported_at: number;
+  updated_at: number;
+  files: LibraryFile[];
+  source_ids: number[];
+}
+
+export interface ScanSummary {
+  imported: number;
+  updated: number;
+  missing: number;
+  warnings: number;
+}
+
+export type LibraryScanProgress =
+  | {
+      state: "scanning";
+      scan_id: string;
+      root_id: number;
+      discovered: number;
+      processed: number;
+      warnings: number;
+    }
+  | {
+      state: "done";
+      scan_id: string;
+      root_id: number;
+      summary: ScanSummary;
+    }
+  | {
+      state: "failed";
+      scan_id: string;
+      root_id: number;
+      error: string;
+    }
+  | {
+      state: "cancelled";
+      scan_id: string;
+      root_id: number;
+      summary: ScanSummary;
+    };
+
 export async function configState(): Promise<ConfigState> {
   return invoke("config_state");
 }
@@ -25,6 +132,51 @@ export async function validateToken(token: string): Promise<Balance> {
 
 export async function getBalance(): Promise<Balance> {
   return invoke("get_balance");
+}
+
+export async function ensureConfiguredLibraryRoot(): Promise<LibraryRoot> {
+  return invoke("ensure_configured_library_root");
+}
+
+export async function listLibraryRoots(): Promise<LibraryRoot[]> {
+  return invoke("list_library_roots");
+}
+
+export async function startLibraryScan(rootId: number): Promise<string> {
+  return invoke("start_library_scan", { rootId });
+}
+
+export async function cancelLibraryScan(scanId: string): Promise<boolean> {
+  return invoke("cancel_library_scan", { scanId });
+}
+
+export async function queryLibrary(query: LibraryQuery): Promise<LibraryPage> {
+  return invoke("query_library", { query });
+}
+
+export async function getLibraryItem(id: number): Promise<LibraryItemDetail> {
+  return invoke("get_library_item", { id });
+}
+
+export async function openLibraryFile(fileId: number): Promise<void> {
+  return invoke("open_library_file", { fileId });
+}
+
+export async function revealLibraryFile(fileId: number): Promise<void> {
+  return invoke("reveal_library_file", { fileId });
+}
+
+export async function onLibraryScanProgress(
+  cb: (event: LibraryScanProgress) => void,
+): Promise<() => void> {
+  const unlisten = await listen<LibraryScanProgress>("library-scan-progress", (event) =>
+    cb(event.payload),
+  );
+  return unlisten;
+}
+
+export function libraryMediaUrl(fileId: number): string {
+  return convertFileSrc(`/media/${fileId}`, "library");
 }
 
 export async function saveSettings(opts: { dest_dir?: string; sidecar?: boolean }): Promise<ConfigState> {
