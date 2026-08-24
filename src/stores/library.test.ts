@@ -271,6 +271,56 @@ describe("library query state", () => {
 });
 
 describe("library initialization lifecycle", () => {
+  it("ignores a root load that resumes after dispose and a new lifecycle load", async () => {
+    const rootA: LibraryRoot = { ...root, id: 11, path: "/mock/archive-a", label: "Archive A" };
+    const rootB: LibraryRoot = { ...root, id: 12, path: "/mock/archive-b", label: "Archive B" };
+    const configuredA = deferred<LibraryRoot>();
+    ipc.ensureConfiguredLibraryRoot
+      .mockImplementationOnce(() => configuredA.promise)
+      .mockResolvedValueOnce(rootB);
+    ipc.listLibraryRoots
+      .mockResolvedValueOnce([rootB])
+      .mockResolvedValueOnce([rootA]);
+    const store = useLibraryStore();
+
+    const staleLoad = store.loadRoots();
+    store.dispose();
+    await store.loadRoots();
+    expect(store.activeRoot).toEqual(rootB);
+    expect(store.roots).toEqual([rootB]);
+
+    configuredA.resolve(rootA);
+    await staleLoad;
+
+    expect(ipc.listLibraryRoots).toHaveBeenCalledTimes(1);
+    expect(store.activeRoot).toEqual(rootB);
+    expect(store.roots).toEqual([rootB]);
+    expect(store.rootsLoading).toBe(false);
+  });
+
+  it("lets only the latest concurrent root load write within one lifecycle", async () => {
+    const rootA: LibraryRoot = { ...root, id: 21, path: "/mock/concurrent-a", label: "Concurrent A" };
+    const rootB: LibraryRoot = { ...root, id: 22, path: "/mock/concurrent-b", label: "Concurrent B" };
+    const configuredA = deferred<LibraryRoot>();
+    ipc.ensureConfiguredLibraryRoot
+      .mockImplementationOnce(() => configuredA.promise)
+      .mockResolvedValueOnce(rootB);
+    ipc.listLibraryRoots
+      .mockResolvedValueOnce([rootB])
+      .mockResolvedValueOnce([rootA]);
+    const store = useLibraryStore();
+
+    const staleLoad = store.loadRoots();
+    await store.loadRoots();
+    configuredA.resolve(rootA);
+    await staleLoad;
+
+    expect(ipc.listLibraryRoots).toHaveBeenCalledTimes(1);
+    expect(store.activeRoot).toEqual(rootB);
+    expect(store.roots).toEqual([rootB]);
+    expect(store.rootsLoading).toBe(false);
+  });
+
   it("shares one subscription and initialization promise across concurrent callers", async () => {
     const registration = deferred<() => void>();
     const unlisten = vi.fn();

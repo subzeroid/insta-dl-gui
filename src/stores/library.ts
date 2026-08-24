@@ -90,6 +90,7 @@ export const useLibraryStore = defineStore("library", () => {
   let initialized = false;
   let initPromise: Promise<void> | null = null;
   let lifecycleGeneration = 0;
+  let rootsRequestGeneration = 0;
   let unlistenScan: (() => void) | null = null;
   let deferredListenerTeardown = false;
   let pendingScanRootId: number | null = null;
@@ -215,9 +216,11 @@ export const useLibraryStore = defineStore("library", () => {
     detailError.value = null;
   }
 
-  async function loadRoots(expectedGeneration?: number) {
+  async function loadRoots(expectedGeneration = lifecycleGeneration) {
+    const requestGeneration = ++rootsRequestGeneration;
     const isCurrent = () =>
-      expectedGeneration === undefined || expectedGeneration === lifecycleGeneration;
+      expectedGeneration === lifecycleGeneration &&
+      requestGeneration === rootsRequestGeneration;
     rootsLoading.value = true;
     rootsError.value = null;
     try {
