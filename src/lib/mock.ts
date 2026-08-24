@@ -344,19 +344,25 @@ export function installTauriMock(): void {
   }
 
   function emitScan(rootId: number) {
+    const emptyLibraryDemo = isLibraryFirstScanDemo();
     emit("library-scan-progress", {
       state: "scanning",
       scan_id: "mock-library-scan",
       root_id: rootId,
-      discovered: 4,
-      processed: 2,
+      discovered: emptyLibraryDemo ? 0 : 4,
+      processed: emptyLibraryDemo ? 0 : 2,
       warnings: 0,
     });
     emit("library-scan-progress", {
       state: "done",
       scan_id: "mock-library-scan",
       root_id: rootId,
-      summary: { imported: 4, updated: 0, missing: 1, warnings: 0 },
+      summary: {
+        imported: emptyLibraryDemo ? 0 : 4,
+        updated: 0,
+        missing: emptyLibraryDemo ? 0 : 1,
+        warnings: 0,
+      },
     });
   }
 

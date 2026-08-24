@@ -147,6 +147,35 @@ describe("library mock", () => {
     await unlisten();
   });
 
+  it("emits an empty scan result for the first-scan library demo", async () => {
+    window.history.replaceState({}, "", "/library?mock=1&demo=library-first-scan");
+    installTauriMock();
+    const events: LibraryScanProgress[] = [];
+    const unlisten = await onLibraryScanProgress((event) => events.push(event));
+
+    await expect(startLibraryScan(1)).resolves.toBe("mock-library-scan");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(events).toEqual([
+      {
+        state: "scanning",
+        scan_id: "mock-library-scan",
+        root_id: 1,
+        discovered: 0,
+        processed: 0,
+        warnings: 0,
+      },
+      {
+        state: "done",
+        scan_id: "mock-library-scan",
+        root_id: 1,
+        summary: { imported: 0, updated: 0, missing: 0, warnings: 0 },
+      },
+    ]);
+    await unlisten();
+  });
+
   it("sorts mock cards by the selected timestamp with a stable ID tie-break", async () => {
     installTauriMock();
 
