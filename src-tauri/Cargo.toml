@@ -29,6 +29,12 @@ fs2 = "0.4"
 url = "2"
 bytes = "1"
 filetime = "0.2"
+rusqlite = { version = "0.37", features = ["bundled"] }
+walkdir = "2"
+base64 = "0.22"
+percent-encoding = "2"
+mime_guess = "2"
 
 [dev-dependencies]
 wiremock = "0.6"
+tempfile = "3"

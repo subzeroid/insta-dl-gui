@@ -1,3 +1,4 @@
+pub mod catalog;
 pub mod cdn;
 pub mod commands;
 pub mod config;
@@ -9,8 +10,11 @@ pub mod targets;
 use std::sync::Arc;
 
 use serde::Serialize;
+use tauri::Manager;
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tokio::sync::RwLock;
 
+use crate::catalog::Catalog;
 use crate::config::Config;
 use crate::hiker::{Balance, HikerClient};
 use crate::jobs::JobRegistry;
@@ -35,6 +39,7 @@ impl From<&Config> for ConfigState {
 }
 
 pub struct AppState {
+    pub catalog: Catalog,
     cfg: RwLock<Config>,
     client: RwLock<Option<Arc<HikerClient>>>,
     /// Separate HTTP client for CDN downloads: redirects are followed
@@ -118,12 +123,47 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(AppState {
-            cfg: RwLock::new(cfg),
-            client: RwLock::new(client),
-            cdn_http,
-            jobs: Arc::new(JobRegistry::new()),
-            in_flight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        .setup(move |app| {
+            let catalog_path = match dirs::data_dir() {
+                Some(data_dir) => data_dir.join("insta-dl-gui/catalog.sqlite3"),
+                None => {
+                    let message =
+                        "Failed to initialize catalog: no platform data directory is available";
+                    eprintln!("{message}");
+                    app.dialog()
+                        .message(message)
+                        .title("Catalog initialization failed")
+                        .kind(MessageDialogKind::Error)
+                        .blocking_show();
+                    return Err(std::io::Error::other(message).into());
+                }
+            };
+            let catalog = match Catalog::open(&catalog_path) {
+                Ok(catalog) => catalog,
+                Err(error) => {
+                    let message = format!(
+                        "Failed to initialize catalog at {}: {error}",
+                        catalog_path.display()
+                    );
+                    eprintln!("{message}");
+                    app.dialog()
+                        .message(&message)
+                        .title("Catalog initialization failed")
+                        .kind(MessageDialogKind::Error)
+                        .blocking_show();
+                    return Err(std::io::Error::other(message).into());
+                }
+            };
+
+            app.manage(AppState {
+                catalog,
+                cfg: RwLock::new(cfg),
+                client: RwLock::new(client),
+                cdn_http,
+                jobs: Arc::new(JobRegistry::new()),
+                in_flight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            });
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             config_state,
