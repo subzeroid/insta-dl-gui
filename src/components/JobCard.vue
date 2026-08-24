@@ -7,14 +7,30 @@ const props = defineProps<{ job: JobView }>();
 const jobs = useJobsStore();
 
 const active = computed(() => props.job.state === "downloading" || props.job.state === "fetching");
+const resultCount = computed(() => props.job.resultCount ?? 0);
+const catalogWarnings = computed(() => props.job.catalogWarnings ?? 0);
+const resourceFailures = computed(() => props.job.resourceFailures ?? 0);
+const doneWithWarnings = computed(
+  () => props.job.state === "done" && (catalogWarnings.value > 0 || resourceFailures.value > 0),
+);
+const fileCountText = computed(
+  () => `${resultCount.value} file${resultCount.value === 1 ? "" : "s"}`,
+);
 const statusText = computed(() => {
   switch (props.job.state) {
     case "downloading":
       return "downloading…";
     case "fetching":
       return "fetching…";
-    case "done":
-      return `✓ ${props.job.resultCount ?? 0} file${(props.job.resultCount ?? 0) === 1 ? "" : "s"}`;
+    case "done": {
+      if (resourceFailures.value > 0) {
+        return `saved ${fileCountText.value} / ${resourceFailures.value} resource failure${resourceFailures.value === 1 ? "" : "s"}`;
+      }
+      if (catalogWarnings.value > 0) {
+        return `saved ${fileCountText.value} with warnings`;
+      }
+      return `✓ ${fileCountText.value}`;
+    }
     case "cancelled":
       return "cancelled";
     case "failed":
@@ -33,7 +49,12 @@ const statusText = computed(() => {
           class="animate-pulse text-xs text-accent"
           >{{ statusText }}</span
         >
-        <span v-else-if="job.state === 'done'" class="text-xs text-ok">{{ statusText }}</span>
+        <span
+          v-else-if="job.state === 'done'"
+          class="text-xs"
+          :class="doneWithWarnings ? 'text-warn' : 'text-ok'"
+          >{{ statusText }}</span
+        >
         <span v-else-if="job.state === 'cancelled'" class="text-xs text-warn">{{ statusText }}</span>
         <span v-else class="text-xs text-err">{{ statusText }}</span>
         <button
@@ -63,6 +84,10 @@ const statusText = computed(() => {
     </div>
 
     <p v-if="job.error" class="mt-2 text-xs text-err">{{ job.error }}</p>
+    <p v-else-if="job.state === 'done' && catalogWarnings > 0" class="mt-2 text-xs text-warn">
+      Files are saved, but Library indexing failed for {{ catalogWarnings }}
+      {{ catalogWarnings === 1 ? "item" : "items" }}. Rescan the Library.
+    </p>
     <p v-else-if="job.state === 'done' && job.resultDir" class="mt-1.5 truncate font-mono text-xs text-slate-500">
       {{ job.resultDir }}
     </p>

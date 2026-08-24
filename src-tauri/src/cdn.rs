@@ -123,12 +123,10 @@ fn ct_compatible(declared: &str, sniffed: Sniffed) -> bool {
     false
 }
 
-fn validate_url(url: &str) -> Result<(), CdnError> {
+fn validate_url(url: &str, allow_loopback: bool) -> Result<(), CdnError> {
     let parsed = url::Url::parse(url).map_err(|_| CdnError::Network(format!("bad url: {url}")))?;
     if parsed.scheme() != "https" {
-        // Unit tests drive the streamer against a local plain-HTTP mock.
-        #[cfg(test)]
-        if parsed.scheme() == "http" && parsed.host_str() == Some("127.0.0.1") {
+        if allow_loopback && parsed.scheme() == "http" && parsed.host_str() == Some("127.0.0.1") {
             return Ok(());
         }
         return Err(CdnError::NotHttps);
@@ -137,8 +135,7 @@ fn validate_url(url: &str) -> Result<(), CdnError> {
         Some(h) => h.to_string(),
         None => return Err(CdnError::HostNotAllowed(url.into())),
     };
-    #[cfg(test)]
-    if host == "127.0.0.1" {
+    if allow_loopback && host == "127.0.0.1" {
         return Ok(());
     }
     if !ALLOWED_HOST_SUFFIXES
@@ -224,7 +221,7 @@ pub async fn stream_to_file<F>(
 where
     F: FnMut(u64),
 {
-    stream_to_file_with_budget(
+    stream_to_file_with_budget_policy(
         http,
         url,
         dest_base,
@@ -232,6 +229,7 @@ where
         progress,
         cancel,
         DEFAULT_BYTE_BUDGET,
+        false,
     )
     .await
 }
@@ -245,9 +243,36 @@ pub async fn stream_to_file_with_budget<F>(
     url: &str,
     dest_base: &Path,
     taken_at_unix: Option<i64>,
+    progress: F,
+    cancel: Option<tokio::sync::watch::Receiver<bool>>,
+    byte_budget: u64,
+) -> Result<DownloadOutcome, CdnError>
+where
+    F: FnMut(u64),
+{
+    stream_to_file_with_budget_policy(
+        http,
+        url,
+        dest_base,
+        taken_at_unix,
+        progress,
+        cancel,
+        byte_budget,
+        cfg!(test),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stream_to_file_with_budget_policy<F>(
+    http: &reqwest::Client,
+    url: &str,
+    dest_base: &Path,
+    taken_at_unix: Option<i64>,
     mut progress: F,
     mut cancel: Option<tokio::sync::watch::Receiver<bool>>,
     byte_budget: u64,
+    allow_loopback: bool,
 ) -> Result<DownloadOutcome, CdnError>
 where
     F: FnMut(u64),
@@ -255,7 +280,7 @@ where
     if cancel.as_ref().map(|c| *c.borrow()).unwrap_or(false) {
         return Err(CdnError::Cancelled);
     }
-    validate_url(url)?;
+    validate_url(url, allow_loopback)?;
 
     let mut current = url.to_string();
     let mut hops = 0usize;
@@ -277,7 +302,7 @@ where
                 .and_then(|v| v.to_str().ok())
                 .ok_or(CdnError::BadRedirect)?
                 .to_string();
-            validate_url(&loc)?;
+            validate_url(&loc, allow_loopback)?;
             current = loc;
             continue;
         }
@@ -455,9 +480,63 @@ pub async fn stream_to_file_retried<F>(
     url: &str,
     dest_base: &Path,
     taken_at_unix: Option<i64>,
+    progress: F,
+    cancel: Option<tokio::sync::watch::Receiver<bool>>,
+    attempts: usize,
+) -> Result<DownloadOutcome, CdnError>
+where
+    F: FnMut(u64),
+{
+    stream_to_file_retried_with_policy(
+        http,
+        url,
+        dest_base,
+        taken_at_unix,
+        progress,
+        cancel,
+        attempts,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
+pub(crate) async fn stream_to_file_retried_for_test<F>(
+    http: &reqwest::Client,
+    url: &str,
+    dest_base: &Path,
+    taken_at_unix: Option<i64>,
+    progress: F,
+    cancel: Option<tokio::sync::watch::Receiver<bool>>,
+    attempts: usize,
+) -> Result<DownloadOutcome, CdnError>
+where
+    F: FnMut(u64),
+{
+    stream_to_file_retried_with_policy(
+        http,
+        url,
+        dest_base,
+        taken_at_unix,
+        progress,
+        cancel,
+        attempts,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stream_to_file_retried_with_policy<F>(
+    http: &reqwest::Client,
+    url: &str,
+    dest_base: &Path,
+    taken_at_unix: Option<i64>,
     mut progress: F,
     cancel: Option<tokio::sync::watch::Receiver<bool>>,
     attempts: usize,
+    allow_loopback: bool,
 ) -> Result<DownloadOutcome, CdnError>
 where
     F: FnMut(u64),
@@ -467,13 +546,15 @@ where
         if attempt > 0 {
             tokio::time::sleep(Duration::from_millis(600 * attempt as u64)).await;
         }
-        let result = stream_to_file(
+        let result = stream_to_file_with_budget_policy(
             http,
             url,
             dest_base,
             taken_at_unix,
             &mut progress,
             cancel.clone(),
+            DEFAULT_BYTE_BUDGET,
+            allow_loopback,
         )
         .await;
         match result {

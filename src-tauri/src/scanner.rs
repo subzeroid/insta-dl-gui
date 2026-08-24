@@ -503,7 +503,9 @@ fn group_files_with_cancel(
                     &files,
                     &mut should_cancel,
                 )? {
-                    files.push(sidecar.clone());
+                    let mut sidecar = sidecar.clone();
+                    sidecar.ordinal = i64::try_from(files.len()).unwrap_or(i64::MAX);
+                    files.push(sidecar);
                 }
             }
             groups.push(files);

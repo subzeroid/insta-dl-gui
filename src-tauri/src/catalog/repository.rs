@@ -7,9 +7,9 @@ use rusqlite::types::{Type, Value};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, TransactionBehavior};
 
 use super::models::{
-    CatalogMediaInput, FileAvailability, LibraryCard, LibraryCursor, LibraryCursorScope,
-    LibraryFile, LibraryItemDetail, LibraryPage, LibraryPreview, LibraryQuery, LibraryRoot,
-    LibrarySort, MediaFileKind, MediaItemKind, ResolvedCatalogFile, UpsertDisposition,
+    CatalogMediaInput, CatalogRecoveryFile, FileAvailability, LibraryCard, LibraryCursor,
+    LibraryCursorScope, LibraryFile, LibraryItemDetail, LibraryPage, LibraryPreview, LibraryQuery,
+    LibraryRoot, LibrarySort, MediaFileKind, MediaItemKind, ResolvedCatalogFile, UpsertDisposition,
     UpsertResult,
 };
 use super::{Catalog, CatalogError};
@@ -577,6 +577,59 @@ impl Catalog {
             exists_on_disk: row.6,
         })
     }
+
+    pub(crate) fn recovery_file(
+        &self,
+        remote_key: &str,
+        ordinal: i64,
+    ) -> Result<Option<CatalogRecoveryFile>, CatalogError> {
+        if remote_key.trim().is_empty() || ordinal < 0 {
+            return Ok(None);
+        }
+        let conn = self.connect()?;
+        let mut statement = conn
+            .prepare(
+                "SELECT lr.path, mf.relative_path, mf.ordinal, mf.kind, mf.byte_size
+                 FROM media_items mi
+                 JOIN media_files mf ON mf.media_item_id = mi.id
+                 JOIN library_roots lr ON lr.id = mf.library_root_id
+                 WHERE mi.remote_key = ?1 AND mf.ordinal = ?2
+                   AND mf.kind IN ('photo', 'video')
+                 ORDER BY mf.id
+                 LIMIT 2",
+            )
+            .map_err(|source| sql_error("preparing catalog recovery lookup", source))?;
+        let mut candidates = statement
+            .query_map(params![remote_key, ordinal], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    file_kind_at(row, 3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(|source| sql_error("querying catalog recovery file", source))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| sql_error("reading catalog recovery file", source))?;
+        if candidates.len() != 1 {
+            return Ok(None);
+        }
+        let candidate = candidates.remove(0);
+        let normalized = normalize_relative_path(Path::new(&candidate.1))?;
+        if normalized != candidate.1 {
+            return Err(CatalogError::InvalidRelativePath {
+                path: PathBuf::from(candidate.1),
+            });
+        }
+        Ok(Some(CatalogRecoveryFile {
+            root_path: PathBuf::from(candidate.0),
+            relative_path: PathBuf::from(normalized),
+            ordinal: candidate.2,
+            kind: candidate.3,
+            byte_size: candidate.4,
+        }))
+    }
 }
 
 fn validate_media_input(input: &CatalogMediaInput) -> Result<Vec<String>, CatalogError> {
@@ -1062,6 +1115,51 @@ mod tests {
         assert_eq!(first.path, path.canonicalize().unwrap());
         assert_eq!(first.label, "Photos");
         assert_eq!(catalog.list_roots().unwrap(), vec![first]);
+    }
+
+    #[test]
+    fn recovery_lookup_requires_exact_unique_remote_key_and_ordinal() {
+        let fixture = Fixture::new();
+        let mut input = fixture.input("post:collision", "posts/item_1.jpg", 10);
+        fixture.catalog.upsert_media(&input).unwrap();
+
+        let recovered = fixture
+            .catalog
+            .recovery_file("post:collision", 0)
+            .unwrap()
+            .expect("one exact catalog file should be recoverable");
+        assert_eq!(recovered.root_path, fixture.first_root.path);
+        assert_eq!(recovered.relative_path, Path::new("posts/item_1.jpg"));
+        assert_eq!(recovered.ordinal, 0);
+        assert_eq!(recovered.kind, MediaFileKind::Photo);
+        assert_eq!(recovered.byte_size, 123);
+        assert!(fixture
+            .catalog
+            .recovery_file("post:other", 0)
+            .unwrap()
+            .is_none());
+        assert!(fixture
+            .catalog
+            .recovery_file("post:collision", 1)
+            .unwrap()
+            .is_none());
+
+        input.files.push(CatalogFileInput {
+            root_id: fixture.first_root.id,
+            relative_path: PathBuf::from("posts/item_1_duplicate.mp4"),
+            ordinal: 0,
+            kind: MediaFileKind::Video,
+            byte_size: 456,
+            mtime: 10,
+            last_seen_at: 10,
+        });
+        fixture.catalog.upsert_media(&input).unwrap();
+
+        assert!(fixture
+            .catalog
+            .recovery_file("post:collision", 0)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

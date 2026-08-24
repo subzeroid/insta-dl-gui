@@ -58,17 +58,15 @@ pub(crate) fn parse_group_cancellable(
         .map(|file| file.relative_path.as_path())
         .unwrap_or_else(|| Path::new("unknown"));
     let inferred_kind = infer_kind(relative_path);
-    let identity = sidecar
+    let sidecar_identity = sidecar
         .as_ref()
-        .and_then(|sidecar| sidecar_string(sidecar, "pk"))
-        .map(|pk| (inferred_kind, pk))
-        .or_else(|| path_identity(relative_path));
-    let (kind, remote_pk, remote_key) = match identity {
-        Some((kind, remote_pk)) => {
-            let prefix = remote_prefix(kind);
-            let remote_key = format!("{prefix}:{remote_pk}");
-            (kind, Some(remote_pk), remote_key)
-        }
+        .and_then(|sidecar| validated_sidecar_identity(sidecar, inferred_kind));
+    let path_identity = path_identity(relative_path).map(|(kind, remote_pk)| {
+        let remote_key = format!("{}:{remote_pk}", remote_prefix(kind));
+        (kind, remote_pk, remote_key)
+    });
+    let (kind, remote_pk, remote_key) = match sidecar_identity.or(path_identity) {
+        Some((kind, remote_pk, remote_key)) => (kind, Some(remote_pk), remote_key),
         None => {
             let local_path = carousel_identity_path_cancellable(files, should_cancel)?
                 .unwrap_or_else(|| relative_path.into());
@@ -135,6 +133,35 @@ pub(crate) fn parse_group_cancellable(
         item,
         warnings,
     })
+}
+
+fn validated_sidecar_identity(
+    sidecar: &Value,
+    inferred_kind: MediaItemKind,
+) -> Option<(MediaItemKind, String, String)> {
+    let remote_pk = sidecar_string(sidecar, "pk").filter(|pk| valid_remote_pk(pk))?;
+    if let Some(catalog) = sidecar.get("catalog") {
+        let version = catalog.get("version").and_then(Value::as_u64);
+        let remote_key = catalog.get("remote_key").and_then(Value::as_str);
+        let item_kind = catalog.get("item_kind").and_then(Value::as_str);
+        let expected_key = format!("post:{remote_pk}");
+        let kind = match item_kind {
+            Some("post") => Some(MediaItemKind::Post),
+            Some("reel") => Some(MediaItemKind::Reel),
+            _ => None,
+        };
+        if version == Some(1) && remote_key == Some(expected_key.as_str()) {
+            if let Some(kind) = kind {
+                return Some((kind, remote_pk, expected_key));
+            }
+        }
+    }
+    let remote_key = format!("{}:{remote_pk}", remote_prefix(inferred_kind));
+    Some((inferred_kind, remote_pk, remote_key))
+}
+
+fn valid_remote_pk(pk: &str) -> bool {
+    !pk.is_empty() && pk.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 pub fn carousel_base(stem: &str) -> (String, u32) {
@@ -267,7 +294,7 @@ pub(crate) fn path_identity(path: &Path) -> Option<(MediaItemKind, String)> {
             .or_else(|| stem.strip_prefix("Avatar_")),
         MediaItemKind::Post | MediaItemKind::Reel => None,
     }?;
-    (!pk.is_empty()).then(|| (kind, pk.to_owned()))
+    valid_remote_pk(pk).then(|| (kind, pk.to_owned()))
 }
 
 fn valid_story_timestamp(timestamp: &str) -> bool {

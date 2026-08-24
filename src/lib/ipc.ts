@@ -42,6 +42,8 @@ export interface JobProgress {
   error?: string;
   count?: number;
   dir?: string;
+  catalog_warnings?: number;
+  resource_failures?: number;
 }
 
 export type Target =

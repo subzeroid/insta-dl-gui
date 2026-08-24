@@ -178,7 +178,51 @@ fn scanner_parses_current_sidecar_shape_and_preserves_the_archive() {
     assert_eq!(group.item.files[0].ordinal, 0);
     assert_eq!(group.item.files[1].relative_path, PathBuf::from(sidecar));
     assert_eq!(group.item.files[1].kind, MediaFileKind::Metadata);
+    assert_eq!(group.item.files[1].ordinal, 1);
     assert_eq!(snapshot(root.path()), before);
+}
+
+#[test]
+fn scanner_ignores_unvalidated_catalog_identity_hints() {
+    for (name, catalog_hint) in [
+        (
+            "wrong-version",
+            r#"{"version":2,"remote_key":"post:123","item_kind":"reel"}"#,
+        ),
+        (
+            "wrong-namespace",
+            r#"{"version":1,"remote_key":"avatar:123","item_kind":"reel"}"#,
+        ),
+        (
+            "unsafe-key",
+            r#"{"version":1,"remote_key":"post:../../secret","item_kind":"reel"}"#,
+        ),
+        (
+            "wrong-kind",
+            r#"{"version":1,"remote_key":"post:123","item_kind":"avatar"}"#,
+        ),
+    ] {
+        let root = fixture();
+        let media = format!("posts/{name}.mp4");
+        let sidecar = format!("posts/{name}.json");
+        write(root.path(), &media, b"video bytes");
+        write(
+            root.path(),
+            &sidecar,
+            format!(r#"{{"pk":"123","catalog":{catalog_hint}}}"#).as_bytes(),
+        );
+        let group = parse_group(
+            7,
+            root.path(),
+            &[
+                discovered_file(root.path(), &media, 0),
+                discovered_file(root.path(), &sidecar, 1),
+            ],
+        );
+
+        assert_eq!(group.remote_key, "post:123", "case {name}");
+        assert_eq!(group.item.kind, MediaItemKind::Post, "case {name}");
+    }
 }
 
 #[test]
@@ -328,6 +372,33 @@ fn scanner_requires_strict_numeric_story_identity() {
             && group.item.files[0].relative_path
                 == Path::new("stories/2026-99-99_99-99-99_112233.jpg")
     }));
+}
+
+#[test]
+fn scanner_requires_strict_numeric_avatar_identity() {
+    let root = fixture();
+    write(root.path(), "avatars/avatar_445566.jpg", b"trusted avatar");
+    write(
+        root.path(),
+        "avatars/avatar_.._escape.jpg",
+        b"unsafe avatar",
+    );
+
+    let discovery = discover_archive(42, root.path()).unwrap();
+    let trusted = discovery
+        .groups
+        .iter()
+        .find(|group| group.remote_key == "avatar:445566")
+        .expect("numeric avatar identity should be retained");
+    assert_eq!(trusted.item.kind, MediaItemKind::Avatar);
+    assert!(discovery.groups.iter().any(|group| {
+        group.remote_key.starts_with("local:42:")
+            && group.item.files[0].relative_path == Path::new("avatars/avatar_.._escape.jpg")
+    }));
+    assert!(!discovery
+        .groups
+        .iter()
+        .any(|group| group.remote_key == "avatar:.._escape"));
 }
 
 #[test]

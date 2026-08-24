@@ -142,6 +142,48 @@ pub struct CatalogMediaInput {
     pub source_id: Option<i64>,
 }
 
+/// Metadata for one logical remote media item, independent of where its
+/// downloaded files are stored. Download code attaches exact, root-relative
+/// file outcomes immediately before the catalog upsert.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogItemMetadata {
+    pub remote_key: String,
+    pub kind: MediaItemKind,
+    pub remote_pk: Option<String>,
+    pub shortcode: Option<String>,
+    pub owner_pk: Option<String>,
+    pub owner_username: Option<String>,
+    pub taken_at: Option<i64>,
+    pub caption: Option<String>,
+    pub like_count: Option<i64>,
+    pub comment_count: Option<i64>,
+}
+
+impl CatalogItemMetadata {
+    pub fn into_catalog_input(
+        self,
+        files: Vec<CatalogFileInput>,
+        observed_at: i64,
+    ) -> CatalogMediaInput {
+        CatalogMediaInput {
+            remote_key: self.remote_key,
+            kind: self.kind,
+            remote_pk: self.remote_pk,
+            shortcode: self.shortcode,
+            owner_pk: self.owner_pk,
+            owner_username: self.owner_username,
+            taken_at: self.taken_at,
+            caption: self.caption,
+            like_count: self.like_count,
+            comment_count: self.comment_count,
+            imported_at: observed_at,
+            updated_at: observed_at,
+            files,
+            source_id: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogFileInput {
     pub root_id: i64,
@@ -233,4 +275,13 @@ pub struct ResolvedCatalogFile {
     pub relative_path: PathBuf,
     pub kind: MediaFileKind,
     pub exists_on_disk: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CatalogRecoveryFile {
+    pub root_path: PathBuf,
+    pub relative_path: PathBuf,
+    pub ordinal: i64,
+    pub kind: MediaFileKind,
+    pub byte_size: i64,
 }
