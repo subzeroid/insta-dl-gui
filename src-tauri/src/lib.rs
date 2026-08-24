@@ -28,6 +28,8 @@ struct ConfigState {
     token_hint: Option<String>,
     dest_dir: String,
     sidecar: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    catalog_warning: Option<String>,
 }
 
 impl From<&Config> for ConfigState {
@@ -37,8 +39,39 @@ impl From<&Config> for ConfigState {
             token_hint: c.token_hint(),
             dest_dir: c.dest_dir.clone(),
             sidecar: c.sidecar,
+            catalog_warning: None,
         }
     }
+}
+
+fn save_settings_with_catalog(
+    config: &mut Config,
+    dest_dir: Option<String>,
+    sidecar: Option<bool>,
+    persist: impl FnOnce(&Config) -> Result<(), String>,
+    catalog: &Catalog,
+) -> Result<ConfigState, String> {
+    if let Some(destination) = dest_dir {
+        if !destination.trim().is_empty() {
+            config.dest_dir = destination.trim().to_owned();
+        }
+    }
+    if let Some(enabled) = sidecar {
+        config.sidecar = enabled;
+    }
+    persist(config)?;
+
+    let mut state = ConfigState::from(&*config);
+    if catalog
+        .register_root(std::path::Path::new(&config.dest_dir), "Downloads")
+        .is_err()
+    {
+        state.catalog_warning = Some(
+            "Settings were saved, but the download folder could not be added to the Library. Open Library and rescan after fixing the folder."
+                .to_owned(),
+        );
+    }
+    Ok(state)
 }
 
 pub struct AppState {
@@ -100,16 +133,13 @@ async fn save_settings(
     state: tauri::State<'_, AppState>,
 ) -> Result<ConfigState, String> {
     let mut cfg = state.cfg.write().await;
-    if let Some(d) = dest_dir {
-        if !d.trim().is_empty() {
-            cfg.dest_dir = d.trim().to_string();
-        }
-    }
-    if let Some(s) = sidecar {
-        cfg.sidecar = s;
-    }
-    cfg.save().map_err(err_string)?;
-    Ok(ConfigState::from(&*cfg))
+    save_settings_with_catalog(
+        &mut cfg,
+        dest_dir,
+        sidecar,
+        |config| config.save(),
+        &state.catalog,
+    )
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -204,4 +234,79 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use tempfile::tempdir;
+
+    use super::{save_settings_with_catalog, Catalog, Config};
+
+    #[test]
+    fn save_settings_registers_library_root_and_preserves_previous_root() {
+        let directory = tempdir().unwrap();
+        let catalog = Catalog::open(directory.path().join("catalog.sqlite3")).unwrap();
+        let old_destination = directory.path().join("old-downloads");
+        let new_destination = directory.path().join("new-downloads");
+        catalog.register_root(&old_destination, "Previous").unwrap();
+        let mut config = Config {
+            dest_dir: old_destination.to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+
+        let state = save_settings_with_catalog(
+            &mut config,
+            Some(new_destination.to_string_lossy().into_owned()),
+            None,
+            |_| Ok(()),
+            &catalog,
+        )
+        .unwrap();
+
+        assert_eq!(state.dest_dir, new_destination.to_string_lossy());
+        assert_eq!(state.catalog_warning, None);
+        let roots = catalog.list_roots().unwrap();
+        let old_destination = old_destination.canonicalize().unwrap();
+        let new_destination = new_destination.canonicalize().unwrap();
+        assert_eq!(roots.len(), 2);
+        assert!(roots.iter().any(|root| root.path == old_destination));
+        assert!(roots
+            .iter()
+            .any(|root| root.path == new_destination && root.label == "Downloads"));
+    }
+
+    #[test]
+    fn save_settings_registers_library_root_failure_without_rolling_back_config() {
+        let directory = tempdir().unwrap();
+        let catalog = Catalog::open(directory.path().join("catalog.sqlite3")).unwrap();
+        let blocked_destination = directory.path().join("not-a-directory");
+        std::fs::write(&blocked_destination, b"file blocks root creation").unwrap();
+        let mut config = Config::default();
+        let persisted = RefCell::new(None);
+
+        let state = save_settings_with_catalog(
+            &mut config,
+            Some(blocked_destination.to_string_lossy().into_owned()),
+            None,
+            |saved| {
+                persisted.replace(Some(saved.clone()));
+                Ok(())
+            },
+            &catalog,
+        )
+        .unwrap();
+
+        assert_eq!(config.dest_dir, blocked_destination.to_string_lossy());
+        assert_eq!(
+            persisted.borrow().as_ref().unwrap().dest_dir,
+            blocked_destination.to_string_lossy()
+        );
+        assert!(state
+            .catalog_warning
+            .as_deref()
+            .is_some_and(|warning| { warning.contains("Library") && warning.contains("saved") }));
+        assert!(catalog.list_roots().unwrap().is_empty());
+    }
 }

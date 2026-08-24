@@ -6,6 +6,7 @@ export interface ConfigState {
   token_hint: string | null;
   dest_dir: string;
   sidecar: boolean;
+  catalog_warning?: string;
 }
 
 export interface Balance {

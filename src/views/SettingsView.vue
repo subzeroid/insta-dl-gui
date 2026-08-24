@@ -35,6 +35,17 @@ async function pickDir() {
       </div>
     </div>
 
+    <div
+      v-if="app.catalogWarning"
+      class="card border-warn/30 bg-warn/5 p-5 text-sm text-warn"
+      role="alert"
+    >
+      <p>{{ app.catalogWarning }}</p>
+      <RouterLink class="mt-2 inline-block font-medium underline" to="/library">
+        Open Library to scan
+      </RouterLink>
+    </div>
+
     <div class="card flex items-center justify-between p-5">
       <div>
         <div class="text-sm font-medium text-slate-300">Save JSON metadata</div>

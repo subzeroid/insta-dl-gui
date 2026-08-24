@@ -27,6 +27,7 @@ Paste your HikerAPI token once, then download any public profile's content with 
 - **Incremental archives** — already-downloaded files are skipped on re-runs (like `--fast-update`)
 - **Original timestamps** — file mtime is set from `taken_at`, so Photos/Finder sort correctly
 - **JSON metadata sidecars** — caption, like/comment counts and owner saved next to every post (toggleable)
+- **Local media Library** — search and filter existing downloads without moving or changing archive files
 - **Balance indicator** — remaining HikerAPI quota always visible in the header
 
 ## Download
@@ -48,6 +49,14 @@ Grab an installer from [GitHub Releases](https://github.com/subzeroid/insta-dl-g
 3. Paste it into the app on first launch.
 
 One request ≈ one API call: fetching a post costs 1, stories 2, highlights 2 + 1 per highlight reel. A typical "download everything from a profile" run costs a handful of requests plus one per feed page.
+
+## Local media Library
+
+Open **Library** and run the initial scan to index media already in your download folder. New successful downloads are added to the same local catalog automatically. Search by username, shortcode or caption; filter by media kind, available/missing files and captured date; then sort by publication or import date.
+
+A completed rescan updates existing entries and marks files that are no longer on disk as **Missing**. If a file returns at the same archive path, the next completed rescan makes it available again. Scanning is read-only for your archive: the app never moves, renames, edits or deletes media files.
+
+The catalog itself is a rebuildable SQLite file stored in the platform app-data directory as `insta-dl-gui/catalog.sqlite3` (`~/Library/Application Support` on macOS, `%APPDATA%` on Windows, and `$XDG_DATA_HOME` or `~/.local/share` on Linux). See the [usage guide](docs/usage.md#browse-the-local-media-library) for the full workflow.
 
 ## Building from source
 
