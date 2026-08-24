@@ -13,6 +13,8 @@ export interface JobView {
   error?: string;
   resultCount?: number;
   resultDir?: string;
+  catalogWarnings: number;
+  resourceFailures: number;
 }
 
 export const useJobsStore = defineStore("jobs", () => {
@@ -34,6 +36,8 @@ export const useJobsStore = defineStore("jobs", () => {
         error: undefined,
         resultCount: undefined,
         resultDir: undefined,
+        catalogWarnings: 0,
+        resourceFailures: 0,
       });
     if (!existing) jobs.set(p.job_id, job);
     job.state = p.state;
@@ -46,6 +50,8 @@ export const useJobsStore = defineStore("jobs", () => {
     if (p.state === "done") {
       job.resultCount = p.count ?? 0;
       job.resultDir = p.dir;
+      job.catalogWarnings = p.catalog_warnings ?? job.catalogWarnings;
+      job.resourceFailures = p.resource_failures ?? job.resourceFailures;
     }
     if (p.state === "failed") {
       job.error = p.error;
@@ -73,6 +79,8 @@ export const useJobsStore = defineStore("jobs", () => {
         error: undefined,
         resultCount: undefined,
         resultDir: undefined,
+        catalogWarnings: 0,
+        resourceFailures: 0,
       }));
     }
   }

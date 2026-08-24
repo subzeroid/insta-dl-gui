@@ -31,6 +31,7 @@ Powered by [HikerAPI](https://hikerapi.com/p/uk064a1b), built with [Tauri 2](htt
 - **JSON metadata sidecars** — caption, like/comment counts and owner saved next to every post
 - **Live queue** — per-job progress, byte counters and cancellation
 - **Explore first** — autocomplete usernames, browse posts/reels/stories, preview individual items, then download one or all
+- **Local media Library** — search, filter and inspect existing downloads without changing archive files
 - **Automatic recovery** — transient network and CDN server errors retry automatically, and partial jobs report only saved files
 
 ## Links

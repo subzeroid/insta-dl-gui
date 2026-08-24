@@ -8,6 +8,7 @@ export const useAppStore = defineStore("app", () => {
   const tokenHint = ref<string | null>(null);
   const destDir = ref("");
   const sidecar = ref(true);
+  const catalogWarning = ref<string | null>(null);
   const balance = ref<ipc.Balance | null>(null);
 
   async function init() {
@@ -24,6 +25,7 @@ export const useAppStore = defineStore("app", () => {
     tokenHint.value = s.token_hint;
     destDir.value = s.dest_dir;
     sidecar.value = s.sidecar;
+    catalogWarning.value = s.catalog_warning ?? null;
   }
 
   async function saveSettings(opts: { dest_dir?: string; sidecar?: boolean }) {
@@ -38,5 +40,17 @@ export const useAppStore = defineStore("app", () => {
     hasToken.value = true;
   }
 
-  return { ready, hasToken, tokenHint, destDir, sidecar, balance, init, saveSettings, refreshBalance, onTokenSet };
+  return {
+    ready,
+    hasToken,
+    tokenHint,
+    destDir,
+    sidecar,
+    catalogWarning,
+    balance,
+    init,
+    saveSettings,
+    refreshBalance,
+    onTokenSet,
+  };
 });

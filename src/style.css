@@ -57,3 +57,18 @@ body {
 .card {
   @apply rounded-xl border border-line bg-surface-1;
 }
+
+.library-card {
+  @apply h-[300px] min-w-0 overflow-hidden rounded-xl border border-line bg-surface-1 text-slate-200 transition-colors hover:border-slate-500 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent;
+}
+
+.library-preview-placeholder {
+  background:
+    radial-gradient(circle at 25% 20%, rgb(131 58 180 / 22%), transparent 42%),
+    radial-gradient(circle at 80% 85%, rgb(225 48 108 / 18%), transparent 44%),
+    var(--color-surface-2);
+}
+
+.library-control-label {
+  @apply flex flex-col gap-1 text-xs font-medium text-slate-500;
+}

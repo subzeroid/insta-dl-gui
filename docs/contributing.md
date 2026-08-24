@@ -17,13 +17,17 @@ npm run tauri dev
 
 ```
 src/                  # Vue 3 + TypeScript UI
-  views/              # onboarding, download, explore, queue, settings screens
-  stores/             # pinia: app config + job queue state
+  views/              # onboarding, download, explore, library, queue, settings screens
+  stores/             # pinia: app config, job queue and library catalog state
   lib/ipc.ts          # typed wrappers over Tauri commands/events
 src-tauri/src/
   hiker.rs            # HikerAPI REST client + typed error taxonomy + mappers
   cdn.rs              # CDN streamer — every safety rule lives here, one place
-  commands.rs         # tauri commands: fetch/enqueue/cancel, progress events
+  commands.rs         # download commands: fetch/enqueue/cancel + catalog updates
+  catalog.rs          # SQLite catalog entry point, models, migrations and queries
+  scanner.rs          # cancellable, read-only archive discovery and import
+  library_commands.rs # Library queries, scans and operating-system file actions
+  library_protocol.rs # validated local-media previews for the webview
   jobs.rs             # cancel registry for running downloads
   targets.rs          # input parser (@username / post URLs)
   config.rs           # 0600 config file with the token
