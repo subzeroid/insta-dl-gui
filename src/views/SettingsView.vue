@@ -87,7 +87,7 @@ async function pickDir() {
           type="checkbox"
           class="peer sr-only"
           :checked="sidecar"
-          :disabled="sidecarSaving"
+          :aria-disabled="sidecarSaving"
           @change="changeSidecar"
         />
         <div class="h-6 w-11 rounded-full bg-surface-3 after:absolute after:left-0.5 after:top-0.5 after:h-5 after:w-5 after:rounded-full after:bg-slate-400 after:transition-all peer-checked:bg-accent peer-checked:after:translate-x-5 peer-checked:after:bg-white"></div>

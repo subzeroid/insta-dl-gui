@@ -2,7 +2,7 @@
 
 import { createPinia, setActivePinia } from "pinia";
 import { flushPromises, mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const ipc = vi.hoisted(() => ({
   configState: vi.fn(),
@@ -21,6 +21,8 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: dialog.open }));
 import { useAppStore } from "../stores/app";
 import SettingsView from "./SettingsView.vue";
 
+const mountedWrappers: Array<{ unmount: () => void }> = [];
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -36,7 +38,10 @@ async function renderSettings() {
   setActivePinia(pinia);
   const app = useAppStore();
   await app.init();
+  const host = document.createElement("div");
+  document.body.append(host);
   const wrapper = mount(SettingsView, {
+    attachTo: host,
     global: {
       plugins: [pinia],
       stubs: {
@@ -47,10 +52,16 @@ async function renderSettings() {
       },
     },
   });
+  mountedWrappers.push(wrapper);
   return { app, wrapper };
 }
 
 describe("Settings Library registration warning", () => {
+  afterEach(() => {
+    for (const wrapper of mountedWrappers.splice(0)) wrapper.unmount();
+    document.body.replaceChildren();
+  });
+
   beforeEach(() => {
     setActivePinia(createPinia());
     vi.clearAllMocks();
@@ -115,7 +126,7 @@ describe("Settings Library registration warning", () => {
     expect(wrapper.get('[role="alert"]').text()).toContain("Settings could not be saved");
   });
 
-  it("serializes rapid sidecar changes without swallowing the next real toggle", async () => {
+  it("keeps focus while serializing rapid sidecar changes without swallowing the next toggle", async () => {
     const firstSave = deferred<never>();
     ipc.saveSettings
       .mockReturnValueOnce(firstSave.promise)
@@ -127,16 +138,21 @@ describe("Settings Library registration warning", () => {
       }));
     const { wrapper } = await renderSettings();
     const checkbox = wrapper.get<HTMLInputElement>('input[type="checkbox"]');
+    checkbox.element.focus();
 
     await checkbox.setValue(false);
-    expect(checkbox.attributes()).toHaveProperty("disabled");
+    expect(checkbox.element.disabled).toBe(false);
+    expect(checkbox.attributes("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(checkbox.element);
     await checkbox.setValue(true);
     expect(ipc.saveSettings).toHaveBeenCalledOnce();
+    expect(document.activeElement).toBe(checkbox.element);
 
     firstSave.reject(new Error("first save failed"));
     await flushPromises();
     expect(checkbox.element.checked).toBe(true);
-    expect(checkbox.attributes()).not.toHaveProperty("disabled");
+    expect(checkbox.attributes("aria-disabled")).toBe("false");
+    expect(document.activeElement).toBe(checkbox.element);
 
     await checkbox.setValue(false);
     await flushPromises();
@@ -147,5 +163,6 @@ describe("Settings Library registration warning", () => {
       [{ sidecar: false }],
     ]);
     expect(checkbox.element.checked).toBe(false);
+    expect(document.activeElement).toBe(checkbox.element);
   });
 });
