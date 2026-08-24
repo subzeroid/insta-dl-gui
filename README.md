@@ -40,6 +40,8 @@ Grab an installer from [GitHub Releases](https://github.com/subzeroid/insta-dl-g
 | macOS (Intel and Apple Silicon) | `insta-dl-gui_x.y.z_universal.dmg` |
 | Linux | `.AppImage` / `.deb` / `.rpm` |
 
+See [CHANGELOG.md](CHANGELOG.md) for release-by-release changes.
+
 > Windows SmartScreen may warn about unsigned binaries — click "More info" → "Run anyway". Code signing is planned.
 
 ## Getting a token
