@@ -21,6 +21,16 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: dialog.open }));
 import { useAppStore } from "../stores/app";
 import SettingsView from "./SettingsView.vue";
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 async function renderSettings() {
   const pinia = createPinia();
   setActivePinia(pinia);
@@ -103,5 +113,39 @@ describe("Settings Library registration warning", () => {
     expect(ipc.saveSettings).toHaveBeenCalledWith({ sidecar: false });
     expect(checkbox.element.checked).toBe(true);
     expect(wrapper.get('[role="alert"]').text()).toContain("Settings could not be saved");
+  });
+
+  it("serializes rapid sidecar changes without swallowing the next real toggle", async () => {
+    const firstSave = deferred<never>();
+    ipc.saveSettings
+      .mockReturnValueOnce(firstSave.promise)
+      .mockImplementation(async (opts: { sidecar?: boolean }) => ({
+        has_token: false,
+        token_hint: null,
+        dest_dir: "/archive/old",
+        sidecar: opts.sidecar ?? true,
+      }));
+    const { wrapper } = await renderSettings();
+    const checkbox = wrapper.get<HTMLInputElement>('input[type="checkbox"]');
+
+    await checkbox.setValue(false);
+    expect(checkbox.attributes()).toHaveProperty("disabled");
+    await checkbox.setValue(true);
+    expect(ipc.saveSettings).toHaveBeenCalledOnce();
+
+    firstSave.reject(new Error("first save failed"));
+    await flushPromises();
+    expect(checkbox.element.checked).toBe(true);
+    expect(checkbox.attributes()).not.toHaveProperty("disabled");
+
+    await checkbox.setValue(false);
+    await flushPromises();
+
+    expect(ipc.saveSettings).toHaveBeenCalledTimes(2);
+    expect(ipc.saveSettings.mock.calls).toEqual([
+      [{ sidecar: false }],
+      [{ sidecar: false }],
+    ]);
+    expect(checkbox.element.checked).toBe(false);
   });
 });
