@@ -5,6 +5,7 @@ pub mod config;
 pub mod hiker;
 pub mod jobs;
 pub mod models;
+pub mod scanner;
 pub mod targets;
 
 use std::sync::Arc;
