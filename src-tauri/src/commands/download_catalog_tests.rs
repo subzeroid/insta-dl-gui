@@ -12,7 +12,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
 use crate::catalog::{
-    FileAvailability, LibraryItemDetail, LibraryQuery, LibrarySort, MediaFileKind,
+    FileAvailability, LibraryFile, LibraryItemDetail, LibraryQuery, LibrarySort, MediaFileKind,
 };
 use crate::models::{MediaKind, MediaResource};
 
@@ -171,6 +171,25 @@ async fn mount_media(
 
 fn absolute(root: &Path, relative: &str) -> PathBuf {
     root.join(relative)
+}
+
+fn assert_files_stable_after_refresh(before: &[LibraryFile], after: &[LibraryFile]) {
+    assert_eq!(before.len(), after.len());
+    for (before, after) in before.iter().zip(after) {
+        assert_eq!(before.id, after.id);
+        assert_eq!(before.root_id, after.root_id);
+        assert_eq!(before.relative_path, after.relative_path);
+        assert_eq!(before.ordinal, after.ordinal);
+        assert_eq!(before.kind, after.kind);
+        assert_eq!(before.byte_size, after.byte_size);
+        assert_eq!(before.mtime, after.mtime);
+        assert_eq!(before.exists_on_disk, after.exists_on_disk);
+        assert!(
+            after.last_seen_at >= before.last_seen_at,
+            "last_seen_at moved backwards for {}",
+            before.relative_path
+        );
+    }
 }
 
 fn collision_server() -> (
@@ -412,7 +431,7 @@ async fn repeated_logical_download_keeps_the_same_catalog_rows_and_history() {
     assert_eq!(second.outcome.files_written, 0);
     assert_eq!(before.id, after.id);
     assert_eq!(before.imported_at, after.imported_at);
-    assert_eq!(before.files, after.files);
+    assert_files_stable_after_refresh(&before.files, &after.files);
     assert_eq!(after.files.len(), 2);
 }
 
@@ -524,7 +543,8 @@ async fn retry_recovers_successful_ordinals_and_only_downloads_missing_resources
     let noop = fixture.run(&retry, false).await;
     assert_eq!(noop.outcome.files_written, 0);
     assert!(noop.resource_errors.is_empty());
-    assert_eq!(fixture.only_item().files, before_noop.files);
+    let after_noop = fixture.only_item();
+    assert_files_stable_after_refresh(&before_noop.files, &after_noop.files);
 
     let requests = server.received_requests().await.unwrap();
     for route in ["/stable", "/gone", "/recovered"] {
@@ -641,7 +661,7 @@ async fn direct_propic_round_trip_keeps_avatar_identity_and_file_link() {
     fixture.catalog.upsert_media(&rescanned.item).unwrap();
     let after_scan = fixture.only_item();
     assert_eq!(after_scan.id, downloaded.id);
-    assert_eq!(after_scan.files, downloaded.files);
+    assert_files_stable_after_refresh(&downloaded.files, &after_scan.files);
 }
 
 #[tokio::test]
@@ -733,7 +753,7 @@ async fn single_reel_sidecar_round_trip_keeps_post_identity_kind_and_file_links(
     let after_scan = fixture.only_item();
     assert_eq!(after_scan.id, downloaded.id);
     assert_eq!(after_scan.kind, MediaItemKind::Reel);
-    assert_eq!(after_scan.files, downloaded.files);
+    assert_files_stable_after_refresh(&downloaded.files, &after_scan.files);
 }
 
 #[tokio::test]

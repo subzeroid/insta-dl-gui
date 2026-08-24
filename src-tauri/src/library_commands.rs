@@ -1,16 +1,265 @@
 use std::future::Future;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
-use crate::catalog::{Catalog, LibraryRoot};
+use crate::catalog::{
+    Catalog, FileAvailability, LibraryCard, LibraryFile, LibraryItemDetail, LibraryPage,
+    LibraryQuery, LibraryRoot, MediaFileKind, MediaItemKind, ResolvedCatalogFile,
+};
 use crate::config::Config;
 use crate::jobs::{ScanLease, ScanRegistry};
 use crate::scanner::{run_scan, LibraryScanProgress};
 use crate::AppState;
+
+const FILE_UNAVAILABLE: &str = "Library file is unavailable";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LibraryPageResponse {
+    pub items: Vec<LibraryCardResponse>,
+    pub next_cursor: Option<String>,
+}
+
+impl From<LibraryPage> for LibraryPageResponse {
+    fn from(page: LibraryPage) -> Self {
+        Self {
+            items: page.items.into_iter().map(Into::into).collect(),
+            next_cursor: page.next_cursor,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LibraryCardResponse {
+    pub id: i64,
+    pub kind: MediaItemKind,
+    pub shortcode: Option<String>,
+    pub owner_username: Option<String>,
+    pub taken_at: Option<i64>,
+    pub caption: Option<String>,
+    pub imported_at: i64,
+    pub updated_at: i64,
+    pub preview_file_id: Option<i64>,
+    pub resource_count: u32,
+    pub availability: FileAvailability,
+}
+
+impl From<LibraryCard> for LibraryCardResponse {
+    fn from(card: LibraryCard) -> Self {
+        Self {
+            id: card.id,
+            kind: card.kind,
+            shortcode: card.shortcode,
+            owner_username: card.owner_username,
+            taken_at: card.taken_at,
+            caption: card.caption,
+            imported_at: card.imported_at,
+            updated_at: card.updated_at,
+            preview_file_id: card.preview.map(|preview| preview.file_id),
+            resource_count: card.resource_count,
+            availability: card.availability,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LibraryItemDetailResponse {
+    pub id: i64,
+    pub kind: MediaItemKind,
+    pub remote_pk: Option<String>,
+    pub shortcode: Option<String>,
+    pub owner_pk: Option<String>,
+    pub owner_username: Option<String>,
+    pub taken_at: Option<i64>,
+    pub caption: Option<String>,
+    pub like_count: Option<i64>,
+    pub comment_count: Option<i64>,
+    pub imported_at: i64,
+    pub updated_at: i64,
+    pub files: Vec<LibraryFileResponse>,
+    pub source_ids: Vec<i64>,
+}
+
+impl From<LibraryItemDetail> for LibraryItemDetailResponse {
+    fn from(item: LibraryItemDetail) -> Self {
+        Self {
+            id: item.id,
+            kind: item.kind,
+            remote_pk: item.remote_pk,
+            shortcode: item.shortcode,
+            owner_pk: item.owner_pk,
+            owner_username: item.owner_username,
+            taken_at: item.taken_at,
+            caption: item.caption,
+            like_count: item.like_count,
+            comment_count: item.comment_count,
+            imported_at: item.imported_at,
+            updated_at: item.updated_at,
+            files: item.files.into_iter().map(Into::into).collect(),
+            source_ids: item.source_ids,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LibraryFileResponse {
+    pub id: i64,
+    pub ordinal: i64,
+    pub kind: MediaFileKind,
+    pub byte_size: i64,
+    pub mtime: i64,
+    pub exists_on_disk: bool,
+    pub last_seen_at: i64,
+}
+
+impl From<LibraryFile> for LibraryFileResponse {
+    fn from(file: LibraryFile) -> Self {
+        Self {
+            id: file.id,
+            ordinal: file.ordinal,
+            kind: file.kind,
+            byte_size: file.byte_size,
+            mtime: file.mtime,
+            exists_on_disk: file.exists_on_disk,
+            last_seen_at: file.last_seen_at,
+        }
+    }
+}
+
+pub trait FileAction: Send + Sync {
+    fn open(&self, path: &Path) -> Result<(), String>;
+    fn reveal(&self, path: &Path) -> Result<(), String>;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct SystemFileAction;
+
+impl FileAction for SystemFileAction {
+    fn open(&self, path: &Path) -> Result<(), String> {
+        tauri_plugin_opener::open_path(path, None::<&str>).map_err(|error| error.to_string())
+    }
+
+    fn reveal(&self, path: &Path) -> Result<(), String> {
+        tauri_plugin_opener::reveal_item_in_dir(path).map_err(|error| error.to_string())
+    }
+}
+
+pub struct LibraryFileActions<A: FileAction + ?Sized> {
+    catalog: Catalog,
+    action: Arc<A>,
+}
+
+impl<A: FileAction + ?Sized + 'static> LibraryFileActions<A> {
+    pub fn new(catalog: Catalog, action: Arc<A>) -> Self {
+        Self { catalog, action }
+    }
+
+    pub async fn open(&self, file_id: i64) -> Result<(), String> {
+        self.execute(file_id, FileActionOperation::Open).await
+    }
+
+    pub async fn reveal(&self, file_id: i64) -> Result<(), String> {
+        self.execute(file_id, FileActionOperation::Reveal).await
+    }
+
+    async fn execute(&self, file_id: i64, operation: FileActionOperation) -> Result<(), String> {
+        let catalog = self.catalog.clone();
+        let action = Arc::clone(&self.action);
+        tauri::async_runtime::spawn_blocking(move || {
+            let file = resolve_validated_catalog_file(&catalog, file_id)
+                .map_err(|_| FILE_UNAVAILABLE.to_owned())?;
+            match operation {
+                FileActionOperation::Open => action
+                    .open(&file.canonical_path)
+                    .map_err(|_| "Could not open library file".to_owned()),
+                FileActionOperation::Reveal => action
+                    .reveal(&file.canonical_path)
+                    .map_err(|_| "Could not reveal library file".to_owned()),
+            }
+        })
+        .await
+        .map_err(|_| operation.failure_message().to_owned())?
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FileActionOperation {
+    Open,
+    Reveal,
+}
+
+impl FileActionOperation {
+    const fn failure_message(self) -> &'static str {
+        match self {
+            Self::Open => "Could not open library file",
+            Self::Reveal => "Could not reveal library file",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ValidatedCatalogFile {
+    pub canonical_path: PathBuf,
+    pub relative_path: PathBuf,
+    pub kind: MediaFileKind,
+}
+
+pub(crate) fn resolve_validated_catalog_file(
+    catalog: &Catalog,
+    file_id: i64,
+) -> Result<ValidatedCatalogFile, ()> {
+    if file_id <= 0 {
+        return Err(());
+    }
+    let resolved = catalog.resolve_file(file_id).map_err(|_| ())?;
+    validate_resolved_catalog_file(&resolved)
+}
+
+fn validate_resolved_catalog_file(
+    resolved: &ResolvedCatalogFile,
+) -> Result<ValidatedCatalogFile, ()> {
+    if !resolved.exists_on_disk
+        || !resolved.root_path.is_absolute()
+        || resolved.relative_path.as_os_str().is_empty()
+        || resolved.relative_path.is_absolute()
+        || resolved
+            .relative_path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(());
+    }
+    let root = resolved.root_path.canonicalize().map_err(|_| ())?;
+    if !root.is_dir() {
+        return Err(());
+    }
+    let file = root
+        .join(&resolved.relative_path)
+        .canonicalize()
+        .map_err(|_| ())?;
+    if !file.starts_with(&root) || !file.is_file() {
+        return Err(());
+    }
+    Ok(ValidatedCatalogFile {
+        canonical_path: file,
+        relative_path: resolved.relative_path.clone(),
+        kind: resolved.kind,
+    })
+}
+
+async fn run_catalog<T: Send + 'static>(
+    operation: impl FnOnce() -> Result<T, crate::catalog::CatalogError> + Send + 'static,
+    public_error: &'static str,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(operation)
+        .await
+        .map_err(|_| public_error.to_owned())?
+        .map_err(|_| public_error.to_owned())
+}
 
 pub(crate) fn register_configured_library_root(
     catalog: &Catalog,
@@ -59,7 +308,62 @@ pub async fn ensure_configured_library_root(
     state: State<'_, AppState>,
 ) -> Result<LibraryRoot, String> {
     let config = state.cfg.read().await.clone();
-    register_configured_library_root(&state.catalog, &config)
+    let catalog = state.catalog.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        register_configured_library_root(&catalog, &config)
+    })
+    .await
+    .map_err(|_| "Could not register library root".to_owned())?
+    .map_err(|_| "Could not register library root".to_owned())
+}
+
+#[tauri::command]
+pub async fn list_library_roots(state: State<'_, AppState>) -> Result<Vec<LibraryRoot>, String> {
+    let catalog = state.catalog.clone();
+    run_catalog(move || catalog.list_roots(), "Could not list library roots").await
+}
+
+#[tauri::command]
+pub async fn query_library(
+    query: LibraryQuery,
+    state: State<'_, AppState>,
+) -> Result<LibraryPageResponse, String> {
+    let catalog = state.catalog.clone();
+    run_catalog(
+        move || catalog.query_library(&query),
+        "Could not query library",
+    )
+    .await
+    .map(Into::into)
+}
+
+#[tauri::command]
+pub async fn get_library_item(
+    id: i64,
+    state: State<'_, AppState>,
+) -> Result<LibraryItemDetailResponse, String> {
+    let catalog = state.catalog.clone();
+    let item = run_catalog(
+        move || catalog.get_library_item(id),
+        "Could not load library item",
+    )
+    .await?;
+    item.map(Into::into)
+        .ok_or_else(|| "Library item was not found".to_owned())
+}
+
+#[tauri::command]
+pub async fn open_library_file(file_id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    LibraryFileActions::new(state.catalog.clone(), Arc::new(SystemFileAction))
+        .open(file_id)
+        .await
+}
+
+#[tauri::command]
+pub async fn reveal_library_file(file_id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    LibraryFileActions::new(state.catalog.clone(), Arc::new(SystemFileAction))
+        .reveal(file_id)
+        .await
 }
 
 #[tauri::command]
@@ -69,8 +373,15 @@ pub async fn start_library_scan(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let scan_id = Uuid::new_v4().to_string();
-    let (root, lease, scan_started_at) =
-        prepare_scan(&state.catalog, &state.scans, root_id, &scan_id, unix_now())?;
+    let catalog = state.catalog.clone();
+    let scans = Arc::clone(&state.scans);
+    let prepare_scan_id = scan_id.clone();
+    let (root, lease, scan_started_at) = tauri::async_runtime::spawn_blocking(move || {
+        prepare_scan(&catalog, &scans, root_id, &prepare_scan_id, unix_now())
+    })
+    .await
+    .map_err(|_| "Could not start library scan".to_owned())?
+    .map_err(|_| "Could not start library scan".to_owned())?;
     let catalog = state.catalog.clone();
     let worker_scan_id = scan_id.clone();
     let cancellation = lease.cancellation().clone();

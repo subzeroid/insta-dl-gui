@@ -5,6 +5,7 @@ pub mod config;
 pub mod hiker;
 pub mod jobs;
 pub mod library_commands;
+pub mod library_protocol;
 pub mod models;
 pub mod scanner;
 pub mod targets;
@@ -126,6 +127,16 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .register_asynchronous_uri_scheme_protocol("library", |context, request, responder| {
+            let catalog = context.app_handle().state::<AppState>().catalog.clone();
+            let webview_label = context.webview_label().to_owned();
+            tauri::async_runtime::spawn(async move {
+                let response =
+                    library_protocol::handle_library_protocol(catalog, &webview_label, request)
+                        .await;
+                responder.respond(response);
+            });
+        })
         .setup(move |app| {
             let catalog_path = match dirs::data_dir() {
                 Some(data_dir) => data_dir.join("insta-dl-gui/catalog.sqlite3"),
@@ -183,8 +194,13 @@ pub fn run() {
             commands::fetch_stories,
             commands::download_direct,
             library_commands::ensure_configured_library_root,
+            library_commands::list_library_roots,
             library_commands::start_library_scan,
             library_commands::cancel_library_scan,
+            library_commands::query_library,
+            library_commands::get_library_item,
+            library_commands::open_library_file,
+            library_commands::reveal_library_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
