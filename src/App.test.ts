@@ -4,6 +4,7 @@ import { mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({
+  route: { path: "/library" },
   app: {
     ready: true,
     hasToken: true,
@@ -11,7 +12,7 @@ const state = vi.hoisted(() => ({
     init: vi.fn(),
     refreshBalance: vi.fn(),
   },
-  jobs: { init: vi.fn() },
+  jobs: { init: vi.fn(), jobs: new Map() },
   push: vi.fn(),
 }));
 
@@ -19,7 +20,7 @@ vi.mock("./stores/app", () => ({ useAppStore: () => state.app }));
 vi.mock("./stores/jobs", () => ({ useJobsStore: () => state.jobs }));
 vi.mock("./lib/ipc", () => ({ formatBalance: vi.fn(() => "10 req") }));
 vi.mock("vue-router", () => ({
-  useRoute: () => ({ path: "/library" }),
+  useRoute: () => state.route,
   useRouter: () => ({ push: state.push }),
 }));
 
@@ -29,10 +30,37 @@ beforeEach(() => {
   vi.clearAllMocks();
   state.app.init.mockResolvedValue(undefined);
   state.jobs.init.mockResolvedValue(undefined);
+  state.jobs.jobs.clear();
+  state.route.path = "/library";
   Object.defineProperty(window, "innerWidth", { configurable: true, value: 375 });
 });
 
 describe("application chrome", () => {
+  it("mounts global download activity outside onboarding", () => {
+    const wrapper = mount(App, {
+      global: {
+        stubs: {
+          RouterLink: {
+            props: ["to"],
+            template: '<a :href="to"><slot /></a>',
+          },
+          RouterView: true,
+        },
+      },
+    });
+
+    expect(wrapper.get("[data-testid='download-activity']").attributes("href")).toBe("/queue");
+  });
+
+  it("does not mount download activity during onboarding", () => {
+    state.route.path = "/onboarding";
+    const wrapper = mount(App, {
+      global: { stubs: { RouterLink: true, RouterView: true } },
+    });
+
+    expect(wrapper.find("[data-testid='download-activity']").exists()).toBe(false);
+  });
+
   it("contains narrow navigation overflow without widening the page", () => {
     const wrapper = mount(App, {
       global: {

@@ -4,6 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import { useAppStore } from "./stores/app";
 import { useJobsStore } from "./stores/jobs";
 import { formatBalance } from "./lib/ipc";
+import DownloadActivityBar from "./components/DownloadActivityBar.vue";
 
 const app = useAppStore();
 const jobs = useJobsStore();
@@ -68,5 +69,6 @@ const showChrome = computed(() => route.path !== "/onboarding");
     <main class="min-h-0 flex-1 overflow-y-auto">
       <RouterView />
     </main>
+    <DownloadActivityBar v-if="showChrome" />
   </div>
 </template>

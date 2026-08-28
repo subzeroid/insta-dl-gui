@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { useJobsStore } from "../stores/jobs";
-import JobCard from "../components/JobCard.vue";
 import { useAppStore } from "../stores/app";
 import {
   downloadPost,
@@ -86,10 +85,6 @@ async function startProfileDownload() {
   }
 }
 
-const activeJobs = computed(() =>
-  [...jobs.jobs.values()].filter((j) => j.state === "downloading" || j.state === "fetching"),
-);
-
 function fmtCount(n?: number) {
   return n === undefined ? "—" : new Intl.NumberFormat("en", { notation: "compact" }).format(n);
 }
@@ -119,11 +114,6 @@ onMounted(() => {
     </form>
 
     <p v-if="error" class="rounded-lg border border-err/40 bg-err/10 px-3 py-2 text-sm text-err">{{ error }}</p>
-
-    <!-- Active downloads -->
-    <div v-if="activeJobs.length > 0" class="space-y-3">
-      <JobCard v-for="job in activeJobs" :key="job.id" :job="job" />
-    </div>
 
     <!-- Profile preview -->
     <div v-if="preview" class="card overflow-hidden">
