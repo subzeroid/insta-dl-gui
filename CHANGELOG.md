@@ -2,6 +2,14 @@
 
 All notable changes to insta-dl-gui are documented in this file.
 
+## 0.3.1 - 2026-08-29
+
+### Fixed
+
+- Fixed repeated macOS Downloads-folder permission prompts in Library by requesting preview access once per app session.
+- Library now keeps safe placeholders after access is denied and offers a single explicit **Retry previews** action.
+- macOS application bundles are now fully ad-hoc signed and signature-verified in CI so privacy permissions attach to a complete app identity within each release.
+
 ## 0.3.0 - 2026-08-28
 
 ### Added
