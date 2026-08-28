@@ -17,6 +17,7 @@ const ipc = vi.hoisted(() => ({
   queryLibrary: vi.fn(),
   getLibraryItem: vi.fn(),
   openLibraryFile: vi.fn(),
+  requestLibraryPreviewAccess: vi.fn(),
   revealLibraryFile: vi.fn(),
   onLibraryScanProgress: vi.fn(),
   libraryMediaUrl: vi.fn(),
@@ -31,6 +32,7 @@ vi.mock("../lib/ipc", () => ({
   queryLibrary: ipc.queryLibrary,
   getLibraryItem: ipc.getLibraryItem,
   openLibraryFile: ipc.openLibraryFile,
+  requestLibraryPreviewAccess: ipc.requestLibraryPreviewAccess,
   revealLibraryFile: ipc.revealLibraryFile,
   onLibraryScanProgress: ipc.onLibraryScanProgress,
   libraryMediaUrl: ipc.libraryMediaUrl,
@@ -89,6 +91,7 @@ beforeEach(() => {
     ipc.queryLibrary,
     ipc.getLibraryItem,
     ipc.openLibraryFile,
+    ipc.requestLibraryPreviewAccess,
     ipc.revealLibraryFile,
     ipc.onLibraryScanProgress,
     ipc.libraryMediaUrl,
@@ -102,6 +105,7 @@ beforeEach(() => {
   ipc.queryLibrary.mockResolvedValue(page([], null));
   ipc.getLibraryItem.mockResolvedValue({ id: 1 } as LibraryItemDetail);
   ipc.openLibraryFile.mockResolvedValue(undefined);
+  ipc.requestLibraryPreviewAccess.mockResolvedValue(true);
   ipc.revealLibraryFile.mockResolvedValue(undefined);
   ipc.onLibraryScanProgress.mockImplementation(
     async (listener: (progress: LibraryScanProgress) => void) => {
@@ -259,6 +263,96 @@ describe("library query state", () => {
     expect(ipc.libraryMediaUrl).toHaveBeenCalledWith(101);
   });
 
+  it("publishes placeholders and shares one access probe across overlapping refreshes", async () => {
+    const access = deferred<boolean>();
+    ipc.queryLibrary.mockResolvedValue(page([1, 2], null));
+    ipc.requestLibraryPreviewAccess.mockImplementation(() => access.promise);
+    const store = useLibraryStore();
+
+    const firstRefresh = store.refresh();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(store.cards.map((item) => item.previewUrl)).toEqual([null, null]);
+    expect(store.previewAccess).toBe("checking");
+
+    const secondRefresh = store.refresh();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(ipc.requestLibraryPreviewAccess).toHaveBeenCalledTimes(1);
+    expect(ipc.requestLibraryPreviewAccess).toHaveBeenCalledWith(101);
+
+    access.resolve(true);
+    await Promise.all([firstRefresh, secondRefresh]);
+
+    expect(store.previewAccess).toBe("allowed");
+    expect(store.cards.map((item) => item.previewUrl)).toEqual([
+      "library://localhost/media/101",
+      "library://localhost/media/102",
+    ]);
+  });
+
+  it("caches denied preview access across pagination and filter refreshes", async () => {
+    ipc.requestLibraryPreviewAccess.mockResolvedValue(false);
+    ipc.queryLibrary
+      .mockResolvedValueOnce(page([1], "next-page"))
+      .mockResolvedValueOnce(page([2], null))
+      .mockResolvedValueOnce(page([3], null));
+    const store = useLibraryStore();
+
+    await store.refresh();
+    await store.loadMore();
+    store.setSearch("new filter");
+    await store.refresh();
+
+    expect(store.previewAccess).toBe("denied");
+    expect(store.cards.map((item) => item.previewUrl)).toEqual([null]);
+    expect(ipc.requestLibraryPreviewAccess).toHaveBeenCalledTimes(1);
+    expect(ipc.libraryMediaUrl).not.toHaveBeenCalled();
+  });
+
+  it("retries denied preview access only after an explicit request", async () => {
+    ipc.queryLibrary.mockResolvedValue(page([1], null));
+    ipc.requestLibraryPreviewAccess
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    const store = useLibraryStore();
+
+    await store.refresh();
+    expect(store.previewAccess).toBe("denied");
+    expect(store.cards[0].previewUrl).toBeNull();
+
+    await store.retryPreviewAccess();
+
+    expect(ipc.requestLibraryPreviewAccess).toHaveBeenCalledTimes(2);
+    expect(store.previewAccess).toBe("allowed");
+    expect(store.cards[0].previewUrl).toBe("library://localhost/media/101");
+  });
+
+  it("does not let a stale access probe expose previews for an older result set", async () => {
+    const access = deferred<boolean>();
+    ipc.queryLibrary
+      .mockResolvedValueOnce(page([1], null))
+      .mockResolvedValueOnce(page([9], null));
+    ipc.requestLibraryPreviewAccess.mockImplementation(() => access.promise);
+    const store = useLibraryStore();
+
+    const staleRefresh = store.refresh();
+    await Promise.resolve();
+    await Promise.resolve();
+    store.setSearch("new result");
+    const currentRefresh = store.refresh();
+    await Promise.resolve();
+    await Promise.resolve();
+    access.resolve(true);
+    await Promise.all([staleRefresh, currentRefresh]);
+
+    expect(store.cards.map((item) => item.id)).toEqual([9]);
+    expect(store.cards[0].previewUrl).toBe("library://localhost/media/109");
+    expect(ipc.requestLibraryPreviewAccess).toHaveBeenCalledTimes(1);
+  });
+
   it("uses a self-contained mock preview without converting it as a path", async () => {
     const previewUrl = "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'/%3E";
     const mockCard = { ...card(3), preview_url: previewUrl };
@@ -268,6 +362,7 @@ describe("library query state", () => {
     await store.refresh();
 
     expect(store.cards[0].previewUrl).toBe(previewUrl);
+    expect(ipc.requestLibraryPreviewAccess).not.toHaveBeenCalled();
     expect(ipc.libraryMediaUrl).not.toHaveBeenCalled();
   });
 });
