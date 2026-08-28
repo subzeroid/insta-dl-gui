@@ -58,6 +58,7 @@ function card(id: number): LibraryCard {
     imported_at: 1_700_000_100 + id,
     updated_at: 1_700_000_200 + id,
     preview_file_id: 100 + id,
+    preview_file_kind: "photo",
     resource_count: 1,
     availability: "available",
   };
@@ -252,6 +253,7 @@ describe("library query state", () => {
 
     const first: LibraryCardView = store.cards[0];
     expect(first.previewUrl).toBe("library://localhost/media/101");
+    expect(first.previewFileKind).toBe("photo");
     expect(store.cards[1].previewUrl).toBeNull();
     expect(ipc.libraryMediaUrl).toHaveBeenCalledTimes(1);
     expect(ipc.libraryMediaUrl).toHaveBeenCalledWith(101);

@@ -68,6 +68,7 @@ function card(id: number, overrides: Partial<LibraryCard> = {}): LibraryCard {
     imported_at: 1_700_000_100 + id,
     updated_at: 1_700_000_200 + id,
     preview_file_id: 1_000 + id,
+    preview_file_kind: "photo",
     resource_count: 1,
     availability: "available",
     ...overrides,
@@ -555,7 +556,10 @@ describe("Library browsing", () => {
 
   it("attaches local image and video previews only after cards enter the near viewport", async () => {
     ipc.queryLibrary.mockResolvedValue(
-      page([card(1), card(2, { kind: "reel", preview_file_id: 2_002 })]),
+      page([
+        card(1),
+        card(2, { kind: "story", preview_file_id: 2_002, preview_file_kind: "video" }),
+      ]),
     );
     const wrapper = await render({ root: scannedRoot });
     const photoCard = wrapper.get("[data-library-card-id='1']");
@@ -577,7 +581,9 @@ describe("Library browsing", () => {
 
   it("falls back to the local video placeholder when a near-viewport preview fails", async () => {
     ipc.queryLibrary.mockResolvedValue(
-      page([card(2, { kind: "reel", preview_file_id: 2_002 })]),
+      page([
+        card(2, { kind: "story", preview_file_id: 2_002, preview_file_kind: "video" }),
+      ]),
     );
     const wrapper = await render({ root: scannedRoot });
     const videoCard = wrapper.get("[data-library-card-id='2']");
@@ -603,6 +609,7 @@ describe("Library browsing", () => {
       {
         ...card(1, { preview_file_id: 1_001 }),
         previewUrl: "library://localhost/media/1001",
+        previewFileKind: "photo",
       },
     ];
     await flushPromises();
@@ -616,6 +623,7 @@ describe("Library browsing", () => {
       {
         ...card(1, { preview_file_id: 2_001 }),
         previewUrl: "library://localhost/media/2001",
+        previewFileKind: "photo",
       },
     ];
     await flushPromises();

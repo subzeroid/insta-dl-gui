@@ -44,6 +44,7 @@ pub struct LibraryCardResponse {
     pub imported_at: i64,
     pub updated_at: i64,
     pub preview_file_id: Option<i64>,
+    pub preview_file_kind: Option<MediaFileKind>,
     pub resource_count: u32,
     pub availability: FileAvailability,
 }
@@ -59,7 +60,8 @@ impl From<LibraryCard> for LibraryCardResponse {
             caption: card.caption,
             imported_at: card.imported_at,
             updated_at: card.updated_at,
-            preview_file_id: card.preview.map(|preview| preview.file_id),
+            preview_file_id: card.preview.as_ref().map(|preview| preview.file_id),
+            preview_file_kind: card.preview.as_ref().map(|preview| preview.kind),
             resource_count: card.resource_count,
             availability: card.availability,
         }

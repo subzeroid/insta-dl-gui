@@ -52,6 +52,7 @@ export interface LibraryCard {
   imported_at: number;
   updated_at: number;
   preview_file_id: number | null;
+  preview_file_kind: MediaFileKind | null;
   resource_count: number;
   availability: FileAvailability;
 }
@@ -177,7 +178,8 @@ export async function onLibraryScanProgress(
 }
 
 export function libraryMediaUrl(fileId: number): string {
-  return convertFileSrc(`/media/${fileId}`, "library");
+  const mediaBase = convertFileSrc("media", "library").replace(/\/$/, "");
+  return `${mediaBase}/${fileId}`;
 }
 
 export async function saveSettings(opts: { dest_dir?: string; sidecar?: boolean }): Promise<ConfigState> {

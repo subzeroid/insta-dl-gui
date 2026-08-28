@@ -72,7 +72,7 @@ function observePreview() {
 }
 
 watch(
-  [() => props.card.previewUrl, () => props.card.kind],
+  [() => props.card.previewUrl, () => props.card.previewFileKind],
   () => {
     previewFailed.value = false;
     observePreview();
@@ -99,7 +99,7 @@ onBeforeUnmount(() => disconnectObserver());
   >
     <span class="relative block h-[216px] overflow-hidden bg-surface-2">
       <video
-        v-if="showsPreview && card.kind === 'reel'"
+        v-if="showsPreview && card.previewFileKind === 'video'"
         :src="card.previewUrl ?? undefined"
         class="h-full w-full object-cover"
         muted
@@ -119,7 +119,7 @@ onBeforeUnmount(() => disconnectObserver());
         class="library-preview-placeholder absolute inset-0 flex items-center justify-center text-xs font-medium uppercase tracking-[0.18em] text-slate-500"
         aria-hidden="true"
       >
-        {{ card.kind === "reel" ? "Video" : "Local media" }}
+        {{ card.previewFileKind === "video" ? "Video" : "Local media" }}
       </span>
       <span class="absolute left-2 top-2 rounded-md bg-black/70 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-100">
         {{ card.kind }}
