@@ -249,6 +249,7 @@ pub fn run() {
             library_commands::cancel_library_scan,
             library_commands::query_library,
             library_commands::get_library_item,
+            library_commands::request_library_preview_access,
             library_commands::open_library_file,
             library_commands::reveal_library_file,
         ])

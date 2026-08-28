@@ -10,6 +10,7 @@ import {
   onLibraryScanProgress,
   openLibraryFile,
   queryLibrary,
+  requestLibraryPreviewAccess,
   revealLibraryFile,
   startLibraryScan,
   type LibraryCard,
@@ -81,6 +82,7 @@ describe("library mock", () => {
 
     await expect(openLibraryFile(detail.files[0].id)).resolves.toBeNull();
     await expect(revealLibraryFile(detail.files[0].id)).resolves.toBeNull();
+    await expect(requestLibraryPreviewAccess(detail.files[0].id)).resolves.toBe(true);
     await expect(cancelLibraryScan("mock-library-scan")).resolves.toBe(true);
 
     expect(roots).toEqual([configured]);

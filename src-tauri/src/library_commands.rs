@@ -221,6 +221,12 @@ pub(crate) fn resolve_validated_catalog_file(
     validate_resolved_catalog_file(&resolved)
 }
 
+pub fn probe_library_preview_access(catalog: &Catalog, file_id: i64) -> bool {
+    resolve_validated_catalog_file(catalog, file_id)
+        .and_then(|file| std::fs::File::open(file.canonical_path).map_err(|_| ()))
+        .is_ok()
+}
+
 fn validate_resolved_catalog_file(
     resolved: &ResolvedCatalogFile,
 ) -> Result<ValidatedCatalogFile, ()> {
@@ -352,6 +358,17 @@ pub async fn get_library_item(
     .await?;
     item.map(Into::into)
         .ok_or_else(|| "Library item was not found".to_owned())
+}
+
+#[tauri::command]
+pub async fn request_library_preview_access(
+    file_id: i64,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let catalog = state.catalog.clone();
+    tauri::async_runtime::spawn_blocking(move || probe_library_preview_access(&catalog, file_id))
+        .await
+        .map_err(|_| "Could not check library preview access".to_owned())
 }
 
 #[tauri::command]

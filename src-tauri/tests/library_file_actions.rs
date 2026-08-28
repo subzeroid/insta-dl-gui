@@ -6,7 +6,8 @@ use insta_dl_gui_lib::catalog::{
     MediaItemKind,
 };
 use insta_dl_gui_lib::library_commands::{
-    FileAction, LibraryFileActions, LibraryItemDetailResponse, LibraryPageResponse,
+    probe_library_preview_access, FileAction, LibraryFileActions, LibraryItemDetailResponse,
+    LibraryPageResponse,
 };
 use tempfile::TempDir;
 
@@ -94,6 +95,33 @@ impl Fixture {
     fn service(&self, action: RecordingFileAction) -> LibraryFileActions<RecordingFileAction> {
         LibraryFileActions::new(self.catalog.clone(), Arc::new(action))
     }
+}
+
+#[test]
+fn preview_access_probe_opens_one_existing_validated_catalog_file() {
+    let fixture = Fixture::new();
+    let file_id = fixture.add_file("posts/photo.jpg", Some(b"photo"));
+
+    assert!(probe_library_preview_access(&fixture.catalog, file_id));
+}
+
+#[test]
+fn preview_access_probe_rejects_missing_and_boundary_invalid_files() {
+    let fixture = Fixture::new();
+    let missing_id = fixture.add_file("missing.jpg", None);
+    let invalid_id = fixture.add_file("safe.jpg", Some(b"safe"));
+    let outside = fixture.root_path.parent().unwrap().join("outside.jpg");
+    std::fs::write(&outside, b"outside").unwrap();
+    rusqlite::Connection::open(&fixture.database_path)
+        .unwrap()
+        .execute(
+            "UPDATE media_files SET relative_path = '../outside.jpg' WHERE id = ?1",
+            [invalid_id],
+        )
+        .unwrap();
+
+    assert!(!probe_library_preview_access(&fixture.catalog, missing_id));
+    assert!(!probe_library_preview_access(&fixture.catalog, invalid_id));
 }
 
 #[tokio::test]

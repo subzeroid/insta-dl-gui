@@ -218,6 +218,8 @@ function reply(cmd: string, args?: CmdArgs): unknown {
       if (!card) throw new Error("Library item was not found");
       return mockDetail(card);
     }
+    case "request_library_preview_access":
+      return Number.isInteger(args?.fileId) && Number(args?.fileId) > 0;
     case "open_library_file":
     case "reveal_library_file":
       if (!Number.isInteger(args?.fileId) || Number(args?.fileId) <= 0) {
