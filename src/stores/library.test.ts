@@ -312,6 +312,92 @@ describe("library query state", () => {
     expect(ipc.libraryMediaUrl).not.toHaveBeenCalled();
   });
 
+  it("treats a rejected access probe as one cached denial without a query error", async () => {
+    ipc.queryLibrary.mockResolvedValue(page([1], null));
+    ipc.requestLibraryPreviewAccess.mockRejectedValue(new Error("IPC unavailable"));
+    const store = useLibraryStore();
+
+    await store.refresh();
+    await store.refresh();
+
+    expect(store.previewAccess).toBe("denied");
+    expect(store.error).toBeNull();
+    expect(store.cards[0].previewUrl).toBeNull();
+    expect(ipc.requestLibraryPreviewAccess).toHaveBeenCalledTimes(1);
+  });
+
+  it("requests preview access again after the configured library root changes", async () => {
+    const replacementRoot: LibraryRoot = {
+      ...root,
+      id: 8,
+      path: "/mock/replacement",
+      label: "Replacement",
+    };
+    ipc.queryLibrary
+      .mockResolvedValueOnce(page([1], null))
+      .mockResolvedValueOnce(page([2], null));
+    ipc.requestLibraryPreviewAccess
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    const store = useLibraryStore();
+
+    await store.loadRoots();
+    await store.refresh();
+    expect(store.previewAccess).toBe("allowed");
+
+    ipc.ensureConfiguredLibraryRoot.mockResolvedValue(replacementRoot);
+    ipc.listLibraryRoots.mockResolvedValue([replacementRoot]);
+    await store.loadRoots();
+    await store.refresh();
+
+    expect(store.activeRoot?.id).toBe(8);
+    expect(store.previewAccess).toBe("denied");
+    expect(store.cards[0].previewUrl).toBeNull();
+    expect(ipc.requestLibraryPreviewAccess).toHaveBeenCalledTimes(2);
+    expect(ipc.requestLibraryPreviewAccess).toHaveBeenLastCalledWith(102);
+  });
+
+  it("ignores an old root probe that resolves after the configured root changes", async () => {
+    const oldAccess = deferred<boolean>();
+    const newAccess = deferred<boolean>();
+    const replacementRoot: LibraryRoot = {
+      ...root,
+      id: 8,
+      path: "/mock/replacement",
+      label: "Replacement",
+    };
+    ipc.queryLibrary
+      .mockResolvedValueOnce(page([1], null))
+      .mockResolvedValueOnce(page([2], null));
+    ipc.requestLibraryPreviewAccess
+      .mockImplementationOnce(() => oldAccess.promise)
+      .mockImplementationOnce(() => newAccess.promise);
+    const store = useLibraryStore();
+
+    await store.loadRoots();
+    const oldRefresh = store.refresh();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    ipc.ensureConfiguredLibraryRoot.mockResolvedValue(replacementRoot);
+    ipc.listLibraryRoots.mockResolvedValue([replacementRoot]);
+    await store.loadRoots();
+    const newRefresh = store.refresh();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    oldAccess.resolve(true);
+    await oldRefresh;
+    newAccess.resolve(false);
+    await newRefresh;
+
+    expect(store.activeRoot?.id).toBe(8);
+    expect(store.previewAccess).toBe("denied");
+    expect(store.cards.map((item) => item.id)).toEqual([2]);
+    expect(store.cards[0].previewUrl).toBeNull();
+    expect(ipc.requestLibraryPreviewAccess).toHaveBeenCalledTimes(2);
+  });
+
   it("retries denied preview access only after an explicit request", async () => {
     ipc.queryLibrary.mockResolvedValue(page([1], null));
     ipc.requestLibraryPreviewAccess

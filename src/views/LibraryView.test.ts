@@ -376,8 +376,10 @@ describe("Library browsing", () => {
     const wrapper = await render({ root: scannedRoot });
     const libraryCard = wrapper.get("[data-library-card-id='1']");
 
-    expect(wrapper.get("[data-testid='library-preview-access-notice']").text()).toContain(
-      "Preview access is blocked",
+    const accessNotice = wrapper.get("[data-testid='library-preview-access-notice']");
+    expect(accessNotice.text()).toContain("Preview access is blocked");
+    expect(accessNotice.text()).toContain(
+      "System Settings → Privacy & Security → Files and Folders",
     );
     expect(libraryCard.find("img").exists()).toBe(false);
     expect(ipc.requestLibraryPreviewAccess).toHaveBeenCalledTimes(1);

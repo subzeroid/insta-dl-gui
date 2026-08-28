@@ -93,6 +93,8 @@ export const useLibraryStore = defineStore("library", () => {
   const requestGeneration = ref(0);
   const previewAccess = ref<LibraryPreviewAccess>("unknown");
   let previewAccessPromise: Promise<boolean> | null = null;
+  let previewAccessRootId: number | null = null;
+  let previewAccessGeneration = 0;
 
   const selected = ref<LibraryItemDetail | null>(null);
   const detailLoading = ref(false);
@@ -186,12 +188,15 @@ export const useLibraryStore = defineStore("library", () => {
     if (previewAccessPromise !== null) return previewAccessPromise;
 
     previewAccess.value = "checking";
+    const generation = previewAccessGeneration;
     const pending = requestLibraryPreviewAccess(fileId)
       .then((allowed) => {
+        if (generation !== previewAccessGeneration) return false;
         previewAccess.value = allowed ? "allowed" : "denied";
         return allowed;
       })
       .catch(() => {
+        if (generation !== previewAccessGeneration) return false;
         previewAccess.value = "denied";
         return false;
       });
@@ -200,6 +205,14 @@ export const useLibraryStore = defineStore("library", () => {
       if (previewAccessPromise === pending) previewAccessPromise = null;
     });
     return pending;
+  }
+
+  function usePreviewAccessRoot(rootId: number) {
+    if (previewAccessRootId === rootId) return;
+    previewAccessRootId = rootId;
+    previewAccessGeneration += 1;
+    previewAccessPromise = null;
+    previewAccess.value = "unknown";
   }
 
   async function loadPage(append: boolean) {
@@ -305,6 +318,7 @@ export const useLibraryStore = defineStore("library", () => {
         ? listed
         : [...listed, configured];
       activeRoot.value = roots.value.find((root) => root.id === configured.id) ?? configured;
+      usePreviewAccessRoot(activeRoot.value.id);
     } catch (cause) {
       if (isCurrent()) rootsError.value = errorMessage(cause);
     } finally {

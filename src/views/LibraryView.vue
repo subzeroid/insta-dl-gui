@@ -484,7 +484,8 @@ onBeforeUnmount(() => {
         <div>
           <p class="text-sm font-medium text-slate-200">Preview access is blocked</p>
           <p class="mt-1 text-xs text-slate-400">
-            Allow insta-dl-gui to read your download folder, then retry. Your files stay local.
+            Enable insta-dl-gui in System Settings → Privacy &amp; Security → Files and Folders,
+            then retry. Your files stay local.
           </p>
         </div>
         <button
