@@ -36,6 +36,13 @@ export const useAppStore = defineStore("app", () => {
     balance.value = await ipc.getBalance();
   }
 
+  async function replaceToken(token: string) {
+    const nextBalance = await ipc.validateToken(token.trim());
+    applyState(await ipc.configState());
+    balance.value = nextBalance;
+    return nextBalance;
+  }
+
   function onTokenSet() {
     hasToken.value = true;
   }
@@ -51,6 +58,7 @@ export const useAppStore = defineStore("app", () => {
     init,
     saveSettings,
     refreshBalance,
+    replaceToken,
     onTokenSet,
   };
 });

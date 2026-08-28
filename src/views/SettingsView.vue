@@ -2,11 +2,16 @@
 import { onMounted, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "../stores/app";
+import { formatBalance } from "../lib/ipc";
 
 const app = useAppStore();
 const sidecar = ref(app.sidecar);
 const sidecarSaving = ref(false);
 const saveError = ref<string | null>(null);
+const replacementToken = ref("");
+const tokenBusy = ref(false);
+const tokenError = ref<string | null>(null);
+const tokenSuccess = ref<string | null>(null);
 
 onMounted(() => {
   sidecar.value = app.sidecar;
@@ -43,11 +48,62 @@ async function pickDir() {
     }
   }
 }
+
+async function replaceToken() {
+  const token = replacementToken.value.trim();
+  if (!token || tokenBusy.value) return;
+  tokenBusy.value = true;
+  tokenError.value = null;
+  tokenSuccess.value = null;
+  try {
+    const balance = await app.replaceToken(token);
+    replacementToken.value = "";
+    tokenSuccess.value = `Token replaced · ${formatBalance(balance)}`;
+  } catch (cause) {
+    tokenError.value = cause instanceof Error ? cause.message : String(cause);
+  } finally {
+    tokenBusy.value = false;
+  }
+}
 </script>
 
 <template>
   <div class="mx-auto max-w-2xl space-y-6 p-6">
     <h2 class="text-lg font-semibold">Settings</h2>
+
+    <form data-testid="token-form" class="card space-y-3 p-5" @submit.prevent="replaceToken">
+      <div>
+        <div class="text-sm font-medium text-slate-300">HikerAPI token</div>
+        <p class="mt-1 text-xs text-slate-500">
+          Current: <span data-testid="token-hint" class="font-mono text-slate-400">{{ app.tokenHint || "Not configured" }}</span>
+        </p>
+      </div>
+      <div class="flex gap-2">
+        <input
+          v-model="replacementToken"
+          name="hiker-token"
+          class="input font-mono text-xs"
+          type="password"
+          placeholder="Paste a new token…"
+          autocomplete="off"
+          :disabled="tokenBusy"
+        />
+        <button
+          data-testid="replace-token"
+          class="btn-primary shrink-0"
+          type="submit"
+          :disabled="tokenBusy || !replacementToken.trim()"
+        >
+          {{ tokenBusy ? "Validating…" : "Replace token" }}
+        </button>
+      </div>
+      <p v-if="tokenError" data-testid="token-error" class="text-xs text-err" role="alert">
+        {{ tokenError }}
+      </p>
+      <p v-else-if="tokenSuccess" data-testid="token-success" class="text-xs text-ok" role="status">
+        {{ tokenSuccess }}
+      </p>
+    </form>
 
     <div class="card space-y-1 p-5">
       <div class="text-sm font-medium text-slate-300">Download folder</div>
