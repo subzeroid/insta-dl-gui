@@ -2,9 +2,13 @@
 
 import { createPinia, setActivePinia } from "pinia";
 import { flushPromises, mount } from "@vue/test-utils";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { JobProgress } from "../lib/ipc";
+
+const appStyles = readFileSync(join(process.cwd(), "src/style.css"), "utf8");
 
 const ipc = vi.hoisted(() => ({
   listener: undefined as ((progress: JobProgress) => void) | undefined,
@@ -46,6 +50,10 @@ beforeEach(() => {
 });
 
 describe("DownloadActivityBar", () => {
+  it("defines the indeterminate progress animation used by active downloads", () => {
+    expect(appStyles).toContain("@keyframes slide");
+  });
+
   it("keeps Queue reachable while downloads are idle", () => {
     const wrapper = render();
 
