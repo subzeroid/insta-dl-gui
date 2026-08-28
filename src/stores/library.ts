@@ -19,6 +19,7 @@ import {
   type LibraryRoot,
   type LibraryScanProgress,
   type LibrarySort,
+  type MediaFileKind,
   type MediaItemKind,
   type ScanSummary,
 } from "../lib/ipc";
@@ -27,6 +28,7 @@ const PAGE_SIZE = 60;
 
 export interface LibraryCardView extends LibraryCard {
   previewUrl: string | null;
+  previewFileKind: MediaFileKind | null;
 }
 
 function errorMessage(error: unknown): string {
@@ -51,9 +53,11 @@ function toLibraryCardView(card: LibraryCard): LibraryCardView {
     imported_at: card.imported_at,
     updated_at: card.updated_at,
     preview_file_id: card.preview_file_id,
+    preview_file_kind: card.preview_file_kind,
     resource_count: card.resource_count,
     availability: card.availability,
     previewUrl,
+    previewFileKind: previewUrl === null ? null : card.preview_file_kind,
   };
 }
 

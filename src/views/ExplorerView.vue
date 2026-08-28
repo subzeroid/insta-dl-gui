@@ -16,7 +16,6 @@ import {
 import { useJobsStore } from "../stores/jobs";
 import { createExplorerRequestState, runOnce } from "../lib/asyncState";
 import { mergeUniquePosts } from "../lib/mediaPages";
-import JobCard from "../components/JobCard.vue";
 import PostModal from "../components/PostModal.vue";
 
 const jobs = useJobsStore();
@@ -47,10 +46,6 @@ const tabs = [
   { id: "reels", label: "Reels" },
   { id: "stories", label: "Stories" },
 ] as const;
-
-const activeJobs = computed(() =>
-  [...jobs.jobs.values()].filter((j) => j.state === "fetching" || j.state === "downloading"),
-);
 
 function hasVideo(p: Post): boolean {
   return p.resources.some((r) => r.kind === "video");
@@ -364,10 +359,6 @@ onUnmounted(() => {
     <p v-if="error" class="rounded-lg border border-err/40 bg-err/10 px-3 py-2 text-sm text-err">{{ error }}</p>
 
     <!-- Active jobs -->
-    <div v-if="activeJobs.length > 0" class="space-y-3">
-      <JobCard v-for="job in activeJobs" :key="job.id" :job="job" />
-    </div>
-
     <div v-if="loading" class="animate-pulse py-16 text-center text-sm text-slate-500">Loading profile…</div>
 
     <template v-if="preview">
@@ -526,7 +517,7 @@ onUnmounted(() => {
     </template>
 
     <div
-      v-if="!preview && !loading && !error && activeJobs.length === 0"
+      v-if="!preview && !loading && !error"
       class="card flex items-center justify-center p-12 text-sm text-slate-500"
     >
       Search a username or paste a post link to explore.

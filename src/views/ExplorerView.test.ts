@@ -22,6 +22,7 @@ vi.mock("../lib/ipc", () => ({
 }));
 
 import ExplorerView from "./ExplorerView.vue";
+import { useJobsStore } from "../stores/jobs";
 
 const preview = {
   profile: {
@@ -78,6 +79,14 @@ afterEach(() => {
 });
 
 describe("ExplorerView async wiring", () => {
+  it("leaves active download rendering to the global application footer", async () => {
+    const wrapper = render();
+    useJobsStore().addPlaceholder("job-1", "@instagram stories");
+    await flushPromises();
+
+    expect(wrapper.find("job-card-stub").exists()).toBe(false);
+  });
+
   it("does not reopen autocomplete after Escape invalidates an in-flight response", async () => {
     vi.useFakeTimers();
     const pending = deferred<Array<{ pk: string; username: string; is_verified: boolean; is_private: boolean }>>();

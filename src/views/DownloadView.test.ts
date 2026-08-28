@@ -22,6 +22,7 @@ vi.mock("../lib/ipc", () => ({
 }));
 
 import DownloadView from "./DownloadView.vue";
+import { useJobsStore } from "../stores/jobs";
 
 const publicPreview = {
   profile: {
@@ -62,6 +63,14 @@ beforeEach(() => {
 });
 
 describe("DownloadView concurrency", () => {
+  it("leaves active download rendering to the global application footer", async () => {
+    const wrapper = render();
+    useJobsStore().addPlaceholder("job-1", "@instagram stories");
+    await flushPromises();
+
+    expect(wrapper.find("job-card-stub").exists()).toBe(false);
+  });
+
   it("accepts only one lookup while input resolution is pending", async () => {
     const pending = deferred<{ kind: "profile"; username: string }>();
     ipc.resolveInput.mockReturnValue(pending.promise);

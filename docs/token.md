@@ -28,7 +28,10 @@ The remaining balance is always visible in the app header; click it to refresh. 
 
 ## Rotating or removing a token
 
-Re-run the flow above with a new token — it replaces the old one. To wipe all app data, delete the config directory:
+Open **Settings → HikerAPI token**, paste the replacement and press **Replace token**. The app validates it first; a rejected token leaves the current token active.
 
-- macOS/Linux: `~/.config/insta-dl-gui/`
+To remove the token without deleting the download folder preference or metadata setting, close the app and remove only the `token` field from `config.json`. The next launch returns to the connection screen. Config locations:
+
+- macOS: `~/Library/Application Support/insta-dl-gui/config.json`
+- Linux: `$XDG_CONFIG_HOME/insta-dl-gui/config.json` or `~/.config/insta-dl-gui/config.json`
 - Windows: `%APPDATA%\insta-dl-gui\`

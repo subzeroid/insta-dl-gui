@@ -258,6 +258,7 @@ fn ipc_library_dtos_never_serialize_catalog_paths_or_root_ids() {
     let safe_page = LibraryPageResponse::from(page);
     let page_json = serde_json::to_value(safe_page).unwrap();
     assert_eq!(page_json["items"][0]["preview_file_id"], file_id);
+    assert_eq!(page_json["items"][0]["preview_file_kind"], "photo");
     let page_text = page_json.to_string();
     assert!(!page_text.contains("remote_key"));
     assert!(!page_text.contains("relative_path"));

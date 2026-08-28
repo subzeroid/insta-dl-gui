@@ -2,6 +2,22 @@
 
 All notable changes to insta-dl-gui are documented in this file.
 
+## 0.3.0 - 2026-08-28
+
+### Added
+
+- Added a global download activity footer with live job, file, and byte progress that opens Queue from every main screen.
+- Added safe HikerAPI token replacement in Settings with validation before the active token changes.
+
+### Fixed
+
+- Fixed local Library preview URLs so downloaded photos and videos load through the protected media protocol.
+- Fixed video stories being rendered as broken images instead of video previews.
+
+### Changed
+
+- Download and Explore now use the global footer for active progress; Queue remains the detailed job and cancellation screen.
+
 ## 0.2.0 - 2026-08-24
 
 ### Added

@@ -101,6 +101,20 @@ describe("library mock", () => {
     expect(libraryMediaUrl(42)).toBe("library://localhost/media/42");
   });
 
+  it("builds a canonical custom-protocol URL without encoding path separators", () => {
+    installTauriMock();
+    const internals = (window as unknown as {
+      __TAURI_INTERNALS__: { convertFileSrc: (path: string, protocol?: string) => string };
+    }).__TAURI_INTERNALS__;
+    internals.convertFileSrc = (path, protocol = "asset") =>
+      `${protocol}://localhost/${encodeURIComponent(path)}`;
+
+    const url = libraryMediaUrl(42);
+
+    expect(url).toBe("library://localhost/media/42");
+    expect(url).not.toContain("%2F");
+  });
+
   it("provides an unscanned empty root for the first-scan library demo", async () => {
     window.history.replaceState({}, "", "/library?mock=1&demo=library-first-scan");
     installTauriMock();

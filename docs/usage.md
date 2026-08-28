@@ -9,7 +9,7 @@ https://www.instagram.com/p/DXZlTiKEpxw/
 https://www.instagram.com/reel/DXZlTiKEpxw/
 ```
 
-All media of the post (including carousels) downloads immediately with live progress. Cancel anytime from the job card.
+All media of the post (including carousels) downloads immediately. Live progress stays visible in the footer; click it to open **Queue** and cancel a job.
 
 ## Archive a whole profile
 
@@ -25,7 +25,7 @@ All media of the post (including carousels) downloads immediately with live prog
 | **Avatar** | HD profile picture | `<dest>/<username>/avatar_<pk>.<ext>` |
 | **Max** | cap on posts considered (empty = all) | — |
 
-3. Press **Download**. Progress appears live; switch to the **Queue** tab for all jobs.
+3. Press **Download**. Progress appears in the global footer; click it to open **Queue** for every active and completed job.
 
 For a private profile, only **Avatar** is available. Posts, reels, stories and highlights remain hidden because the public API cannot access them.
 
@@ -76,7 +76,7 @@ Downloads completed by the app are cataloged automatically. The initial scan is 
 - The captured-date range uses local calendar dates.
 - Sort by **Publication date** or **Import date**.
 
-Open an item to inspect its metadata and files. **Open file** launches an available file with the system default app; **Show in folder** reveals it in the system file manager. These actions are disabled for missing files.
+Photo and video previews load directly from the local archive. Open an item to inspect its metadata and files. **Open file** launches an available file with the system default app; **Show in folder** reveals it in the system file manager. These actions are disabled for missing files.
 
 ### Rescans and missing files
 
@@ -100,6 +100,8 @@ Re-running the same profile skips everything already on disk — file stems are 
 
 ## Queue
 
-The **Queue** tab lists all jobs with per-file progress and byte counters. Failed jobs show the reason (private profile, quota exhausted, deleted post). Cancelled and finished jobs can be cleared.
+The footer keeps download activity visible from Download, Explore, Library and Settings. It shows the active job count, current file and downloaded bytes; click anywhere on it to open **Queue**.
+
+The **Queue** screen lists all jobs with per-file progress and byte counters. Failed jobs show the reason (private profile, quota exhausted, deleted post). Cancelled and finished jobs can be cleared.
 
 If a batch saves some files before a later item fails, it finishes with the exact number saved. Re-run the same target after fixing the cause; existing files are skipped.

@@ -31,6 +31,16 @@ body {
   @apply bg-surface-0 text-slate-200 antialiased;
 }
 
+@keyframes slide {
+  from {
+    transform: translateX(-100%);
+  }
+
+  to {
+    transform: translateX(300%);
+  }
+}
+
 .btn,
 .btn-primary,
 .btn-secondary {
