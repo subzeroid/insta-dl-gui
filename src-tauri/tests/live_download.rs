@@ -7,9 +7,46 @@
 
 use insta_dl_gui_lib::cdn;
 use insta_dl_gui_lib::hiker::{map_post, map_profile, HikerClient};
+use insta_dl_gui_lib::models::MediaKind;
 
 const TEST_POST_CODE: &str = "DXZlTiKEpxw"; // instagram's own public post
 const TEST_PROFILE: &str = "instagram";
+
+#[tokio::test]
+async fn nike_clips_first_page() {
+    let Some(token) = std::env::var("SMOKE_TOKEN")
+        .ok()
+        .filter(|value| !value.is_empty())
+    else {
+        eprintln!("SMOKE_TOKEN not set — skipping live smoke");
+        return;
+    };
+    let client = HikerClient::new(token);
+    let user = client.user_by_username("nike").await.expect("nike profile");
+    let profile = map_profile(&user).expect("map nike profile");
+    let page = client
+        .user_clips_chunk(&profile.pk, None)
+        .await
+        .expect("nike clips");
+    let videos = page
+        .posts
+        .iter()
+        .filter(|post| {
+            post.resources
+                .iter()
+                .any(|resource| resource.kind == MediaKind::Video)
+        })
+        .count();
+
+    println!(
+        "nike clips: count={}, cursor={}, videos={}",
+        page.posts.len(),
+        page.end_cursor.is_some(),
+        videos
+    );
+    assert!(!page.posts.is_empty());
+    assert_eq!(videos, page.posts.len());
+}
 
 #[tokio::test]
 async fn balance_and_single_post_download() {

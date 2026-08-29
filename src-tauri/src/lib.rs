@@ -238,6 +238,7 @@ pub fn run() {
             commands::resolve_input,
             commands::download_post,
             commands::fetch_profile,
+            commands::fetch_reels,
             commands::enqueue_profile_download,
             commands::cancel_job,
             commands::search_users,

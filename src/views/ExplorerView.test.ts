@@ -1,6 +1,6 @@
 /** @vitest-environment happy-dom */
 
-import { createPinia, setActivePinia } from "pinia";
+import { createPinia, setActivePinia, type Pinia } from "pinia";
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -9,6 +9,7 @@ const ipc = vi.hoisted(() => ({
   downloadPost: vi.fn(),
   enqueueProfileDownload: vi.fn(),
   fetchProfile: vi.fn(),
+  fetchReels: vi.fn(),
   fetchStories: vi.fn(),
   resolveInput: vi.fn(),
   searchUsers: vi.fn(),
@@ -22,6 +23,7 @@ vi.mock("../lib/ipc", () => ({
 }));
 
 import ExplorerView from "./ExplorerView.vue";
+import type { MediaPage, ProfilePreview } from "../lib/ipc";
 import { useJobsStore } from "../stores/jobs";
 
 const preview = {
@@ -37,6 +39,16 @@ const preview = {
   },
   recent_posts: [],
   end_cursor: null,
+};
+
+const adidasPreview: ProfilePreview = {
+  ...preview,
+  profile: {
+    ...preview.profile,
+    pk: "84",
+    username: "adidas",
+    full_name: "Adidas",
+  },
 };
 
 function videoPost(pk: string, thumbnail_url: string) {
@@ -59,8 +71,7 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function render() {
-  const pinia = createPinia();
+function render(pinia: Pinia = createPinia()) {
   setActivePinia(pinia);
   return mount(ExplorerView, {
     global: {
@@ -68,6 +79,26 @@ function render() {
       stubs: { JobCard: true, PostModal: true },
     },
   });
+}
+
+async function loadProfile(
+  wrapper: ReturnType<typeof render>,
+  value: ProfilePreview = preview,
+) {
+  ipc.resolveInput.mockResolvedValueOnce({
+    kind: "profile",
+    username: value.profile.username,
+  });
+  ipc.fetchProfile.mockResolvedValueOnce(value);
+  await wrapper.get("input").setValue(value.profile.username);
+  await wrapper.get("form").trigger("submit");
+  await flushPromises();
+}
+
+function button(wrapper: ReturnType<typeof render>, label: string) {
+  const found = wrapper.findAll("button").find((item) => item.text() === label);
+  if (!found) throw new Error(`Button not found: ${label}`);
+  return found;
 }
 
 beforeEach(() => {
@@ -166,30 +197,170 @@ describe("ExplorerView async wiring", () => {
     expect(ipc.enqueueProfileDownload).toHaveBeenCalledTimes(2);
   });
 
-  it("deduplicates overlapping pages before rendering reels", async () => {
-    const firstPosts = [videoPost("p1", "https://cdninstagram.com/first.jpg")];
-    const secondPosts = [
-      videoPost("p1", "https://cdninstagram.com/replacement.jpg"),
-      videoPost("p2", "https://cdninstagram.com/second.jpg"),
-    ];
-    ipc.resolveInput.mockResolvedValue({ kind: "profile", username: "nike" });
-    ipc.fetchProfile
-      .mockResolvedValueOnce({ ...preview, recent_posts: firstPosts, end_cursor: "next" })
-      .mockResolvedValueOnce({ ...preview, recent_posts: secondPosts, end_cursor: null });
-
+  it("loads exactly one dedicated clips page when Reels is first opened", async () => {
+    const feedVideo = videoPost("feed", "https://cdninstagram.com/feed.jpg");
+    ipc.fetchReels.mockResolvedValue({
+      posts: [
+        videoPost("r1", "https://cdninstagram.com/reel-one.jpg"),
+        videoPost("r2", "https://cdninstagram.com/reel-two.jpg"),
+      ],
+      end_cursor: "next",
+    });
     const wrapper = render();
-    await wrapper.get("input").setValue("nike");
-    await wrapper.get("form").trigger("submit");
+    await loadProfile(wrapper, { ...preview, recent_posts: [feedVideo] });
+
+    await button(wrapper, "Reels").trigger("click");
     await flushPromises();
-    await wrapper.findAll("button").find((button) => button.text() === "Load more")!.trigger("click");
+
+    expect(ipc.fetchReels).toHaveBeenCalledTimes(1);
+    expect(ipc.fetchReels).toHaveBeenCalledWith("42", null);
+    expect(wrapper.findAll("button.aspect-square img").map((image) => image.attributes("src"))).toEqual([
+      "https://cdninstagram.com/reel-one.jpg",
+      "https://cdninstagram.com/reel-two.jpg",
+    ]);
+    expect(wrapper.text()).not.toContain("https://cdninstagram.com/feed.jpg");
+  });
+
+  it("loads more clips without duplicates and downloads only those shown", async () => {
+    ipc.fetchReels
+      .mockResolvedValueOnce({
+        posts: [
+          videoPost("r1", "https://cdninstagram.com/first.jpg"),
+          videoPost("r2", "https://cdninstagram.com/second.jpg"),
+        ],
+        end_cursor: "next",
+      })
+      .mockResolvedValueOnce({
+        posts: [
+          videoPost("r2", "https://cdninstagram.com/replacement.jpg"),
+          videoPost("r3", "https://cdninstagram.com/third.jpg"),
+        ],
+        end_cursor: null,
+      });
+    ipc.enqueueProfileDownload.mockResolvedValue("job-reels");
+    const wrapper = render();
+    await loadProfile(wrapper);
+
+    await button(wrapper, "Reels").trigger("click");
     await flushPromises();
-    await wrapper.findAll("button").find((button) => button.text() === "Reels")!.trigger("click");
+    await button(wrapper, "Load more").trigger("click");
+    await flushPromises();
 
     expect(wrapper.findAll("button.aspect-square img").map((image) => image.attributes("src"))).toEqual([
       "https://cdninstagram.com/first.jpg",
       "https://cdninstagram.com/second.jpg",
+      "https://cdninstagram.com/third.jpg",
     ]);
-    expect(firstPosts.map((post) => post.pk)).toEqual(["p1"]);
-    expect(secondPosts.map((post) => post.pk)).toEqual(["p1", "p2"]);
+    expect(ipc.fetchReels).toHaveBeenNthCalledWith(2, "42", "next");
+
+    await button(wrapper, "Download shown (3)").trigger("click");
+    await flushPromises();
+
+    expect(ipc.enqueueProfileDownload).toHaveBeenCalledWith("nike", {
+      posts: false,
+      reels: true,
+      stories: false,
+      highlights: false,
+      avatar: false,
+      max_posts: 3,
+    });
+  });
+
+  it("hides Load more when the clips API repeats the requested cursor", async () => {
+    ipc.fetchReels
+      .mockResolvedValueOnce({
+        posts: [videoPost("r1", "https://cdninstagram.com/first.jpg")],
+        end_cursor: "same",
+      })
+      .mockResolvedValueOnce({
+        posts: [videoPost("r2", "https://cdninstagram.com/second.jpg")],
+        end_cursor: "same",
+      });
+    const wrapper = render();
+    await loadProfile(wrapper);
+
+    await button(wrapper, "Reels").trigger("click");
+    await flushPromises();
+    await button(wrapper, "Load more").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.findAll("button").some((item) => item.text() === "Load more")).toBe(false);
+  });
+
+  it("does not show the stories download action on an empty Reels tab", async () => {
+    ipc.fetchStories.mockResolvedValue([
+      { pk: "s1", kind: "photo", media_url: "https://cdninstagram.com/story.jpg" },
+    ]);
+    ipc.fetchReels.mockResolvedValue({ posts: [], end_cursor: null });
+    const wrapper = render();
+    await loadProfile(wrapper);
+
+    await button(wrapper, "Stories").trigger("click");
+    await button(wrapper, "Load stories · costs 2 requests").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("Download all stories");
+
+    await button(wrapper, "Reels").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("Download all stories");
+  });
+
+  it("retains the selected profile, Reels tab, and page after remount", async () => {
+    const pinia = createPinia();
+    ipc.fetchReels.mockResolvedValue({
+      posts: [videoPost("r1", "https://cdninstagram.com/reel.jpg")],
+      end_cursor: null,
+    });
+    const first = render(pinia);
+    await loadProfile(first);
+    await button(first, "Reels").trigger("click");
+    await flushPromises();
+    first.unmount();
+
+    const second = render(pinia);
+    await flushPromises();
+
+    expect(second.text()).toContain("Nike");
+    expect(button(second, "Reels").classes()).toContain("bg-surface-3");
+    expect(second.findAll("button.aspect-square img")).toHaveLength(1);
+    expect(ipc.fetchProfile).toHaveBeenCalledTimes(1);
+    expect(ipc.fetchReels).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows retry after the first clips page fails", async () => {
+    ipc.fetchReels
+      .mockRejectedValueOnce(new Error("clips unavailable"))
+      .mockResolvedValueOnce({ posts: [], end_cursor: null });
+    const wrapper = render();
+    await loadProfile(wrapper);
+
+    await button(wrapper, "Reels").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("clips unavailable");
+
+    await button(wrapper, "Retry reels").trigger("click");
+    await flushPromises();
+    expect(ipc.fetchReels).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not commit a stale clips response after another profile loads", async () => {
+    const pending = deferred<MediaPage>();
+    ipc.fetchReels.mockReturnValue(pending.promise);
+    const wrapper = render();
+    await loadProfile(wrapper);
+    await button(wrapper, "Reels").trigger("click");
+    expect(ipc.fetchReels).toHaveBeenCalledWith("42", null);
+
+    await loadProfile(wrapper, adidasPreview);
+    pending.resolve({
+      posts: [videoPost("stale", "https://cdninstagram.com/stale.jpg")],
+      end_cursor: null,
+    });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Adidas");
+    expect(wrapper.findAll("button.aspect-square img")).toHaveLength(0);
+    expect(wrapper.html()).not.toContain("stale.jpg");
   });
 });

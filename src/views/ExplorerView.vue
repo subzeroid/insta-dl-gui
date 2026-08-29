@@ -1,39 +1,49 @@
 <script setup lang="ts">
+import { storeToRefs } from "pinia";
 import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import {
   downloadDirect,
   downloadPost,
   enqueueProfileDownload,
   fetchProfile,
+  fetchReels,
   fetchStories,
   resolveInput,
   searchUsers,
   type Post,
-  type ProfilePreview,
   type SearchUser,
   type StoryItem,
 } from "../lib/ipc";
+import { useExplorerStore, type ExploreTab } from "../stores/explorer";
 import { useJobsStore } from "../stores/jobs";
 import { createExplorerRequestState, runOnce } from "../lib/asyncState";
-import { mergeUniquePosts } from "../lib/mediaPages";
 import PostModal from "../components/PostModal.vue";
 
 const jobs = useJobsStore();
+const explorer = useExplorerStore();
+const {
+  query,
+  profilePreview: preview,
+  activeTab,
+  reels,
+  reelsCursor,
+  reelsLoaded,
+  stories,
+} = storeToRefs(explorer);
 
-const query = ref("");
 const suggestions = ref<SearchUser[]>([]);
 const suggestOpen = ref(false);
 const highlight = ref(-1);
 let debounce = 0;
 
-const preview = ref<ProfilePreview | null>(null);
 const loading = ref(false);
 const loadingMore = ref(false);
 const error = ref<string | null>(null);
 
-const activeTab = ref<"posts" | "reels" | "stories">("posts");
-const stories = ref<StoryItem[] | null>(null);
 const storiesLoading = ref(false);
+const reelsLoading = ref(false);
+const reelsError = ref<string | null>(null);
+const reelsRetryCursor = ref<string | null>(null);
 
 const modalPost = ref<Post | null>(null);
 const modalStory = ref<StoryItem | null>(null);
@@ -51,7 +61,6 @@ function hasVideo(p: Post): boolean {
   return p.resources.some((r) => r.kind === "video");
 }
 
-const reels = computed(() => preview.value?.recent_posts.filter(hasVideo) ?? []);
 const gridPosts = computed(() => (activeTab.value === "reels" ? reels.value : (preview.value?.recent_posts ?? [])));
 
 function thumbUrl(p: Post): string {
@@ -67,9 +76,12 @@ function onQueryInput() {
   const seq = requests.autocomplete.begin();
   requests.profile.invalidate();
   requests.stories.invalidate();
+  requests.reels.invalidate();
   loading.value = false;
   loadingMore.value = false;
   storiesLoading.value = false;
+  reelsLoading.value = false;
+  reelsError.value = null;
   suggestions.value = [];
   suggestOpen.value = false;
   highlight.value = -1;
@@ -150,19 +162,21 @@ async function submit() {
 async function loadProfile(username: string) {
   const seq = requests.profile.begin();
   requests.stories.invalidate();
+  requests.reels.invalidate();
   loading.value = true;
   loadingMore.value = false;
   storiesLoading.value = false;
+  reelsLoading.value = false;
+  reelsError.value = null;
+  reelsRetryCursor.value = null;
   error.value = null;
-  preview.value = null;
-  stories.value = null;
+  explorer.beginProfileLoad();
   modalPost.value = null;
   modalStory.value = null;
-  activeTab.value = "posts";
   try {
     const result = await fetchProfile(username, null);
     if (!requests.profile.isCurrent(seq)) return;
-    preview.value = result;
+    explorer.commitProfile(result);
   } catch (e) {
     if (!requests.profile.isCurrent(seq)) return;
     error.value = String(e);
@@ -189,11 +203,7 @@ async function loadMore() {
     ) {
       return;
     }
-    preview.value = {
-      profile: more.profile,
-      recent_posts: mergeUniquePosts(preview.value.recent_posts, more.recent_posts),
-      end_cursor: more.end_cursor,
-    };
+    explorer.commitMorePosts(username, more);
   } catch (e) {
     if (requests.profile.isCurrent(seq) && preview.value?.profile.username === username) {
       error.value = String(e);
@@ -231,6 +241,55 @@ async function downloadAll(kind: "posts" | "reels") {
       if (preview.value?.profile.username === username) error.value = String(e);
     }
   });
+}
+
+async function downloadShownReels() {
+  if (!preview.value || reels.value.length === 0) return;
+  const username = preview.value.profile.username;
+  await runOnce(activeActions, actionKey("reels", username), async () => {
+    try {
+      const id = await enqueueProfileDownload(username, {
+        posts: false,
+        reels: true,
+        stories: false,
+        highlights: false,
+        avatar: false,
+        max_posts: reels.value.length,
+      });
+      jobs.addPlaceholder(id, `@${username} reels`);
+    } catch (e) {
+      if (preview.value?.profile.username === username) error.value = String(e);
+    }
+  });
+}
+
+async function loadReels(cursor: string | null) {
+  const userId = preview.value?.profile.pk;
+  if (!userId || reelsLoading.value) return;
+  const seq = requests.reels.begin();
+  reelsLoading.value = true;
+  reelsError.value = null;
+  reelsRetryCursor.value = cursor;
+  try {
+    const page = await fetchReels(userId, cursor);
+    if (!requests.reels.isCurrent(seq) || preview.value?.profile.pk !== userId) return;
+    explorer.commitReelsPage(userId, page.posts, cursor, page.end_cursor);
+    reelsRetryCursor.value = null;
+  } catch (e) {
+    if (!requests.reels.isCurrent(seq) || preview.value?.profile.pk !== userId) return;
+    reelsError.value = String(e);
+  } finally {
+    if (requests.reels.isCurrent(seq) && preview.value?.profile.pk === userId) {
+      reelsLoading.value = false;
+    }
+  }
+}
+
+async function selectTab(tab: ExploreTab) {
+  activeTab.value = tab;
+  if (tab === "reels" && !reelsLoaded.value) {
+    await loadReels(null);
+  }
 }
 
 async function downloadAvatar() {
@@ -292,7 +351,12 @@ function closeModal() {
 }
 
 onMounted(() => {
-  if (new URLSearchParams(window.location.search).get("demo") === "explore") {
+  if (activeTab.value === "reels" && preview.value && !reelsLoaded.value) {
+    void loadReels(null);
+  } else if (
+    !preview.value &&
+    new URLSearchParams(window.location.search).get("demo") === "explore"
+  ) {
     query.value = "@natgeo";
     void loadProfile("natgeo");
   }
@@ -303,6 +367,7 @@ onUnmounted(() => {
   requests.autocomplete.invalidate();
   requests.profile.invalidate();
   requests.stories.invalidate();
+  requests.reels.invalidate();
 });
 </script>
 
@@ -420,7 +485,7 @@ onUnmounted(() => {
                 ? 'bg-surface-3 text-slate-100'
                 : 'text-slate-400 hover:bg-surface-2 hover:text-slate-200'
             "
-            @click="activeTab = t.id"
+            @click="selectTab(t.id)"
           >
             {{ t.label }}
           </button>
@@ -432,15 +497,15 @@ onUnmounted(() => {
               @click="downloadAll('posts')"
             >Download all</button>
             <button
-              v-else-if="activeTab === 'reels'"
+              v-else-if="activeTab === 'reels' && reels.length > 0"
               class="btn-secondary"
               :disabled="isActionBusy('reels', preview.profile.username)"
-              @click="downloadAll('reels')"
+              @click="downloadShownReels"
             >
-              Download all
+              Download shown ({{ reels.length }})
             </button>
             <button
-              v-else-if="stories && stories.length > 0"
+              v-else-if="activeTab === 'stories' && stories && stories.length > 0"
               class="btn-secondary"
               :disabled="isActionBusy('stories', preview.profile.username)"
               @click="downloadAllStories"
@@ -452,7 +517,30 @@ onUnmounted(() => {
 
         <!-- Posts / Reels grid -->
         <div v-if="activeTab !== 'stories'" class="space-y-3">
-          <div v-if="gridPosts.length > 0" class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+          <div
+            v-if="activeTab === 'reels' && reelsLoading && reels.length === 0"
+            class="animate-pulse py-12 text-center text-sm text-slate-500"
+          >
+            Loading reels…
+          </div>
+          <div
+            v-if="activeTab === 'reels' && reelsError"
+            class="card flex items-center justify-between gap-3 px-3 py-2 text-sm"
+          >
+            <span class="text-err">{{ reelsError }}</span>
+            <button
+              type="button"
+              class="btn-secondary shrink-0"
+              :disabled="reelsLoading"
+              @click="loadReels(reelsRetryCursor)"
+            >
+              Retry reels
+            </button>
+          </div>
+          <div
+            v-if="gridPosts.length > 0 && !(activeTab === 'reels' && reelsLoading && reels.length === 0)"
+            class="grid grid-cols-2 gap-2 sm:grid-cols-3"
+          >
             <button
               v-for="p in gridPosts"
               :key="p.pk"
@@ -475,12 +563,20 @@ onUnmounted(() => {
               >
             </button>
           </div>
-          <div v-else class="card flex items-center justify-center p-12 text-sm text-slate-500">
+          <div
+            v-else-if="activeTab === 'posts' || (activeTab === 'reels' && reelsLoaded && !reelsError)"
+            class="card flex items-center justify-center p-12 text-sm text-slate-500"
+          >
             {{ activeTab === "reels" ? "No reels yet." : "No posts yet." }}
           </div>
           <div v-if="activeTab === 'posts' && preview.end_cursor" class="flex justify-center">
             <button class="btn-secondary" :disabled="loadingMore" @click="loadMore">
               {{ loadingMore ? "Loading…" : "Load more" }}
+            </button>
+          </div>
+          <div v-if="activeTab === 'reels' && reelsCursor" class="flex justify-center">
+            <button class="btn-secondary" :disabled="reelsLoading" @click="loadReels(reelsCursor)">
+              {{ reelsLoading ? "Loading…" : "Load more" }}
             </button>
           </div>
         </div>

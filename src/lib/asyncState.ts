@@ -22,6 +22,7 @@ export function createExplorerRequestState() {
   return {
     autocomplete: createRequestGate(),
     profile: createRequestGate(),
+    reels: createRequestGate(),
     stories: createRequestGate(),
   };
 }

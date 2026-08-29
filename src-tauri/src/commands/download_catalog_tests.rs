@@ -7,7 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use tempfile::TempDir;
-use wiremock::matchers::path;
+use wiremock::matchers::{method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
@@ -112,6 +112,277 @@ impl Fixture {
             .unwrap()
             .unwrap()
     }
+
+    async fn run_profile(
+        &self,
+        client: Arc<crate::hiker::HikerClient>,
+        profile: &Profile,
+        opts: &ProfileOptions,
+    ) -> CompletedJob {
+        let cfg = Config {
+            token: None,
+            dest_dir: self.root.to_string_lossy().into_owned(),
+            sidecar: false,
+        };
+        run_profile_job(
+            &client,
+            &self.http,
+            &self.catalog,
+            &self.root,
+            &cfg,
+            &NoopProgress,
+            &self.root.join(&profile.username),
+            profile,
+            opts,
+            Vec::new(),
+            Vec::new(),
+            true,
+            None,
+        )
+        .await
+        .unwrap_or_else(|failure| match failure {
+            JobFail::Cancelled => panic!("profile download was unexpectedly cancelled"),
+            JobFail::Fatal(error) => panic!("profile download failed: {error}"),
+        })
+    }
+}
+
+fn profile() -> Profile {
+    Profile {
+        pk: "42".into(),
+        username: "nike".into(),
+        full_name: Some("Nike".into()),
+        media_count: 3,
+        follower_count: Some(100),
+        is_private: false,
+        is_verified: true,
+        avatar_url: None,
+    }
+}
+
+fn reel_payload(pk: &str, code: &str) -> serde_json::Value {
+    serde_json::json!({
+        "pk": pk,
+        "code": code,
+        "media_type": 2,
+        "taken_at": 1_700_000_000,
+        "video_versions": [],
+        "image_versions2": {"candidates": []}
+    })
+}
+
+fn downloadable_reel_payload(server: &MockServer, pk: &str, code: &str) -> serde_json::Value {
+    serde_json::json!({
+        "pk": pk,
+        "code": code,
+        "media_type": 2,
+        "taken_at": 1_700_000_000,
+        "video_versions": [{
+            "url": format!("{}/cdn/{pk}", server.uri()),
+            "width": 1080
+        }],
+        "image_versions2": {"candidates": []}
+    })
+}
+
+fn reels_only(max_posts: Option<u64>) -> ProfileOptions {
+    ProfileOptions {
+        posts: false,
+        reels: true,
+        stories: false,
+        highlights: false,
+        avatar: false,
+        max_posts,
+    }
+}
+
+#[tokio::test]
+async fn reels_only_profile_job_uses_clips_and_caps_by_reel_count() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/user/medias/chunk"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/user/clips/chunk"))
+        .and(query_param("user_id", "42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            [
+                reel_payload("101", "ONE"),
+                reel_payload("102", "TWO"),
+                reel_payload("103", "THREE")
+            ],
+            "next-page"
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let fixture = Fixture::new();
+    let client = Arc::new(crate::hiker::HikerClient::with_base_url(
+        "token".into(),
+        server.uri(),
+    ));
+
+    let completed = fixture
+        .run_profile(client, &profile(), &reels_only(Some(2)))
+        .await;
+
+    assert_eq!(completed.outcome.files_written, 0);
+    assert!(completed.resource_errors.is_empty());
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/v1/user/clips/chunk")
+            .count(),
+        1
+    );
+    assert!(requests
+        .iter()
+        .all(|request| request.url.path() != "/cdn/103"));
+}
+
+#[tokio::test]
+async fn reels_only_profile_job_stops_when_clips_cursor_repeats() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/user/clips/chunk"))
+        .and(query_param_is_missing("end_cursor"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!([[reel_payload("201", "FIRST")], "same"])),
+        )
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/user/clips/chunk"))
+        .and(query_param("end_cursor", "same"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!([[reel_payload("202", "SECOND")], "same"])),
+        )
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    let fixture = Fixture::new();
+    let client = Arc::new(crate::hiker::HikerClient::with_base_url(
+        "token".into(),
+        server.uri(),
+    ));
+
+    let completed = fixture
+        .run_profile(client, &profile(), &reels_only(None))
+        .await;
+
+    assert!(completed.resource_errors.is_empty());
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/v1/user/clips/chunk")
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn reels_only_profile_job_stops_when_clips_cursors_cycle() {
+    let server = MockServer::start().await;
+    for (cursor, pk, next) in [
+        (None, "301", "a"),
+        (Some("a"), "302", "b"),
+        (Some("b"), "303", "a"),
+    ] {
+        let mut mock = Mock::given(method("GET"))
+            .and(path("/v1/user/clips/chunk"))
+            .and(query_param("user_id", "42"));
+        mock = match cursor {
+            Some(value) => mock.and(query_param("end_cursor", value)),
+            None => mock.and(query_param_is_missing("end_cursor")),
+        };
+        mock.respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!([[reel_payload(pk, pk)], next])),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    }
+    let fixture = Fixture::new();
+    let client = Arc::new(crate::hiker::HikerClient::with_base_url(
+        "token".into(),
+        server.uri(),
+    ));
+
+    let completed = fixture
+        .run_profile(client, &profile(), &reels_only(None))
+        .await;
+
+    assert!(completed.resource_errors.is_empty());
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/v1/user/clips/chunk")
+            .count(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn reels_only_profile_job_caps_by_unique_reel_count_across_overlapping_pages() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/user/clips/chunk"))
+        .and(query_param_is_missing("end_cursor"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            [
+                downloadable_reel_payload(&server, "401", "ONE"),
+                downloadable_reel_payload(&server, "402", "TWO")
+            ],
+            "next"
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/user/clips/chunk"))
+        .and(query_param("end_cursor", "next"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            [
+                downloadable_reel_payload(&server, "402", "TWO"),
+                downloadable_reel_payload(&server, "403", "THREE")
+            ],
+            null
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    for pk in ["401", "402", "403"] {
+        Mock::given(method("GET"))
+            .and(path(format!("/cdn/{pk}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(MP4))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let fixture = Fixture::new();
+    let client = Arc::new(crate::hiker::HikerClient::with_base_url(
+        "token".into(),
+        server.uri(),
+    ));
+
+    let completed = fixture
+        .run_profile(client, &profile(), &reels_only(Some(3)))
+        .await;
+
+    assert_eq!(completed.outcome.files_written, 3);
+    assert!(completed.resource_errors.is_empty());
 }
 
 fn relative_paths(root: &Path, files: &[DownloadedFile]) -> Vec<String> {

@@ -23,7 +23,7 @@ All media of the post (including carousels) downloads immediately. Live progress
 | **Stories** | active stories (24h) | `<dest>/<username>/stories/` |
 | **Highlights** | every highlight reel | `<dest>/<username>/highlights/<id>_<title>/` |
 | **Avatar** | HD profile picture | `<dest>/<username>/avatar_<pk>.<ext>` |
-| **Max** | cap on posts considered (empty = all) | — |
+| **Max** | cap on posts or reels considered (empty = all) | — |
 
 3. Press **Download**. Progress appears in the global footer; click it to open **Queue** for every active and completed job.
 
@@ -34,9 +34,12 @@ For a private profile, only **Avatar** is available. Posts, reels, stories and h
 Open **Explore** and type at least two characters of a username. Pick an autocomplete result with the mouse or arrow keys and **Enter**, then switch between **Posts**, **Reels** and **Stories**.
 
 - Click a post, reel or story to open its preview, then press **Download** for that item.
-- Use **Download all** for the current Posts or Reels tab, or **Download all stories** after loading active stories.
-- Press **Load more** at the bottom of Posts to fetch the next page.
+- On **Posts**, use **Download all** for the complete profile feed. **Load more** adds the next preview page.
+- On **Reels**, the first page comes from the profile's dedicated clips feed. **Load more** adds one clips page; **Download shown (N)** archives the unique reels currently visible.
+- On **Stories**, use **Download all stories** after loading active stories.
 - Press **Escape** to close autocomplete or an open preview.
+
+Explore keeps the selected profile, tab and loaded pages when you visit another app section and return, as long as the app remains open.
 
 ## Where files end up
 
