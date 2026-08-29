@@ -14,6 +14,7 @@ export const useExplorerStore = defineStore("explorer", () => {
   const reelsCursor = ref<string | null>(null);
   const reelsLoaded = ref(false);
   const stories = ref<StoryItem[] | null>(null);
+  const requestedReelsCursors = new Set<string>();
 
   function beginProfileLoad() {
     profilePreview.value = null;
@@ -22,6 +23,7 @@ export const useExplorerStore = defineStore("explorer", () => {
     reelsCursor.value = null;
     reelsLoaded.value = false;
     stories.value = null;
+    requestedReelsCursors.clear();
   }
 
   function commitProfile(value: ProfilePreview) {
@@ -46,11 +48,15 @@ export const useExplorerStore = defineStore("explorer", () => {
   function commitReelsPage(
     userId: string,
     posts: readonly Post[],
+    requestedCursor: string | null,
     endCursor: string | null,
   ): boolean {
     if (profilePreview.value?.profile.pk !== userId) return false;
+    const requested = requestedCursor?.trim();
+    if (requested) requestedReelsCursors.add(requested);
+    const next = endCursor?.trim() || null;
     reels.value = mergeUniquePosts(reels.value, posts);
-    reelsCursor.value = endCursor;
+    reelsCursor.value = next && !requestedReelsCursors.has(next) ? next : null;
     reelsLoaded.value = true;
     return true;
   }

@@ -1125,6 +1125,7 @@ pub async fn enqueue_profile_download(
             &opts,
             stories_items,
             highlights_tray,
+            false,
             Some(cancel_rx),
         )
         .await;
@@ -1153,6 +1154,7 @@ async fn run_profile_job(
     opts: &ProfileOptions,
     stories_items: Vec<serde_json::Value>,
     highlights_tray: Vec<serde_json::Value>,
+    allow_loopback: bool,
     cancel: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> Result<CompletedJob, JobFail> {
     std::fs::create_dir_all(dir)?;
@@ -1197,7 +1199,7 @@ async fn run_profile_job(
                     0,
                     &mut bytes_total,
                     cancel.as_ref().cloned(),
-                    false,
+                    allow_loopback,
                 )
                 .await
                 {
@@ -1245,6 +1247,8 @@ async fn run_profile_job(
         }
         let mut cursor: Option<String> = None;
         let mut considered: u64 = 0;
+        let mut seen_post_pks = HashSet::new();
+        let mut seen_cursors = HashSet::new();
         loop {
             if is_cancelled() {
                 return Err(JobFail::Cancelled);
@@ -1270,11 +1274,15 @@ async fn run_profile_job(
                 }
             };
             for post in &page.posts {
+                if seen_post_pks.contains(&post.pk) {
+                    continue;
+                }
                 if let Some(max) = opts.max_posts {
                     if considered >= max {
                         break;
                     }
                 }
+                seen_post_pks.insert(post.pk.clone());
                 considered += 1;
                 let base = taken_at_name(post.taken_at, &post.code);
                 let item_metadata = post_catalog_metadata(post);
@@ -1311,7 +1319,7 @@ async fn run_profile_job(
                         ordinal,
                         &mut bytes_total,
                         cancel.as_ref().cloned(),
-                        false,
+                        allow_loopback,
                     )
                     .await
                     {
@@ -1374,11 +1382,13 @@ async fn run_profile_job(
                     }
                 }
             }
-            let next_cursor = page.end_cursor;
-            if next_cursor.is_none() || next_cursor == cursor {
+            let Some(next_cursor) = page.end_cursor.filter(|value| !value.trim().is_empty()) else {
+                break;
+            };
+            if !seen_cursors.insert(next_cursor.clone()) {
                 break;
             }
-            cursor = next_cursor;
+            cursor = Some(next_cursor);
             if let Some(max) = opts.max_posts {
                 if considered >= max {
                     break;
@@ -1425,7 +1435,7 @@ async fn run_profile_job(
                     u32::try_from(ordinal).unwrap_or(u32::MAX),
                     &mut bytes_total,
                     cancel.as_ref().cloned(),
-                    false,
+                    allow_loopback,
                 )
                 .await
                 {
@@ -1529,7 +1539,7 @@ async fn run_profile_job(
                         u32::try_from(ordinal).unwrap_or(u32::MAX),
                         &mut bytes_total,
                         cancel.as_ref().cloned(),
-                        false,
+                        allow_loopback,
                     ));
                     files_done += 1;
                     has_successful_resource = true;

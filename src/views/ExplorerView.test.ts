@@ -266,6 +266,46 @@ describe("ExplorerView async wiring", () => {
     });
   });
 
+  it("hides Load more when the clips API repeats the requested cursor", async () => {
+    ipc.fetchReels
+      .mockResolvedValueOnce({
+        posts: [videoPost("r1", "https://cdninstagram.com/first.jpg")],
+        end_cursor: "same",
+      })
+      .mockResolvedValueOnce({
+        posts: [videoPost("r2", "https://cdninstagram.com/second.jpg")],
+        end_cursor: "same",
+      });
+    const wrapper = render();
+    await loadProfile(wrapper);
+
+    await button(wrapper, "Reels").trigger("click");
+    await flushPromises();
+    await button(wrapper, "Load more").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.findAll("button").some((item) => item.text() === "Load more")).toBe(false);
+  });
+
+  it("does not show the stories download action on an empty Reels tab", async () => {
+    ipc.fetchStories.mockResolvedValue([
+      { pk: "s1", kind: "photo", media_url: "https://cdninstagram.com/story.jpg" },
+    ]);
+    ipc.fetchReels.mockResolvedValue({ posts: [], end_cursor: null });
+    const wrapper = render();
+    await loadProfile(wrapper);
+
+    await button(wrapper, "Stories").trigger("click");
+    await button(wrapper, "Load stories · costs 2 requests").trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("Download all stories");
+
+    await button(wrapper, "Reels").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("Download all stories");
+  });
+
   it("retains the selected profile, Reels tab, and page after remount", async () => {
     const pinia = createPinia();
     ipc.fetchReels.mockResolvedValue({

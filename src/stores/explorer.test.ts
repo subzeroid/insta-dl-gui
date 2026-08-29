@@ -39,7 +39,7 @@ describe("Explore session state", () => {
     first.query = "@nike";
     first.commitProfile(preview("nike", "42"));
     first.activeTab = "reels";
-    first.commitReelsPage("42", [post("r1")], "next");
+    first.commitReelsPage("42", [post("r1")], null, "next");
 
     const remounted = useExplorerStore(pinia);
 
@@ -54,7 +54,7 @@ describe("Explore session state", () => {
     const store = useExplorerStore();
     store.commitProfile(preview("nike", "42", [post("p1")]));
     store.activeTab = "reels";
-    store.commitReelsPage("42", [post("r1")], "next");
+    store.commitReelsPage("42", [post("r1")], null, "next");
     store.stories = [
       { pk: "s1", kind: "photo", media_url: "https://cdninstagram.com/s1.jpg" },
     ];
@@ -82,14 +82,42 @@ describe("Explore session state", () => {
     expect(store.profilePreview?.recent_posts.map((item) => item.pk)).toEqual(["p1", "p2"]);
     expect(store.profilePreview?.recent_posts[0]?.thumbnail_url).toContain("p1.jpg");
 
-    expect(store.commitReelsPage("42", [post("r1")], "reels-next")).toBe(true);
+    expect(store.commitReelsPage("42", [post("r1")], null, "reels-next")).toBe(true);
     expect(
-      store.commitReelsPage("42", [post("r1", "replacement"), post("r2")], null),
+      store.commitReelsPage(
+        "42",
+        [post("r1", "replacement"), post("r2")],
+        "reels-next",
+        null,
+      ),
     ).toBe(true);
     expect(store.reels.map((item) => item.pk)).toEqual(["r1", "r2"]);
     expect(store.reels[0]?.thumbnail_url).toContain("r1.jpg");
 
-    expect(store.commitReelsPage("other", [post("stale")], null)).toBe(false);
+    expect(store.commitReelsPage("other", [post("stale")], null, null)).toBe(false);
     expect(store.reels.map((item) => item.pk)).toEqual(["r1", "r2"]);
+  });
+
+  it("stops offering load more when the clips API repeats a requested cursor", () => {
+    const store = useExplorerStore();
+    store.commitProfile(preview("nike", "42"));
+
+    expect(store.commitReelsPage("42", [post("r1")], null, "same")).toBe(true);
+    expect(store.reelsCursor).toBe("same");
+
+    expect(store.commitReelsPage("42", [post("r2")], "same", "same")).toBe(true);
+    expect(store.reels.map((item) => item.pk)).toEqual(["r1", "r2"]);
+    expect(store.reelsCursor).toBeNull();
+  });
+
+  it("stops offering load more when clips cursors form a longer cycle", () => {
+    const store = useExplorerStore();
+    store.commitProfile(preview("nike", "42"));
+
+    store.commitReelsPage("42", [post("r1")], null, "a");
+    store.commitReelsPage("42", [post("r2")], "a", "b");
+    store.commitReelsPage("42", [post("r3")], "b", "a");
+
+    expect(store.reelsCursor).toBeNull();
   });
 });

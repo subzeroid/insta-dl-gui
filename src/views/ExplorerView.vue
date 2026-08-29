@@ -273,7 +273,7 @@ async function loadReels(cursor: string | null) {
   try {
     const page = await fetchReels(userId, cursor);
     if (!requests.reels.isCurrent(seq) || preview.value?.profile.pk !== userId) return;
-    explorer.commitReelsPage(userId, page.posts, page.end_cursor);
+    explorer.commitReelsPage(userId, page.posts, cursor, page.end_cursor);
     reelsRetryCursor.value = null;
   } catch (e) {
     if (!requests.reels.isCurrent(seq) || preview.value?.profile.pk !== userId) return;
@@ -505,7 +505,7 @@ onUnmounted(() => {
               Download shown ({{ reels.length }})
             </button>
             <button
-              v-else-if="stories && stories.length > 0"
+              v-else-if="activeTab === 'stories' && stories && stories.length > 0"
               class="btn-secondary"
               :disabled="isActionBusy('stories', preview.profile.username)"
               @click="downloadAllStories"
