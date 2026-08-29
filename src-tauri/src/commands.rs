@@ -1,9 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use futures_util::FutureExt;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
@@ -38,7 +39,7 @@ fn validate_fetched_posts(posts: Vec<Post>, allow_loopback: bool) -> Result<Vec<
         return Err("Fetched post batch exceeds maximum of 500 posts".into());
     }
 
-    let mut seen = HashSet::new();
+    let mut seen = HashMap::new();
     let mut validated = Vec::new();
     for post in posts {
         if post.pk.is_empty() || !post.pk.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -58,7 +59,15 @@ fn validate_fetched_posts(posts: Vec<Post>, allow_loopback: bool) -> Result<Vec<
                 .map_err(|_| "Fetched post contains an invalid media URL".to_string())?;
         }
 
-        if seen.insert(post.pk.clone()) {
+        let canonical = serde_json::to_vec(&post).expect("serializing validated fetched post");
+        if let Some(existing) = seen.get(&post.pk) {
+            if existing != &canonical {
+                return Err(
+                    "Fetched post batch contains conflicting posts with the same PK".into(),
+                );
+            }
+        } else {
+            seen.insert(post.pk.clone(), canonical);
             validated.push(post);
         }
     }
@@ -422,15 +431,23 @@ impl FetchedPostScope {
 }
 
 fn normalize_fetched_username(username: &str) -> Result<String, String> {
-    let normalized = username
-        .trim()
-        .trim_start_matches('@')
-        .trim()
-        .to_ascii_lowercase();
-    if normalized.is_empty() {
+    let trimmed = username.trim();
+    let candidate = trimmed.strip_prefix('@').unwrap_or(trimmed);
+    if candidate.is_empty() {
         return Err("Instagram username must not be empty".into());
     }
-    Ok(safe_segment(&normalized))
+    if candidate.len() > 30
+        || matches!(candidate, "." | "..")
+        || !candidate
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_'))
+    {
+        return Err(
+            "Instagram username must use 1 to 30 ASCII letters, digits, periods, or underscores"
+                .into(),
+        );
+    }
+    Ok(candidate.to_ascii_lowercase())
 }
 
 fn fetched_post_job_key(
@@ -444,7 +461,7 @@ fn fetched_post_job_key(
     let post_key = serde_json::to_string(&post_pks).expect("serializing string identifiers");
     format!(
         "fetched:{}:{}:{}:{}",
-        safe_segment(&username.to_ascii_lowercase()),
+        username.to_ascii_lowercase(),
         category.as_str(),
         scope.as_str(),
         post_key
@@ -480,6 +497,21 @@ impl Drop for InFlightGuard {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&self.key);
     }
+}
+
+struct FetchedJobRegistryGuard {
+    registry: Arc<JobRegistry>,
+    job_id: String,
+}
+
+impl Drop for FetchedJobRegistryGuard {
+    fn drop(&mut self) {
+        self.registry.finish(&self.job_id);
+    }
+}
+
+fn fetched_worker_panic_error() -> &'static str {
+    "Fetched media download failed unexpectedly"
 }
 
 fn is_fatal_api_error(e: &crate::hiker::HikerError) -> bool {
@@ -2085,35 +2117,46 @@ pub(crate) async fn enqueue_fetched_post_download(
     let jobs = Arc::clone(&state.jobs);
     let job_id = uuid::Uuid::new_v4().to_string();
     let cancel_rx = jobs.register(&job_id);
+    let job_registry_guard = FetchedJobRegistryGuard {
+        registry: jobs,
+        job_id: job_id.clone(),
+    };
     let em = JobEvents::new(
         &app,
         job_id.clone(),
         fetched_post_label(&username, category, scope, posts.len()),
     );
-    let job_id_task = job_id.clone();
 
     tauri::async_runtime::spawn(async move {
         let _in_flight_guard = in_flight_guard;
-        let destination_root = PathBuf::from(&cfg.dest_dir);
-        let dir = fetched_posts_dir(&destination_root, &username);
-        let result = run_fetched_posts_job(
-            &cdn_http,
-            &catalog,
-            &destination_root,
-            &cfg,
-            &em,
-            &dir,
-            &posts,
-            Some(cancel_rx),
-            false,
-        )
+        let _job_registry_guard = job_registry_guard;
+        let worker_result = std::panic::AssertUnwindSafe(async {
+            let destination_root = PathBuf::from(&cfg.dest_dir);
+            let dir = fetched_posts_dir(&destination_root, &username);
+            let result = run_fetched_posts_job(
+                &cdn_http,
+                &catalog,
+                &destination_root,
+                &cfg,
+                &em,
+                &dir,
+                &posts,
+                Some(cancel_rx),
+                false,
+            )
+            .await;
+            (result, dir)
+        })
+        .catch_unwind()
         .await;
-        match result {
-            Ok(completed) => em.done(completed.outcome, completed.resource_errors.len(), &dir),
-            Err(JobFail::Cancelled) => em.cancelled(),
-            Err(JobFail::Fatal(error)) => em.failed(error),
+        match worker_result {
+            Ok((Ok(completed), dir)) => {
+                em.done(completed.outcome, completed.resource_errors.len(), &dir);
+            }
+            Ok((Err(JobFail::Cancelled), _)) => em.cancelled(),
+            Ok((Err(JobFail::Fatal(error)), _)) => em.failed(error),
+            Err(_) => em.failed(fetched_worker_panic_error().to_owned()),
         }
-        jobs.finish(&job_id_task);
     });
 
     Ok(job_id)
@@ -2314,9 +2357,9 @@ mod tests {
 
     #[test]
     fn fetched_username_label_and_destination_use_one_safe_normalized_value() {
-        let username = normalize_fetched_username("  @Ni/Ke  ").unwrap();
+        let username = normalize_fetched_username(" @Nike.Name_1 ").unwrap();
 
-        assert_eq!(username, "ni_ke");
+        assert_eq!(username, "nike.name_1");
         assert_eq!(
             fetched_post_label(
                 &username,
@@ -2324,16 +2367,39 @@ mod tests {
                 FetchedPostScope::Selected,
                 2,
             ),
-            "@ni_ke reels · selected 2"
+            "@nike.name_1 reels · selected 2"
         );
         assert_eq!(
             fetched_posts_dir(Path::new("/downloads"), &username),
-            PathBuf::from("/downloads/ni_ke/posts")
+            PathBuf::from("/downloads/nike.name_1/posts")
         );
-        assert_eq!(
-            normalize_fetched_username(" @ ").unwrap_err(),
-            "Instagram username must not be empty"
-        );
+    }
+
+    #[test]
+    fn fetched_username_rejects_noncanonical_or_filesystem_special_values() {
+        for username in [
+            "",
+            " @ ",
+            "@@nike",
+            "nike name",
+            "nike/name",
+            "nike?name",
+            "níke",
+            "1234567890123456789012345678901",
+            ".",
+            "..",
+        ] {
+            assert!(
+                normalize_fetched_username(username).is_err(),
+                "accepted invalid username {username:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fetched_username_rejects_formerly_colliding_lossy_segments() {
+        assert!(normalize_fetched_username("a/b").is_err());
+        assert!(normalize_fetched_username("a?b").is_err());
     }
 
     #[test]
@@ -2349,6 +2415,56 @@ mod tests {
         }
 
         assert!(!registry.lock().unwrap().contains("batch"));
+    }
+
+    #[test]
+    fn fetched_job_registry_guard_finishes_on_drop() {
+        let jobs = Arc::new(JobRegistry::new());
+        let _cancel = jobs.register("job");
+
+        {
+            let _guard = FetchedJobRegistryGuard {
+                registry: Arc::clone(&jobs),
+                job_id: "job".to_owned(),
+            };
+            assert!(jobs.cancel("job"));
+        }
+
+        assert!(!jobs.cancel("job"));
+    }
+
+    #[test]
+    fn fetched_job_guards_clean_up_during_unwind() {
+        let jobs = Arc::new(JobRegistry::new());
+        let _cancel = jobs.register("job");
+        let in_flight = Arc::new(std::sync::Mutex::new(HashSet::from(["batch".to_owned()])));
+        let result = std::panic::catch_unwind({
+            let jobs = Arc::clone(&jobs);
+            let in_flight = Arc::clone(&in_flight);
+            move || {
+                let _job_guard = FetchedJobRegistryGuard {
+                    registry: jobs,
+                    job_id: "job".to_owned(),
+                };
+                let _in_flight_guard = InFlightGuard {
+                    registry: in_flight,
+                    key: "batch".to_owned(),
+                };
+                panic!("sensitive panic payload");
+            }
+        });
+
+        assert!(result.is_err());
+        assert!(!jobs.cancel("job"));
+        assert!(!in_flight.lock().unwrap().contains("batch"));
+    }
+
+    #[test]
+    fn fetched_worker_panic_error_is_stable_and_sanitized() {
+        let error = fetched_worker_panic_error();
+
+        assert_eq!(error, "Fetched media download failed unexpectedly");
+        assert!(!error.contains("sensitive panic payload"));
     }
 
     #[test]
@@ -2400,9 +2516,9 @@ mod tests {
     }
 
     #[test]
-    fn fetched_batch_validation_deduplicates_by_pk_in_first_seen_order() {
+    fn fetched_batch_validation_deduplicates_identical_posts_in_first_seen_order() {
         let first = fetched_post("100", "FIRST", "https://cdninstagram.com/first.mp4");
-        let duplicate = fetched_post("100", "DUPLICATE", "https://cdninstagram.com/duplicate.mp4");
+        let duplicate = first.clone();
         let second = fetched_post("200", "SECOND", "https://fbcdn.net/second.mp4");
 
         let validated = validate_fetched_posts(vec![first, duplicate, second], false).unwrap();
@@ -2413,6 +2529,34 @@ mod tests {
                 .map(|post| (post.pk.as_str(), post.code.as_str()))
                 .collect::<Vec<_>>(),
             vec![("100", "FIRST"), ("200", "SECOND")]
+        );
+    }
+
+    #[test]
+    fn fetched_batch_validation_rejects_conflicting_duplicate_download_fields() {
+        let first = fetched_post("100", "FIRST", "https://cdninstagram.com/first.mp4");
+        let mut conflicting_url = first.clone();
+        conflicting_url.resources[0].url = "https://cdninstagram.com/other.mp4".into();
+        let mut conflicting_shortcode = first.clone();
+        conflicting_shortcode.code = "OTHER".into();
+
+        for duplicate in [conflicting_url, conflicting_shortcode] {
+            assert_eq!(
+                validate_fetched_posts(vec![first.clone(), duplicate], false).unwrap_err(),
+                "Fetched post batch contains conflicting posts with the same PK"
+            );
+        }
+    }
+
+    #[test]
+    fn fetched_batch_validation_rejects_conflicting_duplicate_metadata() {
+        let first = fetched_post("100", "FIRST", "https://cdninstagram.com/first.mp4");
+        let mut duplicate = first.clone();
+        duplicate.caption = Some("different metadata".into());
+
+        assert_eq!(
+            validate_fetched_posts(vec![first, duplicate], false).unwrap_err(),
+            "Fetched post batch contains conflicting posts with the same PK"
         );
     }
 
