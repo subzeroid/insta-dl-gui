@@ -236,6 +236,11 @@ export interface ProfilePreview {
   end_cursor: string | null;
 }
 
+export interface MediaPage {
+  posts: Post[];
+  end_cursor: string | null;
+}
+
 export interface SearchUser {
   pk: string;
   username: string;
@@ -274,6 +279,10 @@ export async function resolveInput(input: string): Promise<Target> {
 
 export async function fetchProfile(username: string, endCursor?: string | null): Promise<ProfilePreview> {
   return invoke("fetch_profile", { username, endCursor: endCursor ?? null });
+}
+
+export async function fetchReels(userId: string, endCursor?: string | null): Promise<MediaPage> {
+  return invoke("fetch_reels", { userId, endCursor: endCursor ?? null });
 }
 
 export async function searchUsers(query: string): Promise<SearchUser[]> {

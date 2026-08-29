@@ -17,6 +17,7 @@ import {
   type LibraryPage,
   type LibraryQuery,
   type LibraryScanProgress,
+  type Post,
   type ProfilePreview,
 } from "./ipc";
 import { installTauriMock } from "./mock";
@@ -52,6 +53,27 @@ describe("profile pagination mock", () => {
     expect(first.recent_posts).toHaveLength(12);
     expect(second.recent_posts).toHaveLength(12);
     expect(new Set(allIds).size).toBe(24);
+  });
+
+  it("returns cursor-paged reels independently from profile posts", async () => {
+    installTauriMock();
+    const first = (await invoke()("fetch_reels", {
+      userId: "42",
+      endCursor: null,
+    })) as { posts: Post[]; end_cursor: string | null };
+    const second = (await invoke()("fetch_reels", {
+      userId: "42",
+      endCursor: first.end_cursor,
+    })) as { posts: Post[]; end_cursor: string | null };
+
+    expect(first.posts).toHaveLength(11);
+    expect(
+      first.posts.every((post) =>
+        post.resources.some((resource) => resource.kind === "video"),
+      ),
+    ).toBe(true);
+    expect(first.end_cursor).toBe("reels-cursor");
+    expect(second.end_cursor).toBeNull();
   });
 });
 

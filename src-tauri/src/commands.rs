@@ -828,6 +828,20 @@ pub async fn fetch_profile(
     })
 }
 
+/// One cursor-paged batch from the profile's dedicated Reels feed.
+#[tauri::command]
+pub async fn fetch_reels(
+    user_id: String,
+    end_cursor: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<crate::models::PostPage, String> {
+    client(&state)
+        .await?
+        .user_clips_chunk(&user_id, end_cursor.as_deref())
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// Active stories of a profile for the Explorer grid (billed 2 requests).
 #[tauri::command]
 pub async fn fetch_stories(

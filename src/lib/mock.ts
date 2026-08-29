@@ -280,6 +280,33 @@ function reply(cmd: string, args?: CmdArgs): unknown {
         end_cursor: args?.endCursor ? null : "cursor",
       };
     }
+    case "fetch_reels": {
+      const pageStart = args?.endCursor ? 11 : 0;
+      return {
+        posts: Array.from({ length: 11 }, (_, i) => {
+          const index = pageStart + i;
+          const hue = Math.round((index * 137) % 360);
+          const thumbnail =
+            "data:image/svg+xml," +
+            encodeURIComponent(
+              `<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'>
+                 <rect width='400' height='400' fill='hsl(${hue},45%,24%)'/>
+                 <text x='28' y='360' fill='white' font-family='system-ui' font-size='28'>REEL ${index + 1}</text>
+               </svg>`,
+            );
+          return {
+            pk: `r${index}`,
+            code: `REEL${index}`,
+            caption: `Demo reel #${index}`,
+            taken_at: 1_776_000_000 + index * 86_400,
+            owner_username: "natgeo",
+            thumbnail_url: thumbnail,
+            resources: [{ url: "", kind: "video" as const }],
+          };
+        }),
+        end_cursor: args?.endCursor ? null : "reels-cursor",
+      };
+    }
     case "search_users": {
       const q = String(args?.query ?? "").toLowerCase();
       const pool = [
