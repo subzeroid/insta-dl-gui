@@ -36,25 +36,48 @@ describe("MediaSelectionCheckbox", () => {
     expect(wrapper.text()).toContain("✓");
   });
 
-  it("does not bubble checkbox clicks to the parent card", async () => {
+  it("shows a visible focus treatment when its native input receives keyboard focus", async () => {
+    const wrapper = mount(MediaSelectionCheckbox, {
+      props: { selected: false, label: "Select post" },
+    });
+
+    await wrapper.get('input[type="checkbox"]').trigger("focus");
+
+    expect(wrapper.get("label").classes()).toContain("focus-within:ring-2");
+  });
+
+  it("lets a parent control one native selection toggle without opening the card", async () => {
     const ParentCard = defineComponent({
       components: { MediaSelectionCheckbox },
       setup() {
+        const selected = ref(false);
         const cardClicks = ref(0);
-        return { cardClicks };
+        const toggleCount = ref(0);
+        function toggle() {
+          toggleCount.value += 1;
+          selected.value = !selected.value;
+        }
+        return { selected, cardClicks, toggleCount, toggle };
       },
       template: `
         <article @click="cardClicks += 1">
-          <MediaSelectionCheckbox :selected="false" label="Select post" />
+          <MediaSelectionCheckbox :selected="selected" label="Select post" @toggle="toggle" />
           <span data-testid="clicks">{{ cardClicks }}</span>
+          <span data-testid="toggles">{{ toggleCount }}</span>
         </article>
       `,
     });
     const wrapper = mount(ParentCard);
+    const input = wrapper.get('input[type="checkbox"]');
 
-    await wrapper.get('input[type="checkbox"]').trigger("click");
-    await wrapper.get('input[type="checkbox"]').trigger("change");
+    expect((input.element as HTMLInputElement).checked).toBe(false);
+    expect(wrapper.text()).not.toContain("✓");
 
+    await input.setValue(true);
+
+    expect(wrapper.get('[data-testid="toggles"]').text()).toBe("1");
     expect(wrapper.get('[data-testid="clicks"]').text()).toBe("0");
+    expect((input.element as HTMLInputElement).checked).toBe(true);
+    expect(wrapper.text()).toContain("✓");
   });
 });
