@@ -58,7 +58,7 @@ describe("Explore session state", () => {
     expect(remounted.isSelected("stories", "s1")).toBe(true);
   });
 
-  it("tracks selections independently per tab and clears only submitted IDs", () => {
+  it("tracks selections independently per tab and clears unchanged submitted entries", () => {
     const store = useExplorerStore();
     store.toggleSelected("posts", "p1");
     store.toggleSelected("posts", "p2");
@@ -71,11 +71,50 @@ describe("Explore session state", () => {
     store.toggleSelected("posts", "p1");
     expect(store.isSelected("posts", "p1")).toBe(false);
 
-    store.clearSubmitted("stories", ["s1"]);
+    const submitted = store.selectionSnapshot("stories").filter((item) => item.pk === "s1");
+    store.clearSubmitted("stories", submitted);
     expect(store.isSelected("stories", "s1")).toBe(false);
     expect(store.isSelected("stories", "s2")).toBe(true);
     expect(store.isSelected("posts", "p2")).toBe(true);
     expect(store.isSelected("reels", "r1")).toBe(true);
+  });
+
+  it("preserves IDs selected after a selection snapshot", () => {
+    const store = useExplorerStore();
+    store.toggleSelected("posts", "p1");
+    const submitted = store.selectionSnapshot("posts");
+
+    store.toggleSelected("posts", "p2");
+    store.clearSubmitted("posts", submitted);
+
+    expect(store.selected.posts).toEqual(["p2"]);
+    expect(store.selectionSnapshot("posts")).toHaveLength(1);
+  });
+
+  it("does not clear an unrelated public selection without a captured revision", () => {
+    const store = useExplorerStore();
+    store.toggleSelected("posts", "p1");
+    const submitted = store.selectionSnapshot("posts");
+    store.selected.posts.push("p2");
+
+    store.clearSubmitted("posts", submitted);
+
+    expect(store.selected.posts).toEqual(["p2"]);
+  });
+
+  it("preserves the same ID when it is deselected and reselected while pending", () => {
+    const store = useExplorerStore();
+    store.toggleSelected("posts", "p1");
+    const submitted = store.selectionSnapshot("posts");
+
+    store.toggleSelected("posts", "p1");
+    store.toggleSelected("posts", "p1");
+    const reselected = store.selectionSnapshot("posts");
+    store.clearSubmitted("posts", submitted);
+
+    expect(reselected[0]!.revision).toBeGreaterThan(submitted[0]!.revision);
+    expect(store.selected.posts).toEqual(["p1"]);
+    expect(store.selectionSnapshot("posts")).toEqual(reselected);
   });
 
   it("deduplicates a pending Stories request and clears loading on matching completion", () => {
@@ -163,6 +202,7 @@ describe("Explore session state", () => {
     store.commitStories("nike", commitToken, [story("s1")]);
     expect(store.isSelected("stories", "s1")).toBe(true);
     expect(store.isSelected("stories", "s2")).toBe(false);
+    expect(store.selectionSnapshot("stories").map((item) => item.pk)).toEqual(["s1"]);
     const failToken = store.beginStoriesRequest("nike")!;
     store.failStories("nike", failToken, "oops");
 
@@ -173,6 +213,8 @@ describe("Explore session state", () => {
     expect(store.storiesLoading).toBe(false);
     expect(store.isSelected("stories", "s1")).toBe(false);
     expect(store.isSelected("posts", "p1")).toBe(false);
+    expect(store.selectionSnapshot("stories")).toEqual([]);
+    expect(store.selectionSnapshot("posts")).toEqual([]);
   });
 
   it("clears profile media atomically when a different profile starts loading", () => {

@@ -5,7 +5,15 @@ import { describe, expect, it } from "vitest";
 
 import DownloadScopeGroup from "./DownloadScopeGroup.vue";
 
-function render(props: { shownCount: number; selectedCount: number; busy: boolean }) {
+function render(props: {
+  shownCount: number;
+  selectedCount: number;
+  busy: boolean;
+  allTitle?: string;
+  helperText?: string;
+  shownDisabledReason?: string;
+  selectedDisabledReason?: string;
+}) {
   return mount(DownloadScopeGroup, { props });
 }
 
@@ -47,5 +55,56 @@ describe("DownloadScopeGroup", () => {
     for (const button of wrapper.findAll("button")) {
       expect(button.attributes("title")).toBeTruthy();
     }
+  });
+
+  it("renders custom All copy and visibly associates snapshot limits", () => {
+    const wrapper = render({
+      shownCount: 501,
+      selectedCount: 501,
+      busy: false,
+      allTitle: "Fetch and download the complete Posts archive; uses API requests.",
+      helperText: "Exact snapshots are limited to 500 items. Use All for a complete archive.",
+      shownDisabledReason: "Shown has 501 items, above the 500-item limit.",
+      selectedDisabledReason: "Selected has 501 items, above the 500-item limit.",
+    });
+    const buttons = wrapper.findAll("button");
+
+    expect(buttons[0].attributes("title")).toBe(
+      "Fetch and download the complete Posts archive; uses API requests.",
+    );
+    expect(buttons[0].attributes("disabled")).toBeUndefined();
+    expect(buttons[1].attributes("disabled")).toBeDefined();
+    expect(buttons[2].attributes("disabled")).toBeDefined();
+    expect(wrapper.text()).toContain(
+      "Exact snapshots are limited to 500 items. Use All for a complete archive.",
+    );
+    expect(wrapper.text()).toContain("Shown has 501 items, above the 500-item limit.");
+    expect(wrapper.text()).toContain("Selected has 501 items, above the 500-item limit.");
+    for (const index of [1, 2]) {
+      const describedBy = buttons[index]!.attributes("aria-describedby")!.split(" ");
+      expect(describedBy.every((id) => wrapper.find(`#${id}`).exists())).toBe(true);
+    }
+  });
+
+  it("evaluates Shown and Selected disabled reasons independently", () => {
+    const shownBlocked = render({
+      shownCount: 501,
+      selectedCount: 1,
+      busy: false,
+      shownDisabledReason: "Shown limit exceeded.",
+    }).findAll("button");
+    expect(shownBlocked[0].attributes("disabled")).toBeUndefined();
+    expect(shownBlocked[1].attributes("disabled")).toBeDefined();
+    expect(shownBlocked[2].attributes("disabled")).toBeUndefined();
+
+    const selectedBlocked = render({
+      shownCount: 1,
+      selectedCount: 501,
+      busy: false,
+      selectedDisabledReason: "Selected limit exceeded.",
+    }).findAll("button");
+    expect(selectedBlocked[0].attributes("disabled")).toBeUndefined();
+    expect(selectedBlocked[1].attributes("disabled")).toBeUndefined();
+    expect(selectedBlocked[2].attributes("disabled")).toBeDefined();
   });
 });

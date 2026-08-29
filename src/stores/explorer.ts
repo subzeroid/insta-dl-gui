@@ -5,6 +5,10 @@ import type { Post, ProfilePreview, StoryItem } from "../lib/ipc";
 import { mergeUniquePosts } from "../lib/mediaPages";
 
 export type ExploreTab = "posts" | "reels" | "stories";
+export interface ExploreSelectionSnapshot {
+  pk: string;
+  revision: number;
+}
 
 export const useExplorerStore = defineStore("explorer", () => {
   const query = ref("");
@@ -21,6 +25,12 @@ export const useExplorerStore = defineStore("explorer", () => {
     reels: [],
     stories: [],
   });
+  const selectionRevisions: Record<ExploreTab, Map<string, number>> = {
+    posts: new Map(),
+    reels: new Map(),
+    stories: new Map(),
+  };
+  let nextSelectionRevision = 0;
   const requestedReelsCursors = new Set<string>();
   let storiesRequestGeneration = 0;
   let pendingStoriesRequest: { username: string; token: number } | null = null;
@@ -39,6 +49,9 @@ export const useExplorerStore = defineStore("explorer", () => {
     selected.posts = [];
     selected.reels = [];
     selected.stories = [];
+    selectionRevisions.posts.clear();
+    selectionRevisions.reels.clear();
+    selectionRevisions.stories.clear();
     requestedReelsCursors.clear();
   }
 
@@ -81,8 +94,10 @@ export const useExplorerStore = defineStore("explorer", () => {
     const index = selected[tab].indexOf(pk);
     if (index >= 0) {
       selected[tab].splice(index, 1);
+      selectionRevisions[tab].delete(pk);
     } else {
       selected[tab].push(pk);
+      selectionRevisions[tab].set(pk, ++nextSelectionRevision);
     }
   }
 
@@ -90,9 +105,30 @@ export const useExplorerStore = defineStore("explorer", () => {
     return selected[tab].includes(pk);
   }
 
-  function clearSubmitted(tab: ExploreTab, submittedIds: readonly string[]) {
-    const submitted = new Set(submittedIds);
-    selected[tab] = selected[tab].filter((pk) => !submitted.has(pk));
+  function selectionSnapshot(tab: ExploreTab): ExploreSelectionSnapshot[] {
+    return selected[tab].map((pk) => {
+      let revision = selectionRevisions[tab].get(pk);
+      if (revision === undefined) {
+        revision = ++nextSelectionRevision;
+        selectionRevisions[tab].set(pk, revision);
+      }
+      return { pk, revision };
+    });
+  }
+
+  function clearSubmitted(tab: ExploreTab, submittedEntries: readonly ExploreSelectionSnapshot[]) {
+    const submitted = new Map(submittedEntries.map((entry) => [entry.pk, entry.revision]));
+    selected[tab] = selected[tab].filter((pk) => {
+      const submittedRevision = submitted.get(pk);
+      if (
+        submittedRevision === undefined ||
+        submittedRevision !== selectionRevisions[tab].get(pk)
+      ) {
+        return true;
+      }
+      selectionRevisions[tab].delete(pk);
+      return false;
+    });
   }
 
   function beginStoriesRequest(username: string): number | null {
@@ -120,6 +156,9 @@ export const useExplorerStore = defineStore("explorer", () => {
     pendingStoriesRequest = null;
     const available = new Set(items.map((item) => item.pk));
     selected.stories = selected.stories.filter((pk) => available.has(pk));
+    for (const pk of selectionRevisions.stories.keys()) {
+      if (!available.has(pk)) selectionRevisions.stories.delete(pk);
+    }
     return true;
   }
 
@@ -148,6 +187,7 @@ export const useExplorerStore = defineStore("explorer", () => {
     commitReelsPage,
     toggleSelected,
     isSelected,
+    selectionSnapshot,
     clearSubmitted,
     beginStoriesRequest,
     commitStories,

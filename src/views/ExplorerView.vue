@@ -54,7 +54,9 @@ const modalStory = ref<StoryItem | null>(null);
 
 const requests = createExplorerRequestState();
 const activeActions = reactive(new Set<string>());
+const activeDownloadConflicts = reactive(new Set<string>());
 let profileSession = Symbol("explorer-profile-session");
+const MAX_EXACT_SNAPSHOT_ITEMS = 500;
 
 const tabs = [
   { id: "posts", label: "Posts" },
@@ -70,12 +72,32 @@ const gridPosts = computed(() => (activeTab.value === "reels" ? reels.value : (p
 const shownCount = computed(() =>
   activeTab.value === "stories" ? (stories.value?.length ?? 0) : gridPosts.value.length,
 );
+const selectedIdSet = computed(() => new Set(explorer.selected[activeTab.value]));
 const selectedCount = computed(() => explorer.selected[activeTab.value].length);
+const snapshotHelperText =
+  "Exact Shown and Selected snapshots are limited to 500 items. Use All for a complete archive.";
+const shownDisabledReason = computed(() =>
+  shownCount.value > MAX_EXACT_SNAPSHOT_ITEMS
+    ? `Shown has ${shownCount.value} items, above the 500-item exact snapshot limit.`
+    : undefined,
+);
+const selectedDisabledReason = computed(() =>
+  selectedCount.value > MAX_EXACT_SNAPSHOT_ITEMS
+    ? `Selected has ${selectedCount.value} items, above the 500-item exact snapshot limit.`
+    : undefined,
+);
+const allDownloadTitle = computed(() =>
+  activeTab.value === "stories"
+    ? "Refreshes and downloads all current Stories; uses additional API requests."
+    : `Fetch and download the complete ${activeTab.value === "posts" ? "Posts" : "Reels"} archive; uses API requests.`,
+);
 const activeGroupBusy = computed(() => {
   const username = preview.value?.profile.username;
   if (!username) return false;
+  const conflicts = downloadConflictKeys(username, activeTab.value, "all");
   return (
-    isActionBusy(`download:${activeTab.value}`, username) ||
+    conflicts.some((key) => activeDownloadConflicts.has(key)) ||
+    jobs.hasActiveConflict(conflicts) ||
     (activeTab.value === "stories" && storiesLoading.value)
   );
 });
@@ -240,6 +262,35 @@ function isActionBusy(kind: string, username: string) {
   return activeActions.has(actionKey(kind, username));
 }
 
+function downloadFolderKey(username: string, tab: ExploreTab) {
+  const folder = tab === "stories" ? "stories" : "posts";
+  return `folder:${username.toLowerCase()}:${folder}`;
+}
+
+function downloadConflictKeys(username: string, tab: ExploreTab, scope: "all" | "snapshot") {
+  const folderKey = downloadFolderKey(username, tab);
+  return scope === "all" ? [`profile:${username.toLowerCase()}`, folderKey] : [folderKey];
+}
+
+async function runWithDownloadConflicts<T>(
+  conflictKeys: readonly string[],
+  blockedByKeys: readonly string[],
+  action: () => Promise<T>,
+): Promise<T | undefined> {
+  if (
+    blockedByKeys.some((key) => activeDownloadConflicts.has(key)) ||
+    jobs.hasActiveConflict(blockedByKeys)
+  ) {
+    return undefined;
+  }
+  for (const key of conflictKeys) activeDownloadConflicts.add(key);
+  try {
+    return await action();
+  } finally {
+    for (const key of conflictKeys) activeDownloadConflicts.delete(key);
+  }
+}
+
 function isCurrentProfileSession(session: symbol, username: string, profilePk: string) {
   return (
     profileSession === session &&
@@ -254,8 +305,8 @@ async function downloadAll() {
   const tab = activeTab.value;
   if (tab === "stories" && storiesLoading.value) return;
   const session = profileSession;
-  const key = actionKey(`download:${tab}`, profile.username);
-  await runOnce(activeActions, key, async () => {
+  const conflictKeys = downloadConflictKeys(profile.username, tab, "all");
+  await runWithDownloadConflicts(conflictKeys, conflictKeys, async () => {
     error.value = null;
     try {
       const id = await enqueueProfileDownload(profile.username, {
@@ -266,7 +317,7 @@ async function downloadAll() {
         avatar: false,
         max_posts: null,
       });
-      jobs.addPlaceholder(id, `@${profile.username} ${tab} · all`);
+      jobs.addPlaceholder(id, `@${profile.username} ${tab} · all`, conflictKeys);
     } catch (e) {
       if (isCurrentProfileSession(session, profile.username, profile.pk)) {
         error.value = String(e);
@@ -281,21 +332,34 @@ async function downloadSnapshot(scope: "shown" | "selected") {
   const tab = activeTab.value;
   if (tab === "stories" && storiesLoading.value) return;
   const session = profileSession;
-  const selectedIds = scope === "selected" ? [...explorer.selected[tab]] : [];
-  const selectedSet = new Set(selectedIds);
+  const selectedEntries = scope === "selected" ? explorer.selectionSnapshot(tab) : [];
+  const requestedCount = scope === "shown" ? shownCount.value : selectedEntries.length;
+  if (requestedCount > MAX_EXACT_SNAPSHOT_ITEMS) {
+    error.value = `${scope === "shown" ? "Shown" : "Selected"} snapshots are limited to 500 items. Use All for a complete archive.`;
+    return;
+  }
+  const selectedEntriesById = new Map(selectedEntries.map((entry) => [entry.pk, entry]));
   const postSnapshot =
     tab === "stories"
       ? []
-      : [...gridPosts.value].filter((item) => scope === "shown" || selectedSet.has(item.pk));
+      : [...gridPosts.value].filter(
+          (item) => scope === "shown" || selectedEntriesById.has(item.pk),
+        );
   const storySnapshot =
     tab === "stories"
-      ? [...(stories.value ?? [])].filter((item) => scope === "shown" || selectedSet.has(item.pk))
+      ? [...(stories.value ?? [])].filter(
+          (item) => scope === "shown" || selectedEntriesById.has(item.pk),
+        )
       : [];
   const submittedIds = (tab === "stories" ? storySnapshot : postSnapshot).map((item) => item.pk);
+  const submittedSelections = submittedIds
+    .map((pk) => selectedEntriesById.get(pk))
+    .filter((entry) => entry !== undefined);
   if (submittedIds.length === 0) return;
 
-  const key = actionKey(`download:${tab}`, profile.username);
-  await runOnce(activeActions, key, async () => {
+  const conflictKeys = downloadConflictKeys(profile.username, tab, "snapshot");
+  const groupConflictKeys = downloadConflictKeys(profile.username, tab, "all");
+  await runWithDownloadConflicts(conflictKeys, groupConflictKeys, async () => {
     error.value = null;
     try {
       const id =
@@ -315,12 +379,16 @@ async function downloadSnapshot(scope: "shown" | "selected") {
               scope,
               postSnapshot,
             );
-      jobs.addPlaceholder(id, `@${profile.username} ${tab} · ${scope} · ${submittedIds.length}`);
+      jobs.addPlaceholder(
+        id,
+        `@${profile.username} ${tab} · ${scope} · ${submittedIds.length}`,
+        conflictKeys,
+      );
       if (
         scope === "selected" &&
         isCurrentProfileSession(session, profile.username, profile.pk)
       ) {
-        explorer.clearSubmitted(tab, submittedIds);
+        explorer.clearSubmitted(tab, submittedSelections);
       }
     } catch (e) {
       if (isCurrentProfileSession(session, profile.username, profile.pk)) {
@@ -537,6 +605,10 @@ onUnmounted(() => {
             :shown-count="shownCount"
             :selected-count="selectedCount"
             :busy="activeGroupBusy"
+            :all-title="allDownloadTitle"
+            :helper-text="snapshotHelperText"
+            :shown-disabled-reason="shownDisabledReason"
+            :selected-disabled-reason="selectedDisabledReason"
             @download-all="downloadAll"
             @download-shown="downloadSnapshot('shown')"
             @download-selected="downloadSnapshot('selected')"
@@ -575,7 +647,7 @@ onUnmounted(() => {
               :data-media-id="p.pk"
               class="relative aspect-square rounded-lg bg-surface-2"
               :class="
-                explorer.isSelected(activeTab, p.pk)
+                selectedIdSet.has(p.pk)
                   ? 'ring-2 ring-accent ring-offset-2 ring-offset-surface-0'
                   : ''
               "
@@ -602,7 +674,7 @@ onUnmounted(() => {
                 >
               </button>
               <MediaSelectionCheckbox
-                :selected="explorer.isSelected(activeTab, p.pk)"
+                :selected="selectedIdSet.has(p.pk)"
                 :label="`Select ${activeTab === 'reels' ? 'reel' : 'post'} ${p.code}`"
                 @toggle="explorer.toggleSelected(activeTab, p.pk)"
               />
@@ -655,7 +727,7 @@ onUnmounted(() => {
               :data-story-id="s.pk"
               class="relative shrink-0 rounded-full border-2 border-[var(--color-accent)] p-0.5"
               :class="
-                explorer.isSelected('stories', s.pk)
+                selectedIdSet.has(s.pk)
                   ? 'ring-2 ring-accent ring-offset-2 ring-offset-surface-0'
                   : ''
               "
@@ -676,7 +748,7 @@ onUnmounted(() => {
                 <span v-else class="block h-20 w-20 rounded-full bg-gradient-to-br from-surface-2 to-surface-3"></span>
               </button>
               <MediaSelectionCheckbox
-                :selected="explorer.isSelected('stories', s.pk)"
+                :selected="selectedIdSet.has(s.pk)"
                 :label="`Select story ${s.pk}`"
                 @toggle="explorer.toggleSelected('stories', s.pk)"
               />

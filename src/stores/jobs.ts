@@ -15,6 +15,7 @@ export interface JobView {
   resultDir?: string;
   catalogWarnings: number;
   resourceFailures: number;
+  conflictKeys?: string[];
 }
 
 export const useJobsStore = defineStore("jobs", () => {
@@ -38,6 +39,7 @@ export const useJobsStore = defineStore("jobs", () => {
         resultDir: undefined,
         catalogWarnings: 0,
         resourceFailures: 0,
+        conflictKeys: [],
       });
     if (!existing) jobs.set(p.job_id, job);
     job.state = p.state;
@@ -66,8 +68,12 @@ export const useJobsStore = defineStore("jobs", () => {
 
   /** Insert a card before the first backend event arrives so the job is
       visible immediately (merge-on-event by id keeps it consistent). */
-  function addPlaceholder(id: string, label: string) {
-    if (!jobs.has(id)) {
+  function addPlaceholder(id: string, label: string, conflictKeys: readonly string[] = []) {
+    const normalizedKeys = [...new Set(conflictKeys)];
+    const existing = jobs.get(id);
+    if (existing) {
+      existing.conflictKeys = [...new Set([...(existing.conflictKeys ?? []), ...normalizedKeys])];
+    } else {
       jobs.set(id, reactive({
         id,
         label,
@@ -81,8 +87,23 @@ export const useJobsStore = defineStore("jobs", () => {
         resultDir: undefined,
         catalogWarnings: 0,
         resourceFailures: 0,
+        conflictKeys: normalizedKeys,
       }));
     }
+  }
+
+  function hasActiveConflict(conflictKeys: readonly string[]): boolean {
+    if (conflictKeys.length === 0) return false;
+    const requested = new Set(conflictKeys);
+    for (const job of jobs.values()) {
+      if (
+        (job.state === "fetching" || job.state === "downloading") &&
+        (job.conflictKeys ?? []).some((key) => requested.has(key))
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   async function cancel(id: string) {
@@ -97,5 +118,5 @@ export const useJobsStore = defineStore("jobs", () => {
     }
   }
 
-  return { jobs, init, addPlaceholder, cancel, clearFinished };
+  return { jobs, init, addPlaceholder, hasActiveConflict, cancel, clearFinished };
 });

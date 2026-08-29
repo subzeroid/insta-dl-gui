@@ -24,6 +24,7 @@ vi.mock("../lib/ipc", () => ({
 }));
 
 import ExplorerView from "./ExplorerView.vue";
+import DownloadScopeGroup from "../components/DownloadScopeGroup.vue";
 import type { MediaPage, ProfilePreview } from "../lib/ipc";
 import { useExplorerStore } from "../stores/explorer";
 import { useJobsStore } from "../stores/jobs";
@@ -115,6 +116,12 @@ function selection(wrapper: ReturnType<typeof render>, label: string) {
   return wrapper.get(`input[type="checkbox"][aria-label="${label}"]`);
 }
 
+function finishJob(jobId: string, state: "done" | "failed" | "cancelled" = "done") {
+  const job = useJobsStore().jobs.get(jobId);
+  if (!job) throw new Error(`Job not found: ${jobId}`);
+  job.state = state;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   ipc.fetchStories.mockResolvedValue([]);
@@ -204,6 +211,10 @@ describe("ExplorerView async wiring", () => {
       "Shown 1",
       "Selected 0",
     ]);
+    expect(button(wrapper, "All").attributes("title")).toMatch(/complete Posts archive.*API requests/i);
+    expect(wrapper.text()).toContain(
+      "Exact Shown and Selected snapshots are limited to 500 items. Use All for a complete archive.",
+    );
     expect(button(wrapper, "Selected 0").attributes("disabled")).toBeDefined();
 
     await button(wrapper, "Reels").trigger("click");
@@ -222,6 +233,9 @@ describe("ExplorerView async wiring", () => {
       "Selected 0",
     ]);
     expect(button(wrapper, "Selected 0").attributes("disabled")).toBeDefined();
+    expect(button(wrapper, "All").attributes("title")).toMatch(
+      /refreshes.*all current Stories.*additional API requests/i,
+    );
     expect(wrapper.text()).not.toContain("Download all posts");
     expect(wrapper.text()).not.toContain("Download shown (");
     expect(wrapper.text()).not.toContain("Download all stories");
@@ -252,8 +266,119 @@ describe("ExplorerView async wiring", () => {
     expect(ipc.enqueueProfileDownload).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps an accepted snapshot busy until its queued job becomes terminal", async () => {
+    ipc.enqueueFetchedPostDownload
+      .mockResolvedValueOnce("job-shown")
+      .mockResolvedValueOnce("job-shown-retry");
+    const wrapper = render();
+    await loadProfile(wrapper, {
+      ...preview,
+      recent_posts: [videoPost("p1", "https://cdninstagram.com/post.jpg")],
+    });
+
+    await button(wrapper, "Shown 1").trigger("click");
+    await flushPromises();
+
+    expect(useJobsStore().jobs.get("job-shown")?.conflictKeys).toEqual([
+      "folder:nike:posts",
+    ]);
+    expect(downloadButtons(wrapper).every((item) => item.attributes("disabled") !== undefined)).toBe(true);
+    await button(wrapper, "Shown 1").trigger("click");
+    wrapper.getComponent(DownloadScopeGroup).vm.$emit("download-shown");
+    await flushPromises();
+    expect(ipc.enqueueFetchedPostDownload).toHaveBeenCalledTimes(1);
+
+    finishJob("job-shown");
+    await flushPromises();
+    expect(button(wrapper, "Shown 1").attributes("disabled")).toBeUndefined();
+    await button(wrapper, "Shown 1").trigger("click");
+    await flushPromises();
+    expect(ipc.enqueueFetchedPostDownload).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats Posts and Reels snapshots as the same physical-folder conflict", async () => {
+    ipc.enqueueFetchedPostDownload.mockResolvedValue("job-post-folder");
+    ipc.fetchReels.mockResolvedValue({
+      posts: [videoPost("r1", "https://cdninstagram.com/reel.jpg")],
+      end_cursor: null,
+    });
+    const wrapper = render();
+    await loadProfile(wrapper, {
+      ...preview,
+      recent_posts: [videoPost("p1", "https://cdninstagram.com/post.jpg")],
+    });
+    await button(wrapper, "Shown 1").trigger("click");
+    await flushPromises();
+
+    await button(wrapper, "Reels").trigger("click");
+    await flushPromises();
+    expect(downloadButtons(wrapper).every((item) => item.attributes("disabled") !== undefined)).toBe(true);
+    wrapper.getComponent(DownloadScopeGroup).vm.$emit("download-all");
+    wrapper.getComponent(DownloadScopeGroup).vm.$emit("download-shown");
+    await flushPromises();
+    expect(ipc.enqueueFetchedPostDownload).toHaveBeenCalledTimes(1);
+    expect(ipc.enqueueProfileDownload).not.toHaveBeenCalled();
+
+    finishJob("job-post-folder");
+    await flushPromises();
+    expect(button(wrapper, "All").attributes("disabled")).toBeUndefined();
+  });
+
+  it("uses the profile conflict from All to block other tabs", async () => {
+    ipc.enqueueProfileDownload.mockResolvedValue("job-all-posts");
+    ipc.fetchStories.mockResolvedValue([
+      story("s1", "https://cdninstagram.com/story.jpg"),
+    ]);
+    const wrapper = render();
+    await loadProfile(wrapper, {
+      ...preview,
+      recent_posts: [videoPost("p1", "https://cdninstagram.com/post.jpg")],
+    });
+    await button(wrapper, "All").trigger("click");
+    await flushPromises();
+
+    expect(useJobsStore().jobs.get("job-all-posts")?.conflictKeys).toEqual([
+      "profile:nike",
+      "folder:nike:posts",
+    ]);
+    await button(wrapper, "Stories").trigger("click");
+    expect(downloadButtons(wrapper).every((item) => item.attributes("disabled") !== undefined)).toBe(true);
+    wrapper.getComponent(DownloadScopeGroup).vm.$emit("download-all");
+    wrapper.getComponent(DownloadScopeGroup).vm.$emit("download-shown");
+    await flushPromises();
+    expect(ipc.enqueueProfileDownload).toHaveBeenCalledTimes(1);
+    expect(ipc.downloadDirect).not.toHaveBeenCalled();
+
+    finishJob("job-all-posts");
+    await flushPromises();
+    expect(button(wrapper, "All").attributes("disabled")).toBeUndefined();
+  });
+
+  it("retains accepted job conflicts across an Explore remount", async () => {
+    const pinia = createPinia();
+    ipc.enqueueFetchedPostDownload.mockResolvedValue("job-remount");
+    const first = render(pinia);
+    await loadProfile(first, {
+      ...preview,
+      recent_posts: [videoPost("p1", "https://cdninstagram.com/post.jpg")],
+    });
+    await button(first, "Shown 1").trigger("click");
+    await flushPromises();
+    first.unmount();
+
+    const second = render(pinia);
+    await flushPromises();
+    expect(downloadButtons(second).every((item) => item.attributes("disabled") !== undefined)).toBe(true);
+    finishJob("job-remount");
+    await flushPromises();
+    expect(button(second, "Shown 1").attributes("disabled")).toBeUndefined();
+  });
+
   it("maps All to an unlimited archive request for the active tab", async () => {
-    ipc.enqueueProfileDownload.mockResolvedValue("job-all");
+    ipc.enqueueProfileDownload
+      .mockResolvedValueOnce("job-all-posts")
+      .mockResolvedValueOnce("job-all-reels")
+      .mockResolvedValueOnce("job-all-stories");
     ipc.fetchReels.mockResolvedValue({
       posts: [videoPost("r1", "https://cdninstagram.com/reel.jpg")],
       end_cursor: "next",
@@ -277,6 +402,8 @@ describe("ExplorerView async wiring", () => {
       avatar: false,
       max_posts: null,
     });
+    finishJob("job-all-posts");
+    await flushPromises();
 
     await button(wrapper, "Reels").trigger("click");
     await flushPromises();
@@ -290,6 +417,8 @@ describe("ExplorerView async wiring", () => {
       avatar: false,
       max_posts: null,
     });
+    finishJob("job-all-reels");
+    await flushPromises();
 
     await button(wrapper, "Stories").trigger("click");
     await button(wrapper, "All").trigger("click");
@@ -349,6 +478,95 @@ describe("ExplorerView async wiring", () => {
     expect(ipc.enqueueFetchedPostDownload).not.toHaveBeenCalled();
     expect(ipc.enqueueProfileDownload).not.toHaveBeenCalled();
     expect(ipc.downloadDirect).not.toHaveBeenCalled();
+  });
+
+  it("accepts one exact 500-item Shown snapshot", async () => {
+    const posts = Array.from({ length: 500 }, (_, index) =>
+      videoPost(`p${index}`, `https://cdninstagram.com/post-${index}.jpg`),
+    );
+    ipc.enqueueFetchedPostDownload.mockResolvedValue("job-500-shown");
+    const wrapper = render();
+    await loadProfile(wrapper, { ...preview, recent_posts: posts });
+
+    expect(button(wrapper, "Shown 500").attributes("disabled")).toBeUndefined();
+    await button(wrapper, "Shown 500").trigger("click");
+    await flushPromises();
+
+    expect(ipc.enqueueFetchedPostDownload).toHaveBeenCalledTimes(1);
+    expect(ipc.enqueueFetchedPostDownload).toHaveBeenCalledWith(
+      "nike",
+      "posts",
+      "shown",
+      posts,
+    );
+  });
+
+  it("accepts one exact 500-item Selected snapshot", async () => {
+    const posts = Array.from({ length: 500 }, (_, index) =>
+      videoPost(`p${index}`, `https://cdninstagram.com/post-${index}.jpg`),
+    );
+    ipc.enqueueFetchedPostDownload.mockResolvedValue("job-500-selected");
+    const wrapper = render();
+    await loadProfile(wrapper, { ...preview, recent_posts: posts });
+    const store = useExplorerStore();
+    for (const post of posts) store.toggleSelected("posts", post.pk);
+    await flushPromises();
+
+    expect(button(wrapper, "Selected 500").attributes("disabled")).toBeUndefined();
+    await button(wrapper, "Selected 500").trigger("click");
+    await flushPromises();
+
+    expect(ipc.enqueueFetchedPostDownload).toHaveBeenCalledTimes(1);
+    expect(ipc.enqueueFetchedPostDownload).toHaveBeenCalledWith(
+      "nike",
+      "posts",
+      "selected",
+      posts,
+    );
+  });
+
+  it("blocks a 501-item Shown snapshot before IPC while keeping All and small Selected available", async () => {
+    const posts = Array.from({ length: 501 }, (_, index) =>
+      videoPost(`p${index}`, `https://cdninstagram.com/post-${index}.jpg`),
+    );
+    const wrapper = render();
+    await loadProfile(wrapper, { ...preview, recent_posts: posts });
+    useExplorerStore().toggleSelected("posts", posts[0]!.pk);
+    await flushPromises();
+
+    expect(button(wrapper, "All").attributes("disabled")).toBeUndefined();
+    expect(button(wrapper, "Shown 501").attributes("disabled")).toBeDefined();
+    expect(button(wrapper, "Selected 1").attributes("disabled")).toBeUndefined();
+    expect(wrapper.text()).toContain("Shown has 501 items, above the 500-item exact snapshot limit.");
+    wrapper.getComponent(DownloadScopeGroup).vm.$emit("download-shown");
+    await flushPromises();
+
+    expect(ipc.enqueueFetchedPostDownload).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain(
+      "Shown snapshots are limited to 500 items. Use All for a complete archive.",
+    );
+  });
+
+  it("blocks a 501-item Selected snapshot before IPC without truncating or chunking", async () => {
+    const posts = Array.from({ length: 501 }, (_, index) =>
+      videoPost(`p${index}`, `https://cdninstagram.com/post-${index}.jpg`),
+    );
+    const wrapper = render();
+    await loadProfile(wrapper, { ...preview, recent_posts: posts });
+    const store = useExplorerStore();
+    for (const post of posts) store.toggleSelected("posts", post.pk);
+    await flushPromises();
+
+    expect(button(wrapper, "All").attributes("disabled")).toBeUndefined();
+    expect(button(wrapper, "Selected 501").attributes("disabled")).toBeDefined();
+    expect(wrapper.text()).toContain("Selected has 501 items, above the 500-item exact snapshot limit.");
+    wrapper.getComponent(DownloadScopeGroup).vm.$emit("download-selected");
+    await flushPromises();
+
+    expect(ipc.enqueueFetchedPostDownload).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain(
+      "Selected snapshots are limited to 500 items. Use All for a complete archive.",
+    );
   });
 
   it("loads exactly one dedicated clips page when Reels is first opened", async () => {
@@ -537,7 +755,9 @@ describe("ExplorerView async wiring", () => {
     };
     const otherPost = videoPost("p2", "https://cdninstagram.com/other.jpg");
     const reel = videoPost("r1", "https://cdninstagram.com/reel.jpg");
-    ipc.enqueueFetchedPostDownload.mockResolvedValue("job-selected");
+    ipc.enqueueFetchedPostDownload
+      .mockResolvedValueOnce("job-selected-posts")
+      .mockResolvedValueOnce("job-selected-reels");
     ipc.fetchReels.mockResolvedValue({ posts: [reel], end_cursor: null });
     const wrapper = render();
     await loadProfile(wrapper, { ...preview, recent_posts: [carousel, otherPost] });
@@ -554,6 +774,8 @@ describe("ExplorerView async wiring", () => {
       [carousel],
     );
     expect(carousel.resources).toHaveLength(2);
+    finishJob("job-selected-posts");
+    await flushPromises();
 
     await button(wrapper, "Reels").trigger("click");
     await flushPromises();
@@ -611,6 +833,28 @@ describe("ExplorerView async wiring", () => {
 
     expect((selection(wrapper, "Select post P1").element as HTMLInputElement).checked).toBe(false);
     expect((selection(wrapper, "Select post P2").element as HTMLInputElement).checked).toBe(true);
+    expect(button(wrapper, "Selected 1").exists()).toBe(true);
+  });
+
+  it("preserves a submitted ID that is deselected and reselected while pending", async () => {
+    const pending = deferred<string>();
+    ipc.enqueueFetchedPostDownload.mockReturnValue(pending.promise);
+    const wrapper = render();
+    await loadProfile(wrapper, {
+      ...preview,
+      recent_posts: [videoPost("p1", "https://cdninstagram.com/post.jpg")],
+    });
+
+    const checkbox = selection(wrapper, "Select post P1");
+    await checkbox.setValue(true);
+    await button(wrapper, "Selected 1").trigger("click");
+    await checkbox.setValue(false);
+    await checkbox.setValue(true);
+
+    pending.resolve("job-reselected");
+    await flushPromises();
+
+    expect((selection(wrapper, "Select post P1").element as HTMLInputElement).checked).toBe(true);
     expect(button(wrapper, "Selected 1").exists()).toBe(true);
   });
 
