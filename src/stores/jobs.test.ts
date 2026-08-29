@@ -135,7 +135,7 @@ describe("jobs conflict metadata", () => {
 
     expect(store.jobs.get("early-reserved")).toMatchObject({
       state: "done",
-      label: "Backend label",
+      label: "Placeholder label",
       conflictKeys: ["profile:nike", "folder:nike:posts"],
     });
     expect(store.hasActiveConflict(["profile:nike", "folder:nike:posts"])).toBe(false);
@@ -186,7 +186,7 @@ describe("jobs conflict metadata", () => {
 
     expect(store.jobs.get("early")).toMatchObject({
       state: "done",
-      label: "Backend label",
+      label: "Placeholder label",
       resultCount: 2,
       conflictKeys: ["folder:nike:posts"],
     });

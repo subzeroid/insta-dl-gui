@@ -916,6 +916,29 @@ describe("ExplorerView async wiring", () => {
     expect(button(wrapper, "Selected 1").exists()).toBe(true);
   });
 
+  it("clears an accepted submitted selection after the Explore view remounts", async () => {
+    const pinia = createPinia();
+    const pending = deferred<string>();
+    ipc.enqueueFetchedPostDownload.mockReturnValue(pending.promise);
+    const first = render(pinia);
+    await loadProfile(first, {
+      ...preview,
+      recent_posts: [videoPost("p1", "https://cdninstagram.com/post.jpg")],
+    });
+
+    await selection(first, "Select post P1").setValue(true);
+    await button(first, "Selected 1").trigger("click");
+    first.unmount();
+
+    const second = render(pinia);
+    expect((selection(second, "Select post P1").element as HTMLInputElement).checked).toBe(true);
+    pending.resolve("job-remounted-selection");
+    await flushPromises();
+
+    expect((selection(second, "Select post P1").element as HTMLInputElement).checked).toBe(false);
+    expect(button(second, "Selected 0").attributes("disabled")).toBeDefined();
+  });
+
   it("retains submitted selection and reports an enqueue failure", async () => {
     ipc.enqueueFetchedPostDownload.mockRejectedValue(new Error("enqueue failed"));
     const wrapper = render();

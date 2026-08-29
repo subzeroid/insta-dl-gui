@@ -387,10 +387,7 @@ async function downloadSnapshot(scope: "shown" | "selected") {
           `@${profile.username} ${tab} · ${scope} · ${submittedIds.length}`,
           conflictKeys,
         );
-        if (
-          scope === "selected" &&
-          isCurrentProfileSession(session, profile.username, profile.pk)
-        ) {
+        if (scope === "selected") {
           explorer.clearSubmitted(tab, submittedSelections);
         }
       } catch (e) {

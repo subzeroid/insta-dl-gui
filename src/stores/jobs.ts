@@ -73,6 +73,7 @@ export const useJobsStore = defineStore("jobs", () => {
     const normalizedKeys = [...new Set(conflictKeys)];
     const existing = jobs.get(id);
     if (existing) {
+      existing.label = label;
       existing.conflictKeys = [...new Set([...(existing.conflictKeys ?? []), ...normalizedKeys])];
     } else {
       jobs.set(id, reactive({
