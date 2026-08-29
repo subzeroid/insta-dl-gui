@@ -14,7 +14,10 @@ use crate::cdn::{self, CdnError};
 use crate::config::Config;
 use crate::hiker::{map_post, map_profile, map_search_user};
 use crate::jobs::JobRegistry;
-use crate::models::{DirectItem, Post, Profile, ProfileOptions, SearchUser, StoryItem};
+use crate::models::{
+    DirectItem, FetchedPostCategory, FetchedPostScope, Post, Profile, ProfileOptions, SearchUser,
+    StoryItem,
+};
 use crate::targets::Target;
 use crate::AppState;
 
@@ -398,6 +401,85 @@ fn direct_job_key(label: &str, subfolder: &str, items: &[DirectItem]) -> String 
         safe_segment(&subfolder.to_ascii_lowercase()),
         item_key
     )
+}
+
+impl FetchedPostCategory {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Posts => "posts",
+            Self::Reels => "reels",
+        }
+    }
+}
+
+impl FetchedPostScope {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Shown => "shown",
+            Self::Selected => "selected",
+        }
+    }
+}
+
+fn normalize_fetched_username(username: &str) -> Result<String, String> {
+    let normalized = username
+        .trim()
+        .trim_start_matches('@')
+        .trim()
+        .to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err("Instagram username must not be empty".into());
+    }
+    Ok(safe_segment(&normalized))
+}
+
+fn fetched_post_job_key(
+    username: &str,
+    category: FetchedPostCategory,
+    scope: FetchedPostScope,
+    posts: &[Post],
+) -> String {
+    let mut post_pks: Vec<&str> = posts.iter().map(|post| post.pk.as_str()).collect();
+    post_pks.sort_unstable();
+    let post_key = serde_json::to_string(&post_pks).expect("serializing string identifiers");
+    format!(
+        "fetched:{}:{}:{}:{}",
+        safe_segment(&username.to_ascii_lowercase()),
+        category.as_str(),
+        scope.as_str(),
+        post_key
+    )
+}
+
+fn fetched_post_label(
+    username: &str,
+    category: FetchedPostCategory,
+    scope: FetchedPostScope,
+    count: usize,
+) -> String {
+    format!(
+        "@{username} {} · {} {count}",
+        category.as_str(),
+        scope.as_str()
+    )
+}
+
+fn fetched_posts_dir(destination_root: &Path, username: &str) -> PathBuf {
+    destination_root.join(username).join("posts")
+}
+
+struct InFlightGuard {
+    registry: Arc<std::sync::Mutex<HashSet<String>>>,
+    key: String,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.key);
+    }
 }
 
 fn is_fatal_api_error(e: &crate::hiker::HikerError) -> bool {
@@ -1966,7 +2048,77 @@ impl ProgressSink for BatchProgress<'_> {
     }
 }
 
-#[allow(dead_code)]
+/// Download one exact, already-fetched Posts/Reels snapshot without an API refetch.
+#[tauri::command]
+pub(crate) async fn enqueue_fetched_post_download(
+    username: String,
+    category: FetchedPostCategory,
+    scope: FetchedPostScope,
+    posts: Vec<Post>,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let username = normalize_fetched_username(&username)?;
+    let posts = validate_fetched_posts(posts, false)?;
+    let key = fetched_post_job_key(&username, category, scope, &posts);
+    let in_flight = Arc::clone(&state.in_flight);
+    {
+        let mut registry = in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !registry.insert(key.clone()) {
+            return Err(format!(
+                "A download for @{username} {} · {} is already running",
+                category.as_str(),
+                scope.as_str()
+            ));
+        }
+    }
+    let in_flight_guard = InFlightGuard {
+        registry: in_flight,
+        key,
+    };
+
+    let cfg = state.cfg.read().await.clone();
+    let cdn_http = state.cdn_http.clone();
+    let catalog = state.catalog.clone();
+    let jobs = Arc::clone(&state.jobs);
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let cancel_rx = jobs.register(&job_id);
+    let em = JobEvents::new(
+        &app,
+        job_id.clone(),
+        fetched_post_label(&username, category, scope, posts.len()),
+    );
+    let job_id_task = job_id.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let _in_flight_guard = in_flight_guard;
+        let destination_root = PathBuf::from(&cfg.dest_dir);
+        let dir = fetched_posts_dir(&destination_root, &username);
+        let result = run_fetched_posts_job(
+            &cdn_http,
+            &catalog,
+            &destination_root,
+            &cfg,
+            &em,
+            &dir,
+            &posts,
+            Some(cancel_rx),
+            false,
+        )
+        .await;
+        match result {
+            Ok(completed) => em.done(completed.outcome, completed.resource_errors.len(), &dir),
+            Err(JobFail::Cancelled) => em.cancelled(),
+            Err(JobFail::Fatal(error)) => em.failed(error),
+        }
+        jobs.finish(&job_id_task);
+    });
+
+    Ok(job_id)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_fetched_posts_job(
     cdn_http: &reqwest::Client,
@@ -2103,6 +2255,108 @@ mod tests {
     }
 
     #[test]
+    fn fetched_post_job_key_is_case_and_order_independent() {
+        let first = vec![
+            fetched_post("200", "SECOND", "https://cdninstagram.com/second.mp4"),
+            fetched_post("100", "FIRST", "https://cdninstagram.com/first.mp4"),
+        ];
+        let second = vec![first[1].clone(), first[0].clone()];
+
+        assert_eq!(
+            fetched_post_job_key(
+                "Nike",
+                FetchedPostCategory::Posts,
+                FetchedPostScope::Shown,
+                &first,
+            ),
+            fetched_post_job_key(
+                "nike",
+                FetchedPostCategory::Posts,
+                FetchedPostScope::Shown,
+                &second,
+            )
+        );
+    }
+
+    #[test]
+    fn fetched_post_job_key_distinguishes_category_and_scope() {
+        let posts = vec![fetched_post(
+            "100",
+            "FIRST",
+            "https://cdninstagram.com/first.mp4",
+        )];
+        let shown_posts = fetched_post_job_key(
+            "nike",
+            FetchedPostCategory::Posts,
+            FetchedPostScope::Shown,
+            &posts,
+        );
+
+        assert_ne!(
+            shown_posts,
+            fetched_post_job_key(
+                "nike",
+                FetchedPostCategory::Reels,
+                FetchedPostScope::Shown,
+                &posts,
+            )
+        );
+        assert_ne!(
+            shown_posts,
+            fetched_post_job_key(
+                "nike",
+                FetchedPostCategory::Posts,
+                FetchedPostScope::Selected,
+                &posts,
+            )
+        );
+    }
+
+    #[test]
+    fn fetched_username_label_and_destination_use_one_safe_normalized_value() {
+        let username = normalize_fetched_username("  @Ni/Ke  ").unwrap();
+
+        assert_eq!(username, "ni_ke");
+        assert_eq!(
+            fetched_post_label(
+                &username,
+                FetchedPostCategory::Reels,
+                FetchedPostScope::Selected,
+                2,
+            ),
+            "@ni_ke reels · selected 2"
+        );
+        assert_eq!(
+            fetched_posts_dir(Path::new("/downloads"), &username),
+            PathBuf::from("/downloads/ni_ke/posts")
+        );
+        assert_eq!(
+            normalize_fetched_username(" @ ").unwrap_err(),
+            "Instagram username must not be empty"
+        );
+    }
+
+    #[test]
+    fn in_flight_guard_removes_its_key_on_drop() {
+        let registry = Arc::new(std::sync::Mutex::new(HashSet::from(["batch".to_owned()])));
+
+        {
+            let _guard = InFlightGuard {
+                registry: Arc::clone(&registry),
+                key: "batch".to_owned(),
+            };
+            assert!(registry.lock().unwrap().contains("batch"));
+        }
+
+        assert!(!registry.lock().unwrap().contains("batch"));
+    }
+
+    #[test]
+    fn fetched_post_enqueue_command_is_exposed_to_the_tauri_handler() {
+        let _command = enqueue_fetched_post_download;
+    }
+
+    #[test]
     fn fetched_batch_validation_deserializes_the_closed_contract() {
         let post: Post = serde_json::from_value(serde_json::json!({
             "pk": "100",
@@ -2140,7 +2394,9 @@ mod tests {
             FetchedPostScope::Selected
         );
         assert!(serde_json::from_str::<FetchedPostCategory>(r#""stories""#).is_err());
+        assert!(serde_json::from_str::<FetchedPostCategory>(r#""clips""#).is_err());
         assert!(serde_json::from_str::<FetchedPostScope>(r#""all""#).is_err());
+        assert!(serde_json::from_str::<FetchedPostScope>(r#""everything""#).is_err());
     }
 
     #[test]
