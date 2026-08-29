@@ -84,8 +84,8 @@ describe("application chrome", () => {
       expect.arrayContaining(["w-full", "min-w-0", "max-w-full", "overflow-x-auto"]),
     );
     expect(navigation.findAll("a").map((link) => link.text())).toEqual([
-      "Download",
       "Explore",
+      "Download",
       "Library",
       "Queue",
       "Settings",

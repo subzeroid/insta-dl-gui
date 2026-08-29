@@ -3,7 +3,7 @@ import { createRouter, createWebHistory } from "vue-router";
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: "/", redirect: "/download" },
+    { path: "/", redirect: "/explore" },
     { path: "/onboarding", component: () => import("./views/OnboardingView.vue") },
     { path: "/download", component: () => import("./views/DownloadView.vue") },
     { path: "/explore", component: () => import("./views/ExplorerView.vue") },
