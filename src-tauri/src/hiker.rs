@@ -86,6 +86,22 @@ impl Balance {
     }
 }
 
+fn parse_post_chunk(v: Value, label: &str) -> Result<crate::models::PostPage, HikerError> {
+    let arr = v
+        .as_array()
+        .ok_or_else(|| HikerError::Transient(format!("{label}: expected [items, cursor]")))?;
+    let items = arr
+        .first()
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let end_cursor = arr.get(1).and_then(Value::as_str).map(String::from);
+    Ok(crate::models::PostPage {
+        posts: items.iter().filter_map(map_post).collect(),
+        end_cursor,
+    })
+}
+
 /// Snapshot of quota captured from response headers.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct QuotaHeaders {
@@ -182,20 +198,25 @@ impl HikerClient {
                 ],
             )
             .await?;
-        let arr = v.as_array().ok_or_else(|| {
-            HikerError::Transient("medias/chunk: expected [items, cursor]".into())
-        })?;
-        let items = arr
-            .first()
-            .and_then(|x| x.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let cursor = arr.get(1).and_then(|x| x.as_str()).map(String::from);
-        let posts = items.iter().filter_map(map_post).collect();
-        Ok(crate::models::PostPage {
-            posts,
-            end_cursor: cursor,
-        })
+        parse_post_chunk(v, "medias/chunk")
+    }
+
+    /// GET /v1/user/clips/chunk → `[items, end_cursor]`.
+    pub async fn user_clips_chunk(
+        &self,
+        user_id: &str,
+        end_cursor: Option<&str>,
+    ) -> Result<crate::models::PostPage, HikerError> {
+        let (v, _) = self
+            .get(
+                "/v1/user/clips/chunk",
+                &[
+                    ("user_id", user_id),
+                    ("end_cursor", end_cursor.unwrap_or("")),
+                ],
+            )
+            .await?;
+        parse_post_chunk(v, "clips/chunk")
     }
 
     /// GET /v2/user/stories (billed 2 requests) → `{"reel": {"items": [...]}}`.

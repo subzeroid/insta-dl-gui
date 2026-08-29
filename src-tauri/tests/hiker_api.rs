@@ -1,11 +1,75 @@
 //! Unit tests for HikerAPI error mapping and payload mappers (mock server).
 
 use insta_dl_gui_lib::hiker::{map_post, map_profile, HikerClient, BASE_URL};
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn client_at(uri: &str) -> HikerClient {
     HikerClient::with_base_url("tok".into(), uri.to_string())
+}
+
+#[tokio::test]
+async fn clips_chunk_maps_posts_and_cursor() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/user/clips/chunk"))
+        .and(query_param("user_id", "42"))
+        .and(query_param("end_cursor", "next"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            [{
+                "pk": "r1",
+                "code": "REEL1",
+                "media_type": 2,
+                "taken_at": 1_776_000_000,
+                "video_versions": [{
+                    "url": "https://cdninstagram.com/r1.mp4",
+                    "width": 720
+                }],
+                "image_versions2": {
+                    "candidates": [{
+                        "url": "https://cdninstagram.com/r1.jpg",
+                        "width": 720
+                    }]
+                }
+            }],
+            "after"
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let page = client_at(&server.uri())
+        .user_clips_chunk("42", Some("next"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        page.posts
+            .iter()
+            .map(|post| post.pk.as_str())
+            .collect::<Vec<_>>(),
+        ["r1"]
+    );
+    assert_eq!(page.end_cursor.as_deref(), Some("after"));
+}
+
+#[tokio::test]
+async fn clips_chunk_rejects_non_array_payload() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/user/clips/chunk"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "items": [] })))
+        .mount(&server)
+        .await;
+
+    let error = client_at(&server.uri())
+        .user_clips_chunk("42", None)
+        .await
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("clips/chunk: expected [items, cursor]"));
 }
 
 #[tokio::test]
