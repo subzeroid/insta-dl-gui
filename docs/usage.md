@@ -29,17 +29,24 @@ All media of the post (including carousels) downloads immediately. Live progress
 
 For a private profile, only **Avatar** is available. Posts, reels, stories and highlights remain hidden because the public API cannot access them.
 
-## Explore before downloading
+## Explore and choose what to download
 
-Open **Explore** and type at least two characters of a username. Pick an autocomplete result with the mouse or arrow keys and **Enter**, then switch between **Posts**, **Reels** and **Stories**.
+The app opens on **Explore** after setup. Type at least two characters of a username, pick an autocomplete result with the mouse or arrow keys and **Enter**, then switch between **Posts**, **Reels** and **Stories**. The selected profile, active tab, loaded pages and selections stay available when you visit another app section and return during the same app session.
 
-- Click a post, reel or story to open its preview, then press **Download** for that item.
-- On **Posts**, use **Download all** for the complete profile feed. **Load more** adds the next preview page.
-- On **Reels**, the first page comes from the profile's dedicated clips feed. **Load more** adds one clips page; **Download shown (N)** archives the unique reels currently visible.
-- On **Stories**, use **Download all stories** after loading active stories.
-- Press **Escape** to close autocomplete or an open preview.
+Current Stories load automatically after a public profile opens and cost 2 HikerAPI requests. A Stories failure does not block Posts or Reels; open **Stories** and use **Retry stories** when needed.
 
-Explore keeps the selected profile, tab and loaded pages when you visit another app section and return, as long as the app remains open.
+Each tab has the same **Download** control:
+
+| Action | What it downloads | API and Queue behavior |
+|---|---|---|
+| **All** | The complete Posts or Reels archive, including pages not shown | Fetches through HikerAPI and may use additional requests |
+| **All** on Stories | A refreshed set of all currently active Stories | Uses additional HikerAPI requests |
+| **Shown N** | The exact items currently loaded in that tab | Fetches no additional pages and creates one Queue job |
+| **Selected N** | Only the cards whose checkboxes are selected | Fetches no additional pages and creates one Queue job |
+
+Use **Load more** on Posts or Reels before **Shown** if you want more pages in that exact snapshot. Shown and Selected accept at most 500 items. At 501 or more, the action is disabled and nothing is silently truncated or split; use **All** for the complete archive instead.
+
+Click a card to preview it, or use its checkbox to add it to **Selected**. After Queue accepts a Selected snapshot, only the submitted selections are cleared; a failed enqueue keeps them selected, and a card reselected while the request is pending stays selected. Press **Escape** to close autocomplete or an open preview.
 
 ## Where files end up
 

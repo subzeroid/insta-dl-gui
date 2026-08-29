@@ -23,6 +23,8 @@ Powered by [HikerAPI](https://hikerapi.com/p/uk064a1b), built with [Tauri 2](htt
 | Highlights | `@username` → check **Highlights** | 2 requests + 1 per highlight reel |
 | HD avatar | `@username` → check **Avatar** | included with profile fetch |
 
+Explore loads current Stories automatically for every public profile, which costs 2 requests. Its **All** action fetches a complete category and may spend additional requests; **Shown** and **Selected** use the exact items already loaded and do not fetch more pages.
+
 ## Highlights
 
 - **No login, no ban risk** — a HikerAPI token is the only credential
@@ -30,7 +32,8 @@ Powered by [HikerAPI](https://hikerapi.com/p/uk064a1b), built with [Tauri 2](htt
 - **Original timestamps** — file mtime is set from `taken_at`, so Photos/Finder sort correctly
 - **JSON metadata sidecars** — caption, like/comment counts and owner saved next to every post
 - **Live queue** — per-job progress, byte counters and cancellation
-- **Explore first** — autocomplete usernames, browse posts/reels/stories, preview individual items, then download one, a full collection, or the Reels pages you loaded
+- **Explore first** — start on profile discovery, browse posts/reels/stories, select exact cards, and use one **Download · All · Shown · Selected** control
+- **Exact Queue jobs** — each Shown or Selected snapshot becomes one job; snapshots support up to 500 items, with **All** as the complete-archive fallback
 - **Local media Library** — search, filter and inspect existing downloads without changing archive files
 - **Automatic recovery** — transient network and CDN server errors retry automatically, and partial jobs report only saved files
 

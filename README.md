@@ -20,7 +20,7 @@ Paste your HikerAPI token once, then download any public profile's content with 
 
 - **Single posts & reels** — paste an `instagram.com/p/…` or `/reel/…` link
 - **Full profiles** — posts, reels-only, active stories, highlights, and HD avatar, each selectable
-- **Explore before downloading** — search with autocomplete, browse posts/reels/stories, preview an item, then download one, a full collection, or the Reels pages you loaded
+- **Explore first** — the app opens on profile discovery; browse posts, reels and stories, select exact cards, then use one **Download · All · Shown · Selected** control
 - **No login, no ban risk** — HikerAPI token only; your Instagram account never touches the flow
 - **Live progress** — per-job byte counts, file counters and cancel support
 - **Resilient downloads** — transient network and CDN server failures retry automatically; partial jobs count only files actually saved
@@ -50,7 +50,7 @@ See [CHANGELOG.md](CHANGELOG.md) for release-by-release changes.
 2. Copy the token from your [HikerAPI dashboard](https://hikerapi.com/p/uk064a1b).
 3. Paste it into the app on first launch.
 
-One request ≈ one API call: fetching a post costs 1, stories 2, highlights 2 + 1 per highlight reel. A typical "download everything from a profile" run costs a handful of requests plus one per posts or Reels page.
+One request ≈ one API call: fetching a post costs 1, stories 2, highlights 2 + 1 per highlight reel. Explore loads current Stories automatically for a public profile, which costs 2 requests. **All** fetches the complete category and can spend additional requests; **Shown** and **Selected** download the exact items already loaded without fetching more pages. Exact snapshots are limited to 500 items and enter Queue as one job; use **All** above that limit.
 
 ## Local media Library
 
