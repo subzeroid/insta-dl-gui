@@ -255,6 +255,22 @@ describe("ExplorerView async wiring", () => {
     expect(wrapper.find("img[src='https://cdninstagram.com/story.jpg']").exists()).toBe(true);
   });
 
+  it("keeps the visible profile's pending Stories request alive while the query is edited", async () => {
+    const pending = deferred<ReturnType<typeof story>[]>();
+    ipc.fetchStories.mockReturnValue(pending.promise);
+    const wrapper = render();
+    await loadProfile(wrapper);
+
+    await wrapper.get("input").setValue("adidas");
+    pending.resolve([story("s1", "https://cdninstagram.com/nike-story.jpg")]);
+    await flushPromises();
+    await button(wrapper, "Stories").trigger("click");
+
+    expect(ipc.fetchStories).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).toContain("Nike");
+    expect(wrapper.find("img[src='https://cdninstagram.com/nike-story.jpg']").exists()).toBe(true);
+  });
+
   it("isolates an automatic stories failure and retries only on request", async () => {
     const retry = deferred<ReturnType<typeof story>[]>();
     ipc.fetchStories
@@ -294,7 +310,9 @@ describe("ExplorerView async wiring", () => {
     ]);
     const wrapper = render();
     await loadProfile(wrapper);
-    useExplorerStore().failStories("nike", "stories unavailable");
+    const store = useExplorerStore();
+    const failureToken = store.beginStoriesRequest("nike")!;
+    store.failStories("nike", failureToken, "stories unavailable");
     await flushPromises();
     await button(wrapper, "Stories").trigger("click");
 
@@ -485,7 +503,12 @@ describe("ExplorerView async wiring", () => {
     setActivePinia(resolvedPinia);
     const resolvedStore = useExplorerStore();
     resolvedStore.commitProfile(preview);
-    resolvedStore.commitStories("nike", [story("s1", "https://cdninstagram.com/story.jpg")]);
+    const resolvedToken = resolvedStore.beginStoriesRequest("nike")!;
+    resolvedStore.commitStories(
+      "nike",
+      resolvedToken,
+      [story("s1", "https://cdninstagram.com/story.jpg")],
+    );
     const resolved = render(resolvedPinia);
     await flushPromises();
     expect(ipc.fetchStories).not.toHaveBeenCalled();
@@ -495,7 +518,8 @@ describe("ExplorerView async wiring", () => {
     setActivePinia(failedPinia);
     const failedStore = useExplorerStore();
     failedStore.commitProfile(preview);
-    failedStore.failStories("nike", "stories unavailable");
+    const failedToken = failedStore.beginStoriesRequest("nike")!;
+    failedStore.failStories("nike", failedToken, "stories unavailable");
     const failed = render(failedPinia);
     await flushPromises();
     expect(ipc.fetchStories).not.toHaveBeenCalled();
@@ -504,20 +528,26 @@ describe("ExplorerView async wiring", () => {
     expect(failed.text()).toContain("stories unavailable");
   });
 
-  it("invalidates a pending stories response when the view unmounts", async () => {
+  it("preserves one pending Stories request across unmount and remount", async () => {
     const pending = deferred<ReturnType<typeof story>[]>();
     ipc.fetchStories.mockReturnValue(pending.promise);
     const pinia = createPinia();
-    const wrapper = render(pinia);
-    await loadProfile(wrapper);
-    const store = useExplorerStore();
+    const first = render(pinia);
+    await loadProfile(first);
+    expect(ipc.fetchStories).toHaveBeenCalledTimes(1);
 
-    wrapper.unmount();
-    pending.resolve([story("stale", "https://cdninstagram.com/stale-story.jpg")]);
+    first.unmount();
+    const second = render(pinia);
+    await flushPromises();
+    await button(second, "Stories").trigger("click");
+    expect(second.text()).toContain("Loading stories…");
+    expect(ipc.fetchStories).toHaveBeenCalledTimes(1);
+
+    pending.resolve([story("s1", "https://cdninstagram.com/preserved-story.jpg")]);
     await flushPromises();
 
-    expect(store.stories).toBeNull();
-    expect(store.storiesError).toBeNull();
+    expect(second.find("img[src='https://cdninstagram.com/preserved-story.jpg']").exists()).toBe(true);
+    expect(useExplorerStore().storiesLoading).toBe(false);
   });
 
   it("allows retry after the first clips page fails", async () => {

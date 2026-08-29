@@ -15,12 +15,15 @@ export const useExplorerStore = defineStore("explorer", () => {
   const reelsLoaded = ref(false);
   const stories = ref<StoryItem[] | null>(null);
   const storiesError: Ref<string | null> = ref(null);
+  const storiesLoading = ref(false);
   const selected = reactive<Record<ExploreTab, string[]>>({
     posts: [],
     reels: [],
     stories: [],
   });
   const requestedReelsCursors = new Set<string>();
+  let storiesRequestGeneration = 0;
+  let pendingStoriesRequest: { username: string; token: number } | null = null;
 
   function beginProfileLoad() {
     profilePreview.value = null;
@@ -30,6 +33,9 @@ export const useExplorerStore = defineStore("explorer", () => {
     reelsLoaded.value = false;
     stories.value = null;
     storiesError.value = null;
+    storiesLoading.value = false;
+    storiesRequestGeneration += 1;
+    pendingStoriesRequest = null;
     selected.posts = [];
     selected.reels = [];
     selected.stories = [];
@@ -89,24 +95,39 @@ export const useExplorerStore = defineStore("explorer", () => {
     selected[tab] = selected[tab].filter((pk) => !submitted.has(pk));
   }
 
-  function beginStoriesRequest(username: string): boolean {
-    if (profilePreview.value?.profile.username !== username) return false;
+  function beginStoriesRequest(username: string): number | null {
+    if (profilePreview.value?.profile.username !== username || pendingStoriesRequest) return null;
+    const token = ++storiesRequestGeneration;
+    pendingStoriesRequest = { username, token };
+    storiesLoading.value = true;
     storiesError.value = null;
-    return true;
+    return token;
   }
 
-  function commitStories(username: string, items: readonly StoryItem[]): boolean {
-    if (profilePreview.value?.profile.username !== username) return false;
+  function isCurrentStoriesRequest(username: string, token: number): boolean {
+    return (
+      profilePreview.value?.profile.username === username &&
+      pendingStoriesRequest?.username === username &&
+      pendingStoriesRequest.token === token
+    );
+  }
+
+  function commitStories(username: string, token: number, items: readonly StoryItem[]): boolean {
+    if (!isCurrentStoriesRequest(username, token)) return false;
     stories.value = [...items];
     storiesError.value = null;
+    storiesLoading.value = false;
+    pendingStoriesRequest = null;
     const available = new Set(items.map((item) => item.pk));
     selected.stories = selected.stories.filter((pk) => available.has(pk));
     return true;
   }
 
-  function failStories(username: string, message: string): boolean {
-    if (profilePreview.value?.profile.username !== username) return false;
+  function failStories(username: string, token: number, message: string): boolean {
+    if (!isCurrentStoriesRequest(username, token)) return false;
     storiesError.value = message;
+    storiesLoading.value = false;
+    pendingStoriesRequest = null;
     return true;
   }
 
@@ -119,6 +140,7 @@ export const useExplorerStore = defineStore("explorer", () => {
     reelsLoaded,
     stories,
     storiesError,
+    storiesLoading,
     selected,
     beginProfileLoad,
     commitProfile,

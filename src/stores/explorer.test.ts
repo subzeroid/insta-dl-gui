@@ -78,18 +78,79 @@ describe("Explore session state", () => {
     expect(store.isSelected("reels", "r1")).toBe(true);
   });
 
-  it("keeps Stories state scoped to the current profile and rejects stale commits", () => {
+  it("deduplicates a pending Stories request and clears loading on matching completion", () => {
     const store = useExplorerStore();
     store.commitProfile(preview("nike", "42"));
-    expect(store.commitStories("nike", [story("s1")])).toBe(true);
-    expect(store.stories).toEqual([story("s1")]);
-    expect(store.failStories("nike", "request failed")).toBe(true);
-    expect(store.stories).toEqual([story("s1")]);
-    expect(store.storiesError).toBe("request failed");
 
-    expect(store.commitStories("other", [story("stale")])).toBe(false);
+    const token = store.beginStoriesRequest("nike");
+    expect(token).not.toBeNull();
+    expect(store.storiesLoading).toBe(true);
+    expect(store.beginStoriesRequest("nike")).toBeNull();
+    expect(store.commitStories("nike", token!, [story("s1")])).toBe(true);
+    expect(store.stories).toEqual([story("s1")]);
+    expect(store.storiesLoading).toBe(false);
+  });
+
+  it("clears a Stories error for retry while retaining the last snapshot", () => {
+    const store = useExplorerStore();
+    store.commitProfile(preview("nike", "42"));
+    const initial = store.beginStoriesRequest("nike")!;
+    store.commitStories("nike", initial, [story("s1")]);
+    const failed = store.beginStoriesRequest("nike")!;
+    expect(store.failStories("nike", failed, "request failed")).toBe(true);
     expect(store.stories).toEqual([story("s1")]);
     expect(store.storiesError).toBe("request failed");
+    expect(store.storiesLoading).toBe(false);
+
+    const retry = store.beginStoriesRequest("nike");
+    expect(retry).not.toBeNull();
+    expect(store.stories).toEqual([story("s1")]);
+    expect(store.storiesError).toBeNull();
+    expect(store.storiesLoading).toBe(true);
+  });
+
+  it("rejects stale Stories tokens even when the same profile returns", () => {
+    const store = useExplorerStore();
+    store.commitProfile(preview("nike", "42"));
+    const firstNike = store.beginStoriesRequest("nike")!;
+    store.beginProfileLoad();
+    store.commitProfile(preview("adidas", "84"));
+    const adidas = store.beginStoriesRequest("adidas")!;
+    store.beginProfileLoad();
+    store.commitProfile(preview("nike", "42"));
+    const currentNike = store.beginStoriesRequest("nike")!;
+
+    expect(store.commitStories("nike", firstNike, [story("stale")])).toBe(false);
+    expect(store.failStories("adidas", adidas, "stale failure")).toBe(false);
+    expect(store.stories).toBeNull();
+    expect(store.storiesError).toBeNull();
+    expect(store.storiesLoading).toBe(true);
+    expect(store.commitStories("nike", currentNike, [story("fresh")])).toBe(true);
+    expect(store.stories).toEqual([story("fresh")]);
+    expect(store.storiesLoading).toBe(false);
+  });
+
+  it("invalidates a pending Stories token when profile replacement starts", () => {
+    const store = useExplorerStore();
+    store.commitProfile(preview("nike", "42"));
+    const token = store.beginStoriesRequest("nike")!;
+
+    store.beginProfileLoad();
+
+    expect(store.storiesLoading).toBe(false);
+    expect(store.commitStories("nike", token, [story("stale")])).toBe(false);
+    expect(store.failStories("nike", token, "stale failure")).toBe(false);
+    expect(store.stories).toBeNull();
+    expect(store.storiesError).toBeNull();
+  });
+
+  it("rejects Stories requests that do not match the committed profile", () => {
+    const store = useExplorerStore();
+    store.commitProfile(preview("nike", "42"));
+
+    expect(store.beginStoriesRequest("other")).toBeNull();
+    expect(store.stories).toBeNull();
+    expect(store.storiesLoading).toBe(false);
   });
 
   it("prunes vanished Story selections and clears all transient state on profile load", () => {
@@ -98,15 +159,18 @@ describe("Explore session state", () => {
     store.toggleSelected("stories", "s1");
     store.toggleSelected("stories", "s2");
     store.toggleSelected("posts", "p1");
-    store.commitStories("nike", [story("s1")]);
+    const commitToken = store.beginStoriesRequest("nike")!;
+    store.commitStories("nike", commitToken, [story("s1")]);
     expect(store.isSelected("stories", "s1")).toBe(true);
     expect(store.isSelected("stories", "s2")).toBe(false);
-    store.failStories("nike", "oops");
+    const failToken = store.beginStoriesRequest("nike")!;
+    store.failStories("nike", failToken, "oops");
 
     store.beginProfileLoad();
 
     expect(store.stories).toBeNull();
     expect(store.storiesError).toBeNull();
+    expect(store.storiesLoading).toBe(false);
     expect(store.isSelected("stories", "s1")).toBe(false);
     expect(store.isSelected("posts", "p1")).toBe(false);
   });

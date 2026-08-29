@@ -30,6 +30,7 @@ const {
   reelsLoaded,
   stories,
   storiesError,
+  storiesLoading,
 } = storeToRefs(explorer);
 
 const suggestions = ref<SearchUser[]>([]);
@@ -41,7 +42,6 @@ const loading = ref(false);
 const loadingMore = ref(false);
 const error = ref<string | null>(null);
 
-const storiesLoading = ref(false);
 const reelsLoading = ref(false);
 const reelsError = ref<string | null>(null);
 const reelsRetryCursor = ref<string | null>(null);
@@ -76,11 +76,9 @@ function onQueryInput() {
   window.clearTimeout(debounce);
   const seq = requests.autocomplete.begin();
   requests.profile.invalidate();
-  requests.stories.invalidate();
   requests.reels.invalidate();
   loading.value = false;
   loadingMore.value = false;
-  storiesLoading.value = false;
   reelsLoading.value = false;
   reelsError.value = null;
   suggestions.value = [];
@@ -162,11 +160,9 @@ async function submit() {
 
 async function loadProfile(username: string) {
   const seq = requests.profile.begin();
-  requests.stories.invalidate();
   requests.reels.invalidate();
   loading.value = true;
   loadingMore.value = false;
-  storiesLoading.value = false;
   reelsLoading.value = false;
   reelsError.value = null;
   reelsRetryCursor.value = null;
@@ -313,21 +309,14 @@ async function downloadAvatar() {
 
 async function loadStories() {
   const username = preview.value?.profile.username;
-  if (!username || storiesLoading.value) return;
-  const seq = requests.stories.begin();
-  storiesLoading.value = true;
-  explorer.beginStoriesRequest(username);
+  if (!username) return;
+  const token = explorer.beginStoriesRequest(username);
+  if (token === null) return;
   try {
     const items = await fetchStories(username);
-    if (!requests.stories.isCurrent(seq) || preview.value?.profile.username !== username) return;
-    explorer.commitStories(username, items);
+    explorer.commitStories(username, token, items);
   } catch (e) {
-    if (!requests.stories.isCurrent(seq) || preview.value?.profile.username !== username) return;
-    explorer.failStories(username, String(e));
-  } finally {
-    if (requests.stories.isCurrent(seq) && preview.value?.profile.username === username) {
-      storiesLoading.value = false;
-    }
+    explorer.failStories(username, token, String(e));
   }
 }
 
@@ -359,7 +348,8 @@ onMounted(() => {
     if (
       !preview.value.profile.is_private &&
       stories.value === null &&
-      storiesError.value === null
+      storiesError.value === null &&
+      !storiesLoading.value
     ) {
       void loadStories();
     }
@@ -378,7 +368,6 @@ onUnmounted(() => {
   window.clearTimeout(debounce);
   requests.autocomplete.invalidate();
   requests.profile.invalidate();
-  requests.stories.invalidate();
   requests.reels.invalidate();
 });
 </script>
