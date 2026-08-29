@@ -215,9 +215,15 @@ export interface Post {
   taken_at?: number;
   caption?: string;
   owner_username?: string;
+  owner_pk?: string;
+  like_count?: number;
+  comment_count?: number;
   resources: { url: string; kind: "photo" | "video" }[];
   thumbnail_url?: string;
 }
+
+export type FetchedPostCategory = "posts" | "reels";
+export type FetchedPostScope = "shown" | "selected";
 
 export interface Profile {
   pk: string;
@@ -307,6 +313,15 @@ export async function downloadPost(code: string): Promise<string> {
 
 export async function enqueueProfileDownload(username: string, opts: ProfileOptions): Promise<string> {
   return invoke("enqueue_profile_download", { username, opts });
+}
+
+export async function enqueueFetchedPostDownload(
+  username: string,
+  category: FetchedPostCategory,
+  scope: FetchedPostScope,
+  posts: Post[],
+): Promise<string> {
+  return invoke("enqueue_fetched_post_download", { username, category, scope, posts });
 }
 
 export async function cancelJob(jobId: string): Promise<boolean> {
