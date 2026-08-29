@@ -426,7 +426,16 @@ async fn download_one(
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "file".into());
-    let progress = |bytes| em.progress(file_no, 0, *bytes_so_far + bytes, &name);
+    let mut attempt_high_water = 0u64;
+    let progress = |bytes| {
+        attempt_high_water = attempt_high_water.max(bytes);
+        em.progress(
+            file_no,
+            0,
+            (*bytes_so_far).saturating_add(attempt_high_water),
+            &name,
+        );
+    };
     #[cfg(test)]
     let outcome = if allow_loopback {
         cdn::stream_to_file_retried_for_test(
@@ -468,14 +477,21 @@ async fn download_one(
         )
         .await
     };
-    let outcome = outcome.map_err(JobFail::from)?;
-    *bytes_so_far += outcome.bytes;
-    Ok(DownloadedFile {
-        kind: media_file_kind_from_path(&outcome.path),
-        path: outcome.path,
-        bytes: outcome.bytes,
-        ordinal,
-    })
+    match outcome {
+        Ok(outcome) => {
+            *bytes_so_far = (*bytes_so_far).saturating_add(attempt_high_water.max(outcome.bytes));
+            Ok(DownloadedFile {
+                kind: media_file_kind_from_path(&outcome.path),
+                path: outcome.path,
+                bytes: outcome.bytes,
+                ordinal,
+            })
+        }
+        Err(error) => {
+            *bytes_so_far = (*bytes_so_far).saturating_add(attempt_high_water);
+            Err(JobFail::from(error))
+        }
+    }
 }
 
 fn media_file_kind_from_path(path: &Path) -> MediaFileKind {
@@ -1772,6 +1788,7 @@ async fn run_single_post_attempt(
     allow_loopback: bool,
 ) -> Result<PostDownloadAttempt, JobFail> {
     std::fs::create_dir_all(dir)?;
+    let is_cancelled = || cancel.as_ref().map(|rx| *rx.borrow()).unwrap_or(false);
     let base = taken_at_name(post.taken_at, &post.code);
     let item_metadata = post_catalog_metadata(post);
     let total = post.resources.len();
@@ -1783,7 +1800,7 @@ async fn run_single_post_attempt(
     let mut has_successful_resource = false;
 
     for (idx, resource) in post.resources.iter().enumerate() {
-        if cancel.as_ref().map(|c| *c.borrow()).unwrap_or(false) {
+        if is_cancelled() {
             return Err(JobFail::Cancelled);
         }
         let dest_base = if total > 1 {
@@ -1792,14 +1809,17 @@ async fn run_single_post_attempt(
             dir.join(&base)
         };
         let ordinal = u32::try_from(idx).unwrap_or(u32::MAX);
-        if let Some(file) = recover_downloaded_file(
+        let recovered = recover_downloaded_file(
             catalog,
             destination_root,
             &item_metadata.remote_key,
             ordinal,
         )
-        .await
-        {
+        .await;
+        if is_cancelled() {
+            return Err(JobFail::Cancelled);
+        }
+        if let Some(file) = recovered {
             bytes_total = bytes_total.saturating_add(file.bytes);
             let file_name = file
                 .path
@@ -1807,6 +1827,9 @@ async fn run_single_post_attempt(
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "file".into());
             em.progress(idx + 1, total, bytes_total, &file_name);
+            if is_cancelled() {
+                return Err(JobFail::Cancelled);
+            }
             downloaded.push(file);
             has_successful_resource = true;
             continue;
@@ -1836,6 +1859,12 @@ async fn run_single_post_attempt(
                 resource_errors.push(error);
             }
         }
+        if is_cancelled() {
+            return Err(JobFail::Cancelled);
+        }
+    }
+    if is_cancelled() {
+        return Err(JobFail::Cancelled);
     }
     let sidecar_ordinal = u32::try_from(total).unwrap_or(u32::MAX);
     let mut sidecar_written = false;
@@ -1860,6 +1889,9 @@ async fn run_single_post_attempt(
             sidecar_written = true;
         }
     }
+    if is_cancelled() {
+        return Err(JobFail::Cancelled);
+    }
 
     if media_files_written == 0 && !sidecar_written && resource_errors.is_empty() {
         return Ok(PostDownloadAttempt {
@@ -1883,12 +1915,16 @@ async fn run_single_post_attempt(
             files: downloaded,
             resource_errors: resource_errors.clone(),
         };
-        if (media_files_written > 0 || sidecar_written)
-            && catalog_downloaded_media(catalog, destination_root, &media)
+        if media_files_written > 0 || sidecar_written {
+            if is_cancelled() {
+                return Err(JobFail::Cancelled);
+            }
+            if catalog_downloaded_media(catalog, destination_root, &media)
                 .await
                 .is_err()
-        {
-            outcome.catalog_warnings += 1;
+            {
+                outcome.catalog_warnings += 1;
+            }
         }
         Some(media)
     };

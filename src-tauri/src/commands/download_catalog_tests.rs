@@ -41,6 +41,36 @@ impl ProgressSink for RecordingProgress {
     }
 }
 
+struct CancelOnTerminalProgress {
+    cancel: tokio::sync::watch::Sender<bool>,
+    updates: Mutex<Vec<(usize, usize, u64)>>,
+}
+
+impl CancelOnTerminalProgress {
+    fn new(cancel: tokio::sync::watch::Sender<bool>) -> Self {
+        Self {
+            cancel,
+            updates: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn updates(&self) -> Vec<(usize, usize, u64)> {
+        self.updates.lock().unwrap().clone()
+    }
+}
+
+impl ProgressSink for CancelOnTerminalProgress {
+    fn progress(&self, current_file: usize, total_files: usize, bytes_done: u64, _file_name: &str) {
+        self.updates
+            .lock()
+            .unwrap()
+            .push((current_file, total_files, bytes_done));
+        if current_file == total_files {
+            self.cancel.send(true).unwrap();
+        }
+    }
+}
+
 struct TestResult {
     outcome: JobOutcome,
     resource_errors: Vec<String>,
@@ -804,6 +834,92 @@ async fn fetched_batch_final_recovered_resource_emits_terminal_monotonic_progres
 }
 
 #[tokio::test]
+async fn fetched_batch_terminal_recovered_progress_cancellation_skips_sidecar_and_catalog() {
+    let server = MockServer::start().await;
+    mount_media(&server, "/cancel-recovered", "video/mp4", &MP4).await;
+    let fixture = Fixture::new();
+    let recovered = post(
+        "batch-cancel-recovered",
+        "BATCH-CANCEL-RECOVERED",
+        vec![resource(&server, "/cancel-recovered", MediaKind::Video)],
+    );
+    let seeded = fixture
+        .run_fetched_posts(std::slice::from_ref(&recovered), false, &NoopProgress, None)
+        .await
+        .unwrap_or_else(|failure| match failure {
+            JobFail::Cancelled => panic!("seed batch was unexpectedly cancelled"),
+            JobFail::Fatal(error) => panic!("seed batch failed: {error}"),
+        });
+    assert_eq!(seeded.outcome.files_written, 1);
+    let before = fixture.only_item();
+    let media_path = absolute(&fixture.root, &before.files[0].relative_path);
+    assert!(!media_path.with_extension("json").exists());
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let progress = CancelOnTerminalProgress::new(cancel_tx);
+
+    let result = fixture
+        .run_fetched_posts(&[recovered], true, &progress, Some(cancel_rx))
+        .await;
+
+    assert!(matches!(result, Err(JobFail::Cancelled)));
+    assert_eq!(progress.updates().last().copied(), Some((1, 1, 16)));
+    assert!(!media_path.with_extension("json").exists());
+    assert_eq!(fixture.only_item(), before);
+}
+
+#[tokio::test]
+async fn fetched_batch_failed_stream_high_water_advances_before_next_resource() {
+    let (server, server_thread) = failed_stream_then_success_server();
+    let fixture = Fixture::new();
+    let item = post(
+        "batch-partial-stream",
+        "BATCH-PARTIAL-STREAM",
+        vec![
+            MediaResource {
+                url: format!("{server}/partial"),
+                kind: MediaKind::Photo,
+            },
+            MediaResource {
+                url: format!("{server}/success"),
+                kind: MediaKind::Photo,
+            },
+        ],
+    );
+    let progress = RecordingProgress::default();
+
+    let completed = fixture
+        .run_fetched_posts(&[item], false, &progress, None)
+        .await
+        .unwrap_or_else(|failure| match failure {
+            JobFail::Cancelled => panic!("fetched batch was unexpectedly cancelled"),
+            JobFail::Fatal(error) => panic!("fetched batch failed: {error}"),
+        });
+    server_thread.join().unwrap();
+
+    assert_eq!(completed.outcome.files_written, 1);
+    assert_eq!(completed.resource_errors.len(), 1);
+    let updates = progress.updates();
+    let failed_high_water = updates
+        .iter()
+        .filter(|(current, _, _)| *current == 1)
+        .map(|(_, _, bytes)| *bytes)
+        .max()
+        .expect("failed stream must report partial bytes");
+    let terminal = updates
+        .last()
+        .copied()
+        .expect("successful resource progress");
+    assert_eq!((terminal.0, terminal.1), (2, 2));
+    assert!(
+        terminal.2 > failed_high_water,
+        "next resource bytes must advance beyond the failed high-water"
+    );
+    assert!(updates
+        .windows(2)
+        .all(|pair| { pair[0].0 <= pair[1].0 && pair[0].2 <= pair[1].2 }));
+}
+
+#[tokio::test]
 async fn standalone_post_all_failed_after_attempt_refactor_is_concrete_fatal() {
     let server = MockServer::start().await;
     Mock::given(path("/standalone-forbidden"))
@@ -914,6 +1030,42 @@ fn collision_server() -> (
         slow_handler.join().unwrap();
     });
     (format!("http://{address}"), started_rx, release_tx, handle)
+}
+
+fn failed_stream_then_success_server() -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let mut partial_body = vec![0_u8; 640];
+        partial_body[..JPEG.len()].copy_from_slice(&JPEG);
+        for _ in 0..DOWNLOAD_ATTEMPTS {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let read = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..read]).contains("GET /partial "));
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: 1280\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            stream.write_all(&partial_body).unwrap();
+            stream.flush().unwrap();
+        }
+
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 1024];
+        let read = stream.read(&mut request).unwrap();
+        assert!(String::from_utf8_lossy(&request[..read]).contains("GET /success "));
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            JPEG.len()
+        )
+        .unwrap();
+        stream.write_all(&JPEG).unwrap();
+        stream.flush().unwrap();
+    });
+    (format!("http://{address}"), handle)
 }
 
 #[tokio::test]
