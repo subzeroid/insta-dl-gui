@@ -147,6 +147,11 @@ fn validate_url(url: &str, allow_loopback: bool) -> Result<(), CdnError> {
     Ok(())
 }
 
+#[allow(dead_code)]
+pub(crate) fn validate_remote_url(url: &str, allow_loopback: bool) -> Result<(), CdnError> {
+    validate_url(url, allow_loopback)
+}
+
 static RESERVED_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 struct PathReservation {

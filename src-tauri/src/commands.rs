@@ -19,6 +19,49 @@ use crate::targets::Target;
 use crate::AppState;
 
 const DOWNLOAD_ATTEMPTS: usize = 3;
+#[allow(dead_code)]
+const MAX_FETCHED_POSTS: usize = 500;
+#[allow(dead_code)]
+const MAX_RESOURCES_PER_POST: usize = 20;
+#[allow(dead_code)]
+const MAX_SHORTCODE_BYTES: usize = 256;
+
+#[allow(dead_code)]
+fn validate_fetched_posts(posts: Vec<Post>, allow_loopback: bool) -> Result<Vec<Post>, String> {
+    if posts.is_empty() {
+        return Err("Fetched post batch must not be empty".into());
+    }
+    if posts.len() > MAX_FETCHED_POSTS {
+        return Err("Fetched post batch exceeds maximum of 500 posts".into());
+    }
+
+    let mut seen = HashSet::new();
+    let mut validated = Vec::new();
+    for post in posts {
+        if post.pk.is_empty() || !post.pk.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("Fetched post PK must contain only ASCII digits".into());
+        }
+        if post.code.is_empty() {
+            return Err("Fetched post shortcode must not be empty".into());
+        }
+        if post.code.len() > MAX_SHORTCODE_BYTES {
+            return Err("Fetched post shortcode exceeds maximum of 256 bytes".into());
+        }
+        if post.resources.is_empty() || post.resources.len() > MAX_RESOURCES_PER_POST {
+            return Err("Fetched post must contain between 1 and 20 resources".into());
+        }
+        for resource in &post.resources {
+            cdn::validate_remote_url(&resource.url, allow_loopback)
+                .map_err(|_| "Fetched post contains an invalid media URL".to_string())?;
+        }
+
+        if seen.insert(post.pk.clone()) {
+            validated.push(post);
+        }
+    }
+
+    Ok(validated)
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
@@ -1812,7 +1855,7 @@ mod download_catalog_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{MediaKind, MediaResource};
+    use crate::models::{FetchedPostCategory, FetchedPostScope, MediaKind, MediaResource};
 
     fn direct_item(pk: &str) -> DirectItem {
         DirectItem {
@@ -1842,6 +1885,197 @@ mod tests {
                 .collect(),
             thumbnail_url: None,
         }
+    }
+
+    fn fetched_post(pk: &str, code: &str, url: &str) -> Post {
+        Post {
+            pk: pk.into(),
+            code: code.into(),
+            taken_at: Some(1_700_000_000),
+            caption: Some("A complete fetched post".into()),
+            like_count: Some(42),
+            comment_count: Some(7),
+            owner_username: Some("owner".into()),
+            owner_pk: Some("9001".into()),
+            resources: vec![MediaResource {
+                url: url.into(),
+                kind: MediaKind::Video,
+            }],
+            thumbnail_url: Some("https://cdninstagram.com/thumb.jpg".into()),
+        }
+    }
+
+    #[test]
+    fn fetched_batch_validation_deserializes_the_closed_contract() {
+        let post: Post = serde_json::from_value(serde_json::json!({
+            "pk": "100",
+            "code": "SHORTCODE",
+            "taken_at": 1_700_000_000,
+            "caption": "caption",
+            "like_count": 42,
+            "comment_count": 7,
+            "owner_username": "owner",
+            "owner_pk": "9001",
+            "resources": [{
+                "url": "https://cdninstagram.com/video.mp4",
+                "kind": "video"
+            }],
+            "thumbnail_url": "https://cdninstagram.com/thumb.jpg"
+        }))
+        .unwrap();
+        assert_eq!(post.pk, "100");
+        assert_eq!(post.resources[0].kind, MediaKind::Video);
+
+        assert_eq!(
+            serde_json::from_str::<FetchedPostCategory>(r#""posts""#).unwrap(),
+            FetchedPostCategory::Posts
+        );
+        assert_eq!(
+            serde_json::from_str::<FetchedPostCategory>(r#""reels""#).unwrap(),
+            FetchedPostCategory::Reels
+        );
+        assert_eq!(
+            serde_json::from_str::<FetchedPostScope>(r#""shown""#).unwrap(),
+            FetchedPostScope::Shown
+        );
+        assert_eq!(
+            serde_json::from_str::<FetchedPostScope>(r#""selected""#).unwrap(),
+            FetchedPostScope::Selected
+        );
+        assert!(serde_json::from_str::<FetchedPostCategory>(r#""stories""#).is_err());
+        assert!(serde_json::from_str::<FetchedPostScope>(r#""all""#).is_err());
+    }
+
+    #[test]
+    fn fetched_batch_validation_deduplicates_by_pk_in_first_seen_order() {
+        let first = fetched_post("100", "FIRST", "https://cdninstagram.com/first.mp4");
+        let duplicate = fetched_post("100", "DUPLICATE", "https://cdninstagram.com/duplicate.mp4");
+        let second = fetched_post("200", "SECOND", "https://fbcdn.net/second.mp4");
+
+        let validated = validate_fetched_posts(vec![first, duplicate, second], false).unwrap();
+
+        assert_eq!(
+            validated
+                .iter()
+                .map(|post| (post.pk.as_str(), post.code.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("100", "FIRST"), ("200", "SECOND")]
+        );
+    }
+
+    #[test]
+    fn fetched_batch_validation_rejects_empty_and_oversized_batches() {
+        assert_eq!(MAX_FETCHED_POSTS, 500);
+        assert_eq!(
+            validate_fetched_posts(Vec::new(), false).unwrap_err(),
+            "Fetched post batch must not be empty"
+        );
+
+        let maximum = vec![
+            fetched_post("100", "SHORTCODE", "https://cdninstagram.com/video.mp4");
+            MAX_FETCHED_POSTS
+        ];
+        assert_eq!(
+            validate_fetched_posts(maximum.clone(), false)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let mut oversized = maximum;
+        oversized.push(fetched_post(
+            "200",
+            "SECOND",
+            "https://cdninstagram.com/second.mp4",
+        ));
+        assert_eq!(
+            validate_fetched_posts(oversized, false).unwrap_err(),
+            "Fetched post batch exceeds maximum of 500 posts"
+        );
+    }
+
+    #[test]
+    fn fetched_batch_validation_rejects_invalid_post_identifiers() {
+        for pk in ["", "../escape", "123a", "١٢٣"] {
+            let post = fetched_post(pk, "SHORTCODE", "https://cdninstagram.com/video.mp4");
+            assert_eq!(
+                validate_fetched_posts(vec![post], false).unwrap_err(),
+                "Fetched post PK must contain only ASCII digits"
+            );
+        }
+    }
+
+    #[test]
+    fn fetched_batch_validation_enforces_shortcode_byte_bounds() {
+        assert_eq!(MAX_SHORTCODE_BYTES, 256);
+
+        let empty = fetched_post("100", "", "https://cdninstagram.com/video.mp4");
+        assert_eq!(
+            validate_fetched_posts(vec![empty], false).unwrap_err(),
+            "Fetched post shortcode must not be empty"
+        );
+
+        let maximum = fetched_post(
+            "100",
+            &"a".repeat(MAX_SHORTCODE_BYTES),
+            "https://cdninstagram.com/video.mp4",
+        );
+        assert!(validate_fetched_posts(vec![maximum], false).is_ok());
+
+        let oversized = fetched_post(
+            "100",
+            &"a".repeat(MAX_SHORTCODE_BYTES + 1),
+            "https://cdninstagram.com/video.mp4",
+        );
+        assert_eq!(
+            validate_fetched_posts(vec![oversized], false).unwrap_err(),
+            "Fetched post shortcode exceeds maximum of 256 bytes"
+        );
+    }
+
+    #[test]
+    fn fetched_batch_validation_enforces_resource_count_bounds() {
+        assert_eq!(MAX_RESOURCES_PER_POST, 20);
+
+        let mut empty = fetched_post("100", "SHORTCODE", "https://cdninstagram.com/video.mp4");
+        empty.resources.clear();
+        assert_eq!(
+            validate_fetched_posts(vec![empty], false).unwrap_err(),
+            "Fetched post must contain between 1 and 20 resources"
+        );
+
+        let mut maximum = fetched_post("100", "SHORTCODE", "https://cdninstagram.com/video.mp4");
+        maximum.resources = vec![maximum.resources[0].clone(); MAX_RESOURCES_PER_POST];
+        assert!(validate_fetched_posts(vec![maximum.clone()], false).is_ok());
+
+        maximum.resources.push(MediaResource {
+            url: "https://cdninstagram.com/extra.mp4".into(),
+            kind: MediaKind::Video,
+        });
+        assert_eq!(
+            validate_fetched_posts(vec![maximum], false).unwrap_err(),
+            "Fetched post must contain between 1 and 20 resources"
+        );
+    }
+
+    #[test]
+    fn fetched_batch_validation_rejects_unsafe_urls_without_leaking_details() {
+        let unsafe_post = fetched_post("100", "SHORTCODE", "http://127.0.0.1/private");
+        assert_eq!(
+            validate_fetched_posts(vec![unsafe_post], false).unwrap_err(),
+            "Fetched post contains an invalid media URL"
+        );
+    }
+
+    #[test]
+    fn fetched_batch_validation_validates_duplicates_before_deduplication() {
+        let valid = fetched_post("100", "FIRST", "https://cdninstagram.com/first.mp4");
+        let unsafe_duplicate = fetched_post("100", "DUPLICATE", "http://127.0.0.1/private");
+
+        assert_eq!(
+            validate_fetched_posts(vec![valid, unsafe_duplicate], false).unwrap_err(),
+            "Fetched post contains an invalid media URL"
+        );
     }
 
     #[test]

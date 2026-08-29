@@ -7,10 +7,24 @@ pub enum MediaKind {
     Video,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaResource {
     pub url: String,
     pub kind: MediaKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FetchedPostCategory {
+    Posts,
+    Reels,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FetchedPostScope {
+    Shown,
+    Selected,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -79,7 +93,7 @@ pub struct DirectItem {
     pub pk: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Post {
     pub pk: String,
     pub code: String,
