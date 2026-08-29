@@ -1,7 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import type { Post, ProfilePreview } from "../lib/ipc";
+import type { Post, ProfilePreview, StoryItem } from "../lib/ipc";
 import { useExplorerStore } from "./explorer";
 
 function post(pk: string, thumbnail = pk): Post {
@@ -27,6 +27,10 @@ function preview(username: string, pk: string, posts: Post[] = []): ProfilePrevi
   };
 }
 
+function story(pk: string): StoryItem {
+  return { pk, kind: "photo", media_url: `https://cdninstagram.com/${pk}.jpg` };
+}
+
 beforeEach(() => {
   setActivePinia(createPinia());
 });
@@ -40,6 +44,8 @@ describe("Explore session state", () => {
     first.commitProfile(preview("nike", "42"));
     first.activeTab = "reels";
     first.commitReelsPage("42", [post("r1")], null, "next");
+    first.toggleSelected("posts", "p1");
+    first.toggleSelected("stories", "s1");
 
     const remounted = useExplorerStore(pinia);
 
@@ -48,6 +54,61 @@ describe("Explore session state", () => {
     expect(remounted.activeTab).toBe("reels");
     expect(remounted.reels.map((item) => item.pk)).toEqual(["r1"]);
     expect(remounted.reelsCursor).toBe("next");
+    expect(remounted.isSelected("posts", "p1")).toBe(true);
+    expect(remounted.isSelected("stories", "s1")).toBe(true);
+  });
+
+  it("tracks selections independently per tab and clears only submitted IDs", () => {
+    const store = useExplorerStore();
+    store.toggleSelected("posts", "p1");
+    store.toggleSelected("posts", "p2");
+    store.toggleSelected("reels", "r1");
+    store.toggleSelected("stories", "s1");
+    store.toggleSelected("stories", "s2");
+
+    expect(store.isSelected("posts", "p1")).toBe(true);
+    expect(store.isSelected("reels", "p1")).toBe(false);
+    store.toggleSelected("posts", "p1");
+    expect(store.isSelected("posts", "p1")).toBe(false);
+
+    store.clearSubmitted("stories", ["s1"]);
+    expect(store.isSelected("stories", "s1")).toBe(false);
+    expect(store.isSelected("stories", "s2")).toBe(true);
+    expect(store.isSelected("posts", "p2")).toBe(true);
+    expect(store.isSelected("reels", "r1")).toBe(true);
+  });
+
+  it("keeps Stories state scoped to the current profile and rejects stale commits", () => {
+    const store = useExplorerStore();
+    store.commitProfile(preview("nike", "42"));
+    expect(store.commitStories("nike", [story("s1")])).toBe(true);
+    expect(store.stories).toEqual([story("s1")]);
+    expect(store.failStories("nike", "request failed")).toBe(true);
+    expect(store.stories).toEqual([story("s1")]);
+    expect(store.storiesError).toBe("request failed");
+
+    expect(store.commitStories("other", [story("stale")])).toBe(false);
+    expect(store.stories).toEqual([story("s1")]);
+    expect(store.storiesError).toBe("request failed");
+  });
+
+  it("prunes vanished Story selections and clears all transient state on profile load", () => {
+    const store = useExplorerStore();
+    store.commitProfile(preview("nike", "42"));
+    store.toggleSelected("stories", "s1");
+    store.toggleSelected("stories", "s2");
+    store.toggleSelected("posts", "p1");
+    store.commitStories("nike", [story("s1")]);
+    expect(store.isSelected("stories", "s1")).toBe(true);
+    expect(store.isSelected("stories", "s2")).toBe(false);
+    store.failStories("nike", "oops");
+
+    store.beginProfileLoad();
+
+    expect(store.stories).toBeNull();
+    expect(store.storiesError).toBeNull();
+    expect(store.isSelected("stories", "s1")).toBe(false);
+    expect(store.isSelected("posts", "p1")).toBe(false);
   });
 
   it("clears profile media atomically when a different profile starts loading", () => {

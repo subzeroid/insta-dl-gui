@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref } from "vue";
+import { reactive, ref, type Ref } from "vue";
 
 import type { Post, ProfilePreview, StoryItem } from "../lib/ipc";
 import { mergeUniquePosts } from "../lib/mediaPages";
@@ -14,6 +14,12 @@ export const useExplorerStore = defineStore("explorer", () => {
   const reelsCursor = ref<string | null>(null);
   const reelsLoaded = ref(false);
   const stories = ref<StoryItem[] | null>(null);
+  const storiesError: Ref<string | null> = ref(null);
+  const selected = reactive<Record<ExploreTab, string[]>>({
+    posts: [],
+    reels: [],
+    stories: [],
+  });
   const requestedReelsCursors = new Set<string>();
 
   function beginProfileLoad() {
@@ -23,6 +29,10 @@ export const useExplorerStore = defineStore("explorer", () => {
     reelsCursor.value = null;
     reelsLoaded.value = false;
     stories.value = null;
+    storiesError.value = null;
+    selected.posts = [];
+    selected.reels = [];
+    selected.stories = [];
     requestedReelsCursors.clear();
   }
 
@@ -61,6 +71,45 @@ export const useExplorerStore = defineStore("explorer", () => {
     return true;
   }
 
+  function toggleSelected(tab: ExploreTab, pk: string) {
+    const index = selected[tab].indexOf(pk);
+    if (index >= 0) {
+      selected[tab].splice(index, 1);
+    } else {
+      selected[tab].push(pk);
+    }
+  }
+
+  function isSelected(tab: ExploreTab, pk: string): boolean {
+    return selected[tab].includes(pk);
+  }
+
+  function clearSubmitted(tab: ExploreTab, submittedIds: readonly string[]) {
+    const submitted = new Set(submittedIds);
+    selected[tab] = selected[tab].filter((pk) => !submitted.has(pk));
+  }
+
+  function beginStoriesRequest(username: string): boolean {
+    if (profilePreview.value?.profile.username !== username) return false;
+    storiesError.value = null;
+    return true;
+  }
+
+  function commitStories(username: string, items: readonly StoryItem[]): boolean {
+    if (profilePreview.value?.profile.username !== username) return false;
+    stories.value = [...items];
+    storiesError.value = null;
+    const available = new Set(items.map((item) => item.pk));
+    selected.stories = selected.stories.filter((pk) => available.has(pk));
+    return true;
+  }
+
+  function failStories(username: string, message: string): boolean {
+    if (profilePreview.value?.profile.username !== username) return false;
+    storiesError.value = message;
+    return true;
+  }
+
   return {
     query,
     profilePreview,
@@ -69,9 +118,17 @@ export const useExplorerStore = defineStore("explorer", () => {
     reelsCursor,
     reelsLoaded,
     stories,
+    storiesError,
+    selected,
     beginProfileLoad,
     commitProfile,
     commitMorePosts,
     commitReelsPage,
+    toggleSelected,
+    isSelected,
+    clearSubmitted,
+    beginStoriesRequest,
+    commitStories,
+    failStories,
   };
 });
