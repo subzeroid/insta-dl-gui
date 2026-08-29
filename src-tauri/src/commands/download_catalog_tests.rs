@@ -803,6 +803,47 @@ async fn fetched_batch_final_recovered_resource_emits_terminal_monotonic_progres
     );
 }
 
+#[tokio::test]
+async fn standalone_post_all_failed_after_attempt_refactor_is_concrete_fatal() {
+    let server = MockServer::start().await;
+    Mock::given(path("/standalone-forbidden"))
+        .respond_with(ResponseTemplate::new(403))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let fixture = Fixture::new();
+    let cfg = Config {
+        token: None,
+        dest_dir: fixture.root.to_string_lossy().into_owned(),
+        sidecar: false,
+    };
+    let item = post(
+        "standalone-failed",
+        "STANDALONE-FAILED",
+        vec![resource(&server, "/standalone-forbidden", MediaKind::Photo)],
+    );
+
+    let result = run_single_post(
+        &fixture.http,
+        &fixture.catalog,
+        &fixture.root,
+        &cfg,
+        &NoopProgress,
+        &fixture.root.join("nested/profile"),
+        &item,
+        None,
+        true,
+    )
+    .await;
+
+    match result {
+        Err(JobFail::Fatal(error)) => assert!(error.contains("HTTP 403")),
+        Err(JobFail::Cancelled) => panic!("standalone post was unexpectedly cancelled"),
+        Ok(_) => panic!("an all-failed standalone post must be fatal"),
+    }
+    assert!(fixture.all_items().is_empty());
+}
+
 fn absolute(root: &Path, relative: &str) -> PathBuf {
     root.join(relative)
 }
