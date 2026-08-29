@@ -24,6 +24,7 @@ vi.mock("../lib/ipc", () => ({
 
 import ExplorerView from "./ExplorerView.vue";
 import type { MediaPage, ProfilePreview } from "../lib/ipc";
+import { useExplorerStore } from "../stores/explorer";
 import { useJobsStore } from "../stores/jobs";
 
 const preview = {
@@ -59,6 +60,10 @@ function videoPost(pk: string, thumbnail_url: string) {
     resources: [{ url: `${thumbnail_url}.mp4`, kind: "video" as const }],
     thumbnail_url,
   };
+}
+
+function story(pk: string, media_url: string) {
+  return { pk, kind: "photo" as const, media_url };
 }
 
 function deferred<T>() {
@@ -103,6 +108,7 @@ function button(wrapper: ReturnType<typeof render>, label: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  ipc.fetchStories.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -221,6 +227,89 @@ describe("ExplorerView async wiring", () => {
     expect(wrapper.text()).not.toContain("https://cdninstagram.com/feed.jpg");
   });
 
+  it("auto-loads stories without blocking a public profile or its posts", async () => {
+    const pending = deferred<ReturnType<typeof story>[]>();
+    ipc.fetchStories.mockReturnValue(pending.promise);
+    const wrapper = render();
+    await loadProfile(wrapper, {
+      ...preview,
+      recent_posts: [videoPost("feed", "https://cdninstagram.com/feed.jpg")],
+    });
+
+    expect(ipc.fetchStories).toHaveBeenCalledTimes(1);
+    expect(ipc.fetchStories).toHaveBeenCalledWith("nike");
+    expect(wrapper.text()).toContain("Nike");
+    expect(wrapper.text()).not.toContain("Loading profile");
+    expect(wrapper.get("button.aspect-square img").attributes("src")).toBe(
+      "https://cdninstagram.com/feed.jpg",
+    );
+    await wrapper.get("button.aspect-square").trigger("click");
+    expect(wrapper.find("post-modal-stub").exists()).toBe(true);
+
+    await button(wrapper, "Stories").trigger("click");
+    expect(wrapper.text()).toContain("Loading stories…");
+    expect(wrapper.text()).not.toContain("Load stories · costs 2 requests");
+
+    pending.resolve([story("s1", "https://cdninstagram.com/story.jpg")]);
+    await flushPromises();
+    expect(wrapper.find("img[src='https://cdninstagram.com/story.jpg']").exists()).toBe(true);
+  });
+
+  it("isolates an automatic stories failure and retries only on request", async () => {
+    const retry = deferred<ReturnType<typeof story>[]>();
+    ipc.fetchStories
+      .mockRejectedValueOnce(new Error("stories unavailable"))
+      .mockReturnValueOnce(retry.promise);
+    const wrapper = render();
+    await loadProfile(wrapper, {
+      ...preview,
+      recent_posts: [videoPost("feed", "https://cdninstagram.com/feed.jpg")],
+    });
+
+    expect(wrapper.text()).toContain("Nike");
+    expect(wrapper.get("button.aspect-square img").attributes("src")).toBe(
+      "https://cdninstagram.com/feed.jpg",
+    );
+    expect(wrapper.text()).not.toContain("stories unavailable");
+    expect(ipc.fetchStories).toHaveBeenCalledTimes(1);
+    await flushPromises();
+    expect(ipc.fetchStories).toHaveBeenCalledTimes(1);
+
+    await button(wrapper, "Stories").trigger("click");
+    expect(wrapper.text()).toContain("stories unavailable");
+    await button(wrapper, "Retry stories").trigger("click");
+    expect(ipc.fetchStories).toHaveBeenCalledTimes(2);
+    expect(ipc.fetchProfile).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).not.toContain("stories unavailable");
+    expect(wrapper.text()).toContain("Loading stories…");
+
+    retry.resolve([]);
+    await flushPromises();
+    expect(wrapper.text()).toContain("No active stories.");
+  });
+
+  it("keeps an existing stories snapshot visible while retrying", async () => {
+    ipc.fetchStories.mockResolvedValueOnce([
+      story("s1", "https://cdninstagram.com/existing-story.jpg"),
+    ]);
+    const wrapper = render();
+    await loadProfile(wrapper);
+    useExplorerStore().failStories("nike", "stories unavailable");
+    await flushPromises();
+    await button(wrapper, "Stories").trigger("click");
+
+    const retry = deferred<ReturnType<typeof story>[]>();
+    ipc.fetchStories.mockReturnValueOnce(retry.promise);
+    await button(wrapper, "Retry stories").trigger("click");
+
+    expect(wrapper.text()).not.toContain("stories unavailable");
+    expect(wrapper.find("img[src='https://cdninstagram.com/existing-story.jpg']").exists()).toBe(true);
+    retry.resolve([story("s2", "https://cdninstagram.com/retried-story.jpg")]);
+    await flushPromises();
+    expect(wrapper.find("img[src='https://cdninstagram.com/existing-story.jpg']").exists()).toBe(false);
+    expect(wrapper.find("img[src='https://cdninstagram.com/retried-story.jpg']").exists()).toBe(true);
+  });
+
   it("loads more clips without duplicates and downloads only those shown", async () => {
     ipc.fetchReels
       .mockResolvedValueOnce({
@@ -287,23 +376,73 @@ describe("ExplorerView async wiring", () => {
     expect(wrapper.findAll("button").some((item) => item.text() === "Load more")).toBe(false);
   });
 
-  it("does not show the stories download action on an empty Reels tab", async () => {
+  it("shows loaded stories only on Stories and never leaks them into empty Reels", async () => {
     ipc.fetchStories.mockResolvedValue([
-      { pk: "s1", kind: "photo", media_url: "https://cdninstagram.com/story.jpg" },
+      story("s1", "https://cdninstagram.com/story.jpg"),
     ]);
     ipc.fetchReels.mockResolvedValue({ posts: [], end_cursor: null });
     const wrapper = render();
     await loadProfile(wrapper);
 
     await button(wrapper, "Stories").trigger("click");
-    await button(wrapper, "Load stories · costs 2 requests").trigger("click");
-    await flushPromises();
     expect(wrapper.text()).toContain("Download all stories");
+    expect(wrapper.find("img[src='https://cdninstagram.com/story.jpg']").exists()).toBe(true);
 
     await button(wrapper, "Reels").trigger("click");
     await flushPromises();
 
     expect(wrapper.text()).not.toContain("Download all stories");
+    expect(wrapper.find("img[src='https://cdninstagram.com/story.jpg']").exists()).toBe(false);
+    expect(wrapper.text()).toContain("No reels yet.");
+  });
+
+  it("does not request stories for a private profile", async () => {
+    const wrapper = render();
+    await loadProfile(wrapper, {
+      ...preview,
+      profile: { ...preview.profile, is_private: true },
+    });
+
+    expect(ipc.fetchStories).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("Private profile — only the avatar is accessible");
+  });
+
+  it("rejects a stale stories response after another profile resolves", async () => {
+    const nikeStories = deferred<ReturnType<typeof story>[]>();
+    ipc.fetchStories
+      .mockReturnValueOnce(nikeStories.promise)
+      .mockResolvedValueOnce([story("adidas", "https://cdninstagram.com/adidas-story.jpg")]);
+    const wrapper = render();
+    await loadProfile(wrapper);
+    await loadProfile(wrapper, adidasPreview);
+    await button(wrapper, "Stories").trigger("click");
+
+    expect(wrapper.find("img[src='https://cdninstagram.com/adidas-story.jpg']").exists()).toBe(true);
+    nikeStories.resolve([story("nike", "https://cdninstagram.com/nike-story.jpg")]);
+    await flushPromises();
+
+    expect(wrapper.find("img[src='https://cdninstagram.com/nike-story.jpg']").exists()).toBe(false);
+    expect(wrapper.find("img[src='https://cdninstagram.com/adidas-story.jpg']").exists()).toBe(true);
+  });
+
+  it("uses the stories request generation when the same profile is loaded again", async () => {
+    const firstNikeStories = deferred<ReturnType<typeof story>[]>();
+    ipc.fetchStories
+      .mockReturnValueOnce(firstNikeStories.promise)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([story("fresh", "https://cdninstagram.com/fresh-story.jpg")]);
+    const wrapper = render();
+    await loadProfile(wrapper);
+    await loadProfile(wrapper, adidasPreview);
+    await loadProfile(wrapper);
+    await button(wrapper, "Stories").trigger("click");
+
+    expect(wrapper.find("img[src='https://cdninstagram.com/fresh-story.jpg']").exists()).toBe(true);
+    firstNikeStories.resolve([story("stale", "https://cdninstagram.com/stale-story.jpg")]);
+    await flushPromises();
+
+    expect(wrapper.find("img[src='https://cdninstagram.com/stale-story.jpg']").exists()).toBe(false);
+    expect(wrapper.find("img[src='https://cdninstagram.com/fresh-story.jpg']").exists()).toBe(true);
   });
 
   it("retains the selected profile, Reels tab, and page after remount", async () => {
@@ -326,6 +465,59 @@ describe("ExplorerView async wiring", () => {
     expect(second.findAll("button.aspect-square img")).toHaveLength(1);
     expect(ipc.fetchProfile).toHaveBeenCalledTimes(1);
     expect(ipc.fetchReels).toHaveBeenCalledTimes(1);
+  });
+
+  it("auto-loads unresolved stories once when a public profile remounts", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    useExplorerStore().commitProfile(preview);
+
+    const wrapper = render(pinia);
+    await flushPromises();
+
+    expect(ipc.fetchStories).toHaveBeenCalledTimes(1);
+    expect(ipc.fetchStories).toHaveBeenCalledWith("nike");
+    wrapper.unmount();
+  });
+
+  it("does not duplicate stories fetching on remount after data or an error resolves", async () => {
+    const resolvedPinia = createPinia();
+    setActivePinia(resolvedPinia);
+    const resolvedStore = useExplorerStore();
+    resolvedStore.commitProfile(preview);
+    resolvedStore.commitStories("nike", [story("s1", "https://cdninstagram.com/story.jpg")]);
+    const resolved = render(resolvedPinia);
+    await flushPromises();
+    expect(ipc.fetchStories).not.toHaveBeenCalled();
+    resolved.unmount();
+
+    const failedPinia = createPinia();
+    setActivePinia(failedPinia);
+    const failedStore = useExplorerStore();
+    failedStore.commitProfile(preview);
+    failedStore.failStories("nike", "stories unavailable");
+    const failed = render(failedPinia);
+    await flushPromises();
+    expect(ipc.fetchStories).not.toHaveBeenCalled();
+    expect(failed.text()).not.toContain("stories unavailable");
+    await button(failed, "Stories").trigger("click");
+    expect(failed.text()).toContain("stories unavailable");
+  });
+
+  it("invalidates a pending stories response when the view unmounts", async () => {
+    const pending = deferred<ReturnType<typeof story>[]>();
+    ipc.fetchStories.mockReturnValue(pending.promise);
+    const pinia = createPinia();
+    const wrapper = render(pinia);
+    await loadProfile(wrapper);
+    const store = useExplorerStore();
+
+    wrapper.unmount();
+    pending.resolve([story("stale", "https://cdninstagram.com/stale-story.jpg")]);
+    await flushPromises();
+
+    expect(store.stories).toBeNull();
+    expect(store.storiesError).toBeNull();
   });
 
   it("allows retry after the first clips page fails", async () => {

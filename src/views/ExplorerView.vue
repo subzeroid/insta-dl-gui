@@ -29,6 +29,7 @@ const {
   reelsCursor,
   reelsLoaded,
   stories,
+  storiesError,
 } = storeToRefs(explorer);
 
 const suggestions = ref<SearchUser[]>([]);
@@ -177,6 +178,9 @@ async function loadProfile(username: string) {
     const result = await fetchProfile(username, null);
     if (!requests.profile.isCurrent(seq)) return;
     explorer.commitProfile(result);
+    if (!result.profile.is_private) {
+      void loadStories();
+    }
   } catch (e) {
     if (!requests.profile.isCurrent(seq)) return;
     error.value = String(e);
@@ -312,14 +316,14 @@ async function loadStories() {
   if (!username || storiesLoading.value) return;
   const seq = requests.stories.begin();
   storiesLoading.value = true;
-  error.value = null;
+  explorer.beginStoriesRequest(username);
   try {
     const items = await fetchStories(username);
     if (!requests.stories.isCurrent(seq) || preview.value?.profile.username !== username) return;
-    stories.value = items;
+    explorer.commitStories(username, items);
   } catch (e) {
     if (!requests.stories.isCurrent(seq) || preview.value?.profile.username !== username) return;
-    error.value = String(e);
+    explorer.failStories(username, String(e));
   } finally {
     if (requests.stories.isCurrent(seq) && preview.value?.profile.username === username) {
       storiesLoading.value = false;
@@ -351,12 +355,20 @@ function closeModal() {
 }
 
 onMounted(() => {
-  if (activeTab.value === "reels" && preview.value && !reelsLoaded.value) {
-    void loadReels(null);
-  } else if (
-    !preview.value &&
-    new URLSearchParams(window.location.search).get("demo") === "explore"
-  ) {
+  if (preview.value) {
+    if (
+      !preview.value.profile.is_private &&
+      stories.value === null &&
+      storiesError.value === null
+    ) {
+      void loadStories();
+    }
+    if (activeTab.value === "reels" && !reelsLoaded.value) {
+      void loadReels(null);
+    }
+    return;
+  }
+  if (new URLSearchParams(window.location.search).get("demo") === "explore") {
     query.value = "@natgeo";
     void loadProfile("natgeo");
   }
@@ -583,12 +595,27 @@ onUnmounted(() => {
 
         <!-- Stories -->
         <div v-else class="space-y-3">
-          <div v-if="stories === null" class="flex justify-center py-12">
-            <button class="btn-secondary" :disabled="storiesLoading" @click="loadStories">
-              {{ storiesLoading ? "Loading…" : "Load stories · costs 2 requests" }}
+          <div
+            v-if="storiesError"
+            class="card flex items-center justify-between gap-3 px-3 py-2 text-sm"
+          >
+            <span class="text-err">{{ storiesError }}</span>
+            <button
+              type="button"
+              class="btn-secondary shrink-0"
+              :disabled="storiesLoading"
+              @click="loadStories"
+            >
+              Retry stories
             </button>
           </div>
-          <div v-else-if="stories.length > 0" class="flex gap-3 overflow-x-auto py-1">
+          <div
+            v-if="stories === null && !storiesError"
+            class="animate-pulse py-12 text-center text-sm text-slate-500"
+          >
+            Loading stories…
+          </div>
+          <div v-else-if="stories && stories.length > 0" class="flex gap-3 overflow-x-auto py-1">
             <button
               v-for="s in stories"
               :key="s.pk"
@@ -605,7 +632,10 @@ onUnmounted(() => {
               <span v-else class="block h-20 w-20 rounded-full bg-gradient-to-br from-surface-2 to-surface-3"></span>
             </button>
           </div>
-          <div v-else class="card flex items-center justify-center p-12 text-sm text-slate-500">
+          <div
+            v-else-if="stories"
+            class="card flex items-center justify-center p-12 text-sm text-slate-500"
+          >
             No active stories.
           </div>
         </div>
