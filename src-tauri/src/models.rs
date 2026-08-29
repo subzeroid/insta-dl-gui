@@ -15,14 +15,16 @@ pub struct MediaResource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum FetchedPostCategory {
+#[allow(dead_code)]
+pub(crate) enum FetchedPostCategory {
     Posts,
     Reels,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum FetchedPostScope {
+#[allow(dead_code)]
+pub(crate) enum FetchedPostScope {
     Shown,
     Selected,
 }
