@@ -1249,10 +1249,16 @@ async fn run_profile_job(
             if is_cancelled() {
                 return Err(JobFail::Cancelled);
             }
-            let page = match client
-                .user_medias_chunk(&profile.pk, cursor.as_deref())
-                .await
-            {
+            let page_result = if reels_only {
+                client
+                    .user_clips_chunk(&profile.pk, cursor.as_deref())
+                    .await
+            } else {
+                client
+                    .user_medias_chunk(&profile.pk, cursor.as_deref())
+                    .await
+            };
+            let page = match page_result {
                 Ok(page) => page,
                 Err(error) => {
                     return finish_completed_job(
@@ -1270,14 +1276,6 @@ async fn run_profile_job(
                     }
                 }
                 considered += 1;
-                if reels_only
-                    && !post
-                        .resources
-                        .iter()
-                        .any(|r| r.kind == crate::models::MediaKind::Video)
-                {
-                    continue;
-                }
                 let base = taken_at_name(post.taken_at, &post.code);
                 let item_metadata = post_catalog_metadata(post);
                 let total = post.resources.len();
@@ -1376,10 +1374,11 @@ async fn run_profile_job(
                     }
                 }
             }
-            cursor = page.end_cursor;
-            if cursor.is_none() {
+            let next_cursor = page.end_cursor;
+            if next_cursor.is_none() || next_cursor == cursor {
                 break;
             }
+            cursor = next_cursor;
             if let Some(max) = opts.max_posts {
                 if considered >= max {
                     break;
