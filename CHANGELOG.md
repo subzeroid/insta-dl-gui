@@ -2,6 +2,23 @@
 
 All notable changes to insta-dl-gui are documented in this file.
 
+## 0.3.2 - 2026-08-29
+
+### Added
+
+- Explore now loads Reels from HikerAPI's dedicated clips endpoint, one cursor-paged API response at a time.
+- Reels can be extended explicitly with **Load more** and downloaded with a count that matches the unique items shown.
+
+### Changed
+
+- Explore keeps the selected profile, tab, and loaded pages while navigating between app sections.
+
+### Fixed
+
+- Fixed Reels payloads with an empty `resources` array so their top-level video previews and downloads remain available.
+- Fixed duplicate Reels and cyclic cursors from consuming the visible download limit or causing extra archive requests.
+- Fixed the Stories download action appearing on an empty Reels tab.
+
 ## 0.3.1 - 2026-08-29
 
 ### Fixed
