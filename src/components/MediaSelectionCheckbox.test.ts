@@ -67,17 +67,19 @@ describe("MediaSelectionCheckbox", () => {
         </article>
       `,
     });
-    const wrapper = mount(ParentCard);
+    const wrapper = mount(ParentCard, { attachTo: document.body });
     const input = wrapper.get('input[type="checkbox"]');
 
     expect((input.element as HTMLInputElement).checked).toBe(false);
     expect(wrapper.text()).not.toContain("✓");
 
-    await input.setValue(true);
+    await wrapper.get("label").trigger("click");
 
     expect(wrapper.get('[data-testid="toggles"]').text()).toBe("1");
     expect(wrapper.get('[data-testid="clicks"]').text()).toBe("0");
     expect((input.element as HTMLInputElement).checked).toBe(true);
     expect(wrapper.text()).toContain("✓");
+
+    wrapper.unmount();
   });
 });
