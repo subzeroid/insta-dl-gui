@@ -21,6 +21,7 @@ async fn clips_chunk_maps_posts_and_cursor() {
                 "code": "REEL1",
                 "media_type": 2,
                 "taken_at": 1_776_000_000,
+                "resources": [],
                 "video_versions": [{
                     "url": "https://cdninstagram.com/r1.mp4",
                     "width": 720
@@ -49,6 +50,11 @@ async fn clips_chunk_maps_posts_and_cursor() {
             .map(|post| post.pk.as_str())
             .collect::<Vec<_>>(),
         ["r1"]
+    );
+    assert_eq!(page.posts[0].resources.len(), 1);
+    assert_eq!(
+        page.posts[0].resources[0].kind,
+        insta_dl_gui_lib::models::MediaKind::Video
     );
     assert_eq!(page.end_cursor.as_deref(), Some("after"));
 }

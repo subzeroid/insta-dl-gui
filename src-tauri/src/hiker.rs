@@ -405,7 +405,13 @@ pub fn map_post(media: &serde_json::Value) -> Option<crate::models::Post> {
     let carousel = media
         .get("carousel_media")
         .and_then(|v| v.as_array())
-        .or_else(|| media.get("resources").and_then(|v| v.as_array()));
+        .filter(|items| !items.is_empty())
+        .or_else(|| {
+            media
+                .get("resources")
+                .and_then(|v| v.as_array())
+                .filter(|items| !items.is_empty())
+        });
     match carousel {
         Some(items) => {
             for item in items {
