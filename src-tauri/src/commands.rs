@@ -1016,19 +1016,12 @@ pub async fn fetch_reels(
 }
 
 /// Active stories of a profile for the Explorer grid (billed 2 requests).
-#[tauri::command]
-pub async fn fetch_stories(
-    username: String,
-    state: State<'_, AppState>,
+async fn fetch_story_items(
+    client: &crate::hiker::HikerClient,
+    user_id: &str,
 ) -> Result<Vec<StoryItem>, String> {
-    let client = client(&state).await?;
-    let user = client
-        .user_by_username(&username)
-        .await
-        .map_err(|e| e.to_string())?;
-    let profile = map_profile(&user).ok_or("Could not parse profile payload")?;
     let items = client
-        .user_stories(&profile.pk)
+        .user_stories(user_id)
         .await
         .map_err(|e| e.to_string())?;
     Ok(items
@@ -1063,6 +1056,15 @@ pub async fn fetch_stories(
             })
         })
         .collect())
+}
+
+#[tauri::command]
+pub async fn fetch_stories(
+    user_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<StoryItem>, String> {
+    let client = client(&state).await?;
+    fetch_story_items(&client, &user_id).await
 }
 
 /// Download already-fetched resources (e.g. a single story) without
@@ -2248,6 +2250,42 @@ mod download_catalog_tests;
 mod tests {
     use super::*;
     use crate::models::{FetchedPostCategory, FetchedPostScope, MediaKind, MediaResource};
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn fetch_story_items_uses_profile_id_without_username_lookup() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v2/user/stories"))
+            .and(query_param("user_id", "42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "reel": {
+                    "items": [{
+                        "pk": "100",
+                        "taken_at": 1_700_000_000,
+                        "image_versions2": {
+                            "candidates": [{
+                                "url": "https://cdninstagram.com/story.jpg",
+                                "width": 1080
+                            }]
+                        }
+                    }]
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = crate::hiker::HikerClient::with_base_url("token".into(), server.uri());
+
+        let items = fetch_story_items(&client, "42").await.unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].pk, "100");
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url.path(), "/v2/user/stories");
+    }
 
     fn direct_item(pk: &str) -> DirectItem {
         DirectItem {

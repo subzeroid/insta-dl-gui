@@ -661,7 +661,7 @@ describe("ExplorerView async wiring", () => {
     });
 
     expect(ipc.fetchStories).toHaveBeenCalledTimes(1);
-    expect(ipc.fetchStories).toHaveBeenCalledWith("nike");
+    expect(ipc.fetchStories).toHaveBeenCalledWith("42");
     expect(wrapper.text()).toContain("Nike");
     expect(wrapper.text()).not.toContain("Loading profile");
     expect(wrapper.get("[data-media-id] img").attributes("src")).toBe(
@@ -1217,7 +1217,7 @@ describe("ExplorerView async wiring", () => {
     await flushPromises();
 
     expect(ipc.fetchStories).toHaveBeenCalledTimes(1);
-    expect(ipc.fetchStories).toHaveBeenCalledWith("nike");
+    expect(ipc.fetchStories).toHaveBeenCalledWith("42");
     wrapper.unmount();
   });
 

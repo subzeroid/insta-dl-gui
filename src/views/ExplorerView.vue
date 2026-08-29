@@ -447,12 +447,13 @@ async function downloadAvatar() {
 }
 
 async function loadStories() {
-  const username = preview.value?.profile.username;
-  if (!username) return;
+  const profile = preview.value?.profile;
+  if (!profile) return;
+  const { pk: userId, username } = profile;
   const token = explorer.beginStoriesRequest(username);
   if (token === null) return;
   try {
-    const items = await fetchStories(username);
+    const items = await fetchStories(userId);
     explorer.commitStories(username, token, items);
   } catch (e) {
     explorer.failStories(username, token, String(e));

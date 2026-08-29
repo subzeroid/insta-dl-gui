@@ -295,8 +295,8 @@ export async function searchUsers(query: string): Promise<SearchUser[]> {
   return invoke("search_users", { query });
 }
 
-export async function fetchStories(username: string): Promise<StoryItem[]> {
-  return invoke("fetch_stories", { username });
+export async function fetchStories(userId: string): Promise<StoryItem[]> {
+  return invoke("fetch_stories", { userId });
 }
 
 export async function downloadDirect(
