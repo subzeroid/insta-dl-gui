@@ -20,6 +20,7 @@ export interface JobView {
 
 export const useJobsStore = defineStore("jobs", () => {
   const jobs = reactive(new Map<string, JobView>());
+  const conflictReservations = reactive(new Map<symbol, string[]>());
   let started = false;
 
   function apply(p: JobProgress) {
@@ -92,6 +93,17 @@ export const useJobsStore = defineStore("jobs", () => {
     }
   }
 
+  function transferConflictReservation(
+    token: symbol,
+    id: string,
+    label: string,
+    conflictKeys: readonly string[] = [],
+  ) {
+    const reservedKeys = conflictReservations.get(token) ?? [];
+    addPlaceholder(id, label, [...reservedKeys, ...conflictKeys]);
+    conflictReservations.delete(token);
+  }
+
   function hasActiveConflict(conflictKeys: readonly string[]): boolean {
     if (conflictKeys.length === 0) return false;
     const requested = new Set(conflictKeys);
@@ -103,7 +115,22 @@ export const useJobsStore = defineStore("jobs", () => {
         return true;
       }
     }
+    for (const reservedKeys of conflictReservations.values()) {
+      if (reservedKeys.some((key) => requested.has(key))) return true;
+    }
     return false;
+  }
+
+  function reserveConflictKeys(token: symbol, conflictKeys: readonly string[]): boolean {
+    if (conflictReservations.has(token)) return false;
+    const normalizedKeys = [...new Set(conflictKeys)];
+    if (hasActiveConflict(normalizedKeys)) return false;
+    conflictReservations.set(token, normalizedKeys);
+    return true;
+  }
+
+  function releaseConflictKeys(token: symbol) {
+    conflictReservations.delete(token);
   }
 
   async function cancel(id: string) {
@@ -118,5 +145,15 @@ export const useJobsStore = defineStore("jobs", () => {
     }
   }
 
-  return { jobs, init, addPlaceholder, hasActiveConflict, cancel, clearFinished };
+  return {
+    jobs,
+    init,
+    addPlaceholder,
+    transferConflictReservation,
+    hasActiveConflict,
+    reserveConflictKeys,
+    releaseConflictKeys,
+    cancel,
+    clearFinished,
+  };
 });

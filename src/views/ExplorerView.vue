@@ -54,7 +54,6 @@ const modalStory = ref<StoryItem | null>(null);
 
 const requests = createExplorerRequestState();
 const activeActions = reactive(new Set<string>());
-const activeDownloadConflicts = reactive(new Set<string>());
 let profileSession = Symbol("explorer-profile-session");
 const MAX_EXACT_SNAPSHOT_ITEMS = 500;
 
@@ -96,7 +95,6 @@ const activeGroupBusy = computed(() => {
   if (!username) return false;
   const conflicts = downloadConflictKeys(username, activeTab.value, "all");
   return (
-    conflicts.some((key) => activeDownloadConflicts.has(key)) ||
     jobs.hasActiveConflict(conflicts) ||
     (activeTab.value === "stories" && storiesLoading.value)
   );
@@ -275,19 +273,15 @@ function downloadConflictKeys(username: string, tab: ExploreTab, scope: "all" | 
 async function runWithDownloadConflicts<T>(
   conflictKeys: readonly string[],
   blockedByKeys: readonly string[],
-  action: () => Promise<T>,
+  action: (reservationToken: symbol) => Promise<T>,
 ): Promise<T | undefined> {
-  if (
-    blockedByKeys.some((key) => activeDownloadConflicts.has(key)) ||
-    jobs.hasActiveConflict(blockedByKeys)
-  ) {
-    return undefined;
-  }
-  for (const key of conflictKeys) activeDownloadConflicts.add(key);
+  if (jobs.hasActiveConflict(blockedByKeys)) return undefined;
+  const reservationToken = Symbol("explore-download-enqueue");
+  if (!jobs.reserveConflictKeys(reservationToken, conflictKeys)) return undefined;
   try {
-    return await action();
+    return await action(reservationToken);
   } finally {
-    for (const key of conflictKeys) activeDownloadConflicts.delete(key);
+    jobs.releaseConflictKeys(reservationToken);
   }
 }
 
@@ -306,7 +300,7 @@ async function downloadAll() {
   if (tab === "stories" && storiesLoading.value) return;
   const session = profileSession;
   const conflictKeys = downloadConflictKeys(profile.username, tab, "all");
-  await runWithDownloadConflicts(conflictKeys, conflictKeys, async () => {
+  await runWithDownloadConflicts(conflictKeys, conflictKeys, async (reservationToken) => {
     error.value = null;
     try {
       const id = await enqueueProfileDownload(profile.username, {
@@ -317,7 +311,12 @@ async function downloadAll() {
         avatar: false,
         max_posts: null,
       });
-      jobs.addPlaceholder(id, `@${profile.username} ${tab} · all`, conflictKeys);
+      jobs.transferConflictReservation(
+        reservationToken,
+        id,
+        `@${profile.username} ${tab} · all`,
+        conflictKeys,
+      );
     } catch (e) {
       if (isCurrentProfileSession(session, profile.username, profile.pk)) {
         error.value = String(e);
@@ -359,43 +358,48 @@ async function downloadSnapshot(scope: "shown" | "selected") {
 
   const conflictKeys = downloadConflictKeys(profile.username, tab, "snapshot");
   const groupConflictKeys = downloadConflictKeys(profile.username, tab, "all");
-  await runWithDownloadConflicts(conflictKeys, groupConflictKeys, async () => {
-    error.value = null;
-    try {
-      const id =
-        tab === "stories"
-          ? await downloadDirect(
-              profile.username,
-              "stories",
-              storySnapshot.map((item) => ({
-                url: item.media_url,
-                pk: item.pk,
-                taken_at: item.taken_at,
-              })),
-            )
-          : await enqueueFetchedPostDownload(
-              profile.username,
-              tab,
-              scope,
-              postSnapshot,
-            );
-      jobs.addPlaceholder(
-        id,
-        `@${profile.username} ${tab} · ${scope} · ${submittedIds.length}`,
-        conflictKeys,
-      );
-      if (
-        scope === "selected" &&
-        isCurrentProfileSession(session, profile.username, profile.pk)
-      ) {
-        explorer.clearSubmitted(tab, submittedSelections);
+  await runWithDownloadConflicts(
+    conflictKeys,
+    groupConflictKeys,
+    async (reservationToken) => {
+      error.value = null;
+      try {
+        const id =
+          tab === "stories"
+            ? await downloadDirect(
+                profile.username,
+                "stories",
+                storySnapshot.map((item) => ({
+                  url: item.media_url,
+                  pk: item.pk,
+                  taken_at: item.taken_at,
+                })),
+              )
+            : await enqueueFetchedPostDownload(
+                profile.username,
+                tab,
+                scope,
+                postSnapshot,
+              );
+        jobs.transferConflictReservation(
+          reservationToken,
+          id,
+          `@${profile.username} ${tab} · ${scope} · ${submittedIds.length}`,
+          conflictKeys,
+        );
+        if (
+          scope === "selected" &&
+          isCurrentProfileSession(session, profile.username, profile.pk)
+        ) {
+          explorer.clearSubmitted(tab, submittedSelections);
+        }
+      } catch (e) {
+        if (isCurrentProfileSession(session, profile.username, profile.pk)) {
+          error.value = String(e);
+        }
       }
-    } catch (e) {
-      if (isCurrentProfileSession(session, profile.username, profile.pk)) {
-        error.value = String(e);
-      }
-    }
-  });
+    },
+  );
 }
 
 async function loadReels(cursor: string | null) {

@@ -78,6 +78,69 @@ describe("jobs warning state", () => {
 });
 
 describe("jobs conflict metadata", () => {
+  it("reserves pending conflicts atomically and releases them by token", () => {
+    const store = useJobsStore();
+    const first = Symbol("first enqueue");
+    const conflicting = Symbol("conflicting enqueue");
+    const unrelated = Symbol("unrelated enqueue");
+
+    expect(store.reserveConflictKeys(first, ["folder:nike:posts", "folder:nike:posts"])).toBe(true);
+    expect(store.hasActiveConflict(["folder:nike:posts"])).toBe(true);
+    expect(store.reserveConflictKeys(conflicting, ["folder:nike:posts"])).toBe(false);
+    expect(store.reserveConflictKeys(unrelated, ["folder:nike:stories"])).toBe(true);
+
+    store.releaseConflictKeys(first);
+    expect(store.hasActiveConflict(["folder:nike:posts"])).toBe(false);
+    expect(store.hasActiveConflict(["folder:nike:stories"])).toBe(true);
+    store.releaseConflictKeys(unrelated);
+    expect(store.hasActiveConflict(["folder:nike:stories"])).toBe(false);
+  });
+
+  it("transfers a pending reservation into active job metadata without a gap", () => {
+    const store = useJobsStore();
+    const token = Symbol("accepted enqueue");
+    expect(store.reserveConflictKeys(token, ["folder:nike:posts"])).toBe(true);
+
+    store.transferConflictReservation(
+      token,
+      "accepted",
+      "Explore posts",
+      ["folder:nike:posts"],
+    );
+
+    expect(store.jobs.get("accepted")?.conflictKeys).toEqual(["folder:nike:posts"]);
+    expect(store.hasActiveConflict(["folder:nike:posts"])).toBe(true);
+    store.jobs.get("accepted")!.state = "failed";
+    expect(store.hasActiveConflict(["folder:nike:posts"])).toBe(false);
+  });
+
+  it("releases a reservation when transfer finds an early terminal backend event", async () => {
+    const store = useJobsStore();
+    await store.init();
+    const token = Symbol("early terminal enqueue");
+    expect(store.reserveConflictKeys(token, ["profile:nike", "folder:nike:posts"])).toBe(true);
+    ipc.listener?.({
+      job_id: "early-reserved",
+      state: "done",
+      label: "Backend label",
+      count: 1,
+    });
+
+    store.transferConflictReservation(
+      token,
+      "early-reserved",
+      "Placeholder label",
+      ["profile:nike", "folder:nike:posts"],
+    );
+
+    expect(store.jobs.get("early-reserved")).toMatchObject({
+      state: "done",
+      label: "Backend label",
+      conflictKeys: ["profile:nike", "folder:nike:posts"],
+    });
+    expect(store.hasActiveConflict(["profile:nike", "folder:nike:posts"])).toBe(false);
+  });
+
   it("reports active conflicts and releases them only on terminal progress", async () => {
     const store = useJobsStore();
     await store.init();

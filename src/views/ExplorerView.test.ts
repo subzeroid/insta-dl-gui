@@ -374,6 +374,64 @@ describe("ExplorerView async wiring", () => {
     expect(button(second, "Shown 1").attributes("disabled")).toBeUndefined();
   });
 
+  it("retains a pending enqueue reservation across remount and transfers it to the accepted job", async () => {
+    const pinia = createPinia();
+    const pending = deferred<string>();
+    ipc.enqueueFetchedPostDownload.mockReturnValue(pending.promise);
+    const first = render(pinia);
+    await loadProfile(first, {
+      ...preview,
+      recent_posts: [videoPost("p1", "https://cdninstagram.com/post.jpg")],
+    });
+    await button(first, "Shown 1").trigger("click");
+    expect(ipc.enqueueFetchedPostDownload).toHaveBeenCalledTimes(1);
+    first.unmount();
+
+    const second = render(pinia);
+    await flushPromises();
+    expect(downloadButtons(second).every((item) => item.attributes("disabled") !== undefined)).toBe(true);
+    second.getComponent(DownloadScopeGroup).vm.$emit("download-shown");
+    await flushPromises();
+    expect(ipc.enqueueFetchedPostDownload).toHaveBeenCalledTimes(1);
+
+    pending.resolve("job-pending-remount");
+    await flushPromises();
+    expect(useJobsStore().jobs.get("job-pending-remount")?.conflictKeys).toEqual([
+      "folder:nike:posts",
+    ]);
+    expect(downloadButtons(second).every((item) => item.attributes("disabled") !== undefined)).toBe(true);
+
+    finishJob("job-pending-remount");
+    await flushPromises();
+    expect(button(second, "Shown 1").attributes("disabled")).toBeUndefined();
+  });
+
+  it("releases a remounted pending reservation after enqueue failure and allows retry", async () => {
+    const pinia = createPinia();
+    const pending = deferred<string>();
+    ipc.enqueueFetchedPostDownload
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValueOnce("job-after-error");
+    const first = render(pinia);
+    await loadProfile(first, {
+      ...preview,
+      recent_posts: [videoPost("p1", "https://cdninstagram.com/post.jpg")],
+    });
+    await button(first, "Shown 1").trigger("click");
+    first.unmount();
+
+    const second = render(pinia);
+    await flushPromises();
+    expect(button(second, "Shown 1").attributes("disabled")).toBeDefined();
+    pending.reject(new Error("enqueue failed"));
+    await flushPromises();
+
+    expect(button(second, "Shown 1").attributes("disabled")).toBeUndefined();
+    await button(second, "Shown 1").trigger("click");
+    await flushPromises();
+    expect(ipc.enqueueFetchedPostDownload).toHaveBeenCalledTimes(2);
+  });
+
   it("maps All to an unlimited archive request for the active tab", async () => {
     ipc.enqueueProfileDownload
       .mockResolvedValueOnce("job-all-posts")
