@@ -1717,6 +1717,10 @@ pub async fn download_post(
 struct CompletedPostDownload {
     outcome: JobOutcome,
     media: Option<DownloadedMedia>,
+    #[allow(dead_code)]
+    bytes_downloaded: u64,
+    #[allow(dead_code)]
+    has_successful_resource: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1740,6 +1744,7 @@ async fn run_single_post(
     let mut media_files_written = 0usize;
     let mut resource_errors = Vec::new();
     let mut last_error = None;
+    let mut has_successful_resource = false;
 
     for (idx, resource) in post.resources.iter().enumerate() {
         if cancel.as_ref().map(|c| *c.borrow()).unwrap_or(false) {
@@ -1760,6 +1765,7 @@ async fn run_single_post(
         .await
         {
             downloaded.push(file);
+            has_successful_resource = true;
             continue;
         }
         match download_one(
@@ -1779,6 +1785,7 @@ async fn run_single_post(
             Ok(file) => {
                 media_files_written += 1;
                 downloaded.push(file);
+                has_successful_resource = true;
             }
             Err(JobFail::Cancelled) => return Err(JobFail::Cancelled),
             Err(JobFail::Fatal(error)) => {
@@ -1815,6 +1822,8 @@ async fn run_single_post(
         return Ok(CompletedPostDownload {
             outcome: JobOutcome::default(),
             media: None,
+            bytes_downloaded: bytes_total,
+            has_successful_resource,
         });
     }
 
@@ -1841,7 +1850,111 @@ async fn run_single_post(
     } else {
         finish_downloads(outcome, last_error)?
     };
-    Ok(CompletedPostDownload { outcome, media })
+    Ok(CompletedPostDownload {
+        outcome,
+        media,
+        bytes_downloaded: bytes_total,
+        has_successful_resource,
+    })
+}
+
+#[allow(dead_code)]
+struct BatchProgress<'a> {
+    inner: &'a dyn ProgressSink,
+    file_offset: usize,
+    total_files: usize,
+    bytes_offset: u64,
+    reported_bytes: &'a std::sync::Mutex<u64>,
+}
+
+impl ProgressSink for BatchProgress<'_> {
+    fn progress(&self, current_file: usize, _total_files: usize, bytes_done: u64, file_name: &str) {
+        let candidate = self.bytes_offset.saturating_add(bytes_done);
+        let bytes_done = {
+            let mut reported_bytes = self.reported_bytes.lock().unwrap();
+            *reported_bytes = (*reported_bytes).max(candidate);
+            *reported_bytes
+        };
+        self.inner.progress(
+            self.file_offset.saturating_add(current_file),
+            self.total_files,
+            bytes_done,
+            file_name,
+        );
+    }
+}
+
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
+async fn run_fetched_posts_job(
+    cdn_http: &reqwest::Client,
+    catalog: &Catalog,
+    destination_root: &Path,
+    cfg: &Config,
+    em: &dyn ProgressSink,
+    dir: &Path,
+    posts: &[Post],
+    cancel: Option<tokio::sync::watch::Receiver<bool>>,
+    allow_loopback: bool,
+) -> Result<CompletedJob, JobFail> {
+    std::fs::create_dir_all(dir)?;
+    let total_files = posts.iter().map(|post| post.resources.len()).sum();
+    let mut file_offset = 0usize;
+    let mut bytes_offset = 0u64;
+    let reported_bytes = std::sync::Mutex::new(0u64);
+    let mut outcome = JobOutcome::default();
+    let mut resource_errors = Vec::new();
+    let mut last_error = None;
+    let mut has_successful_resource = false;
+
+    for post in posts {
+        if cancel.as_ref().map(|rx| *rx.borrow()).unwrap_or(false) {
+            return Err(JobFail::Cancelled);
+        }
+        let progress = BatchProgress {
+            inner: em,
+            file_offset,
+            total_files,
+            bytes_offset,
+            reported_bytes: &reported_bytes,
+        };
+        match run_single_post(
+            cdn_http,
+            catalog,
+            destination_root,
+            cfg,
+            &progress,
+            dir,
+            post,
+            cancel.as_ref().cloned(),
+            allow_loopback,
+        )
+        .await
+        {
+            Ok(completed) => {
+                outcome.files_written += completed.outcome.files_written;
+                outcome.catalog_warnings += completed.outcome.catalog_warnings;
+                bytes_offset = bytes_offset.saturating_add(completed.bytes_downloaded);
+                has_successful_resource |= completed.has_successful_resource;
+                if let Some(media) = completed.media {
+                    resource_errors.extend(media.resource_errors);
+                }
+            }
+            Err(JobFail::Cancelled) => return Err(JobFail::Cancelled),
+            Err(JobFail::Fatal(error)) => {
+                last_error = Some(error.clone());
+                resource_errors.push(error);
+            }
+        }
+        file_offset = file_offset.saturating_add(post.resources.len());
+    }
+
+    finish_completed_job(
+        outcome,
+        last_error,
+        resource_errors,
+        has_successful_resource,
+    )
 }
 
 #[tauri::command]
