@@ -152,6 +152,18 @@ fn default_base_url_is_production() {
 }
 
 #[test]
+fn customer_facing_hiker_links_use_the_referral_url() {
+    for error in [
+        insta_dl_gui_lib::hiker::HikerError::AuthInvalid,
+        insta_dl_gui_lib::hiker::HikerError::QuotaExhausted,
+    ] {
+        let message = error.to_string();
+        assert!(message.contains("https://hikerapi.com/p/uk064a1b"));
+        assert!(!message.contains("hikerapi.com/tokens"));
+    }
+}
+
+#[test]
 fn map_post_handles_modern_video_shape() {
     let media = serde_json::json!({
         "pk": "3880296624023575664",

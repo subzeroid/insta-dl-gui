@@ -8,9 +8,9 @@ const QUOTA_REMAINING_HEADERS: [&str; 2] = ["x-quota-remaining", "x-ratelimit-re
 
 #[derive(Debug, thiserror::Error)]
 pub enum HikerError {
-    #[error("Invalid token — get a new one at hikerapi.com/tokens")]
+    #[error("Invalid token — get a new one at https://hikerapi.com/p/uk064a1b")]
     AuthInvalid,
-    #[error("Quota exhausted — top up at hikerapi.com")]
+    #[error("Quota exhausted — top up at https://hikerapi.com/p/uk064a1b")]
     QuotaExhausted,
     #[error("Token banned by HikerAPI")]
     Banned,
