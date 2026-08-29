@@ -18,7 +18,7 @@ npm run tauri dev
 ```
 src/                  # Vue 3 + TypeScript UI
   views/              # onboarding, download, explore, library, queue, settings screens
-  stores/             # pinia: app config, job queue and library catalog state
+  stores/             # pinia: app config, Explore session, job queue and library catalog state
   lib/ipc.ts          # typed wrappers over Tauri commands/events
 src-tauri/src/
   hiker.rs            # HikerAPI REST client + typed error taxonomy + mappers

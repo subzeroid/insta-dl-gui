@@ -18,7 +18,7 @@ Powered by [HikerAPI](https://hikerapi.com/p/uk064a1b), built with [Tauri 2](htt
 |---|---|---|
 | Single post / reel / carousel | `instagram.com/p/…` or `/reel/…` link | 1 request |
 | Profile feed (posts) | `@username` → check **Posts** | 1 request per ~12–18 posts |
-| Reels only | `@username` → check **Reels** | same, videos filtered client-side |
+| Reels only | `@username` → check **Reels** | 1 request per clips page |
 | Active stories | `@username` → check **Stories** | 2 requests |
 | Highlights | `@username` → check **Highlights** | 2 requests + 1 per highlight reel |
 | HD avatar | `@username` → check **Avatar** | included with profile fetch |
@@ -30,7 +30,7 @@ Powered by [HikerAPI](https://hikerapi.com/p/uk064a1b), built with [Tauri 2](htt
 - **Original timestamps** — file mtime is set from `taken_at`, so Photos/Finder sort correctly
 - **JSON metadata sidecars** — caption, like/comment counts and owner saved next to every post
 - **Live queue** — per-job progress, byte counters and cancellation
-- **Explore first** — autocomplete usernames, browse posts/reels/stories, preview individual items, then download one or all
+- **Explore first** — autocomplete usernames, browse posts/reels/stories, preview individual items, then download one, a full collection, or the Reels pages you loaded
 - **Local media Library** — search, filter and inspect existing downloads without changing archive files
 - **Automatic recovery** — transient network and CDN server errors retry automatically, and partial jobs report only saved files
 
