@@ -1723,6 +1723,12 @@ struct CompletedPostDownload {
     has_successful_resource: bool,
 }
 
+struct PostDownloadAttempt {
+    completed: CompletedPostDownload,
+    resource_errors: Vec<String>,
+    last_error: Option<String>,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_single_post(
     cdn_http: &reqwest::Client,
@@ -1735,6 +1741,36 @@ async fn run_single_post(
     cancel: Option<tokio::sync::watch::Receiver<bool>>,
     allow_loopback: bool,
 ) -> Result<CompletedPostDownload, JobFail> {
+    let attempt = run_single_post_attempt(
+        cdn_http,
+        catalog,
+        destination_root,
+        cfg,
+        em,
+        dir,
+        post,
+        cancel,
+        allow_loopback,
+    )
+    .await?;
+    if attempt.completed.media.is_none() {
+        finish_downloads(attempt.completed.outcome, attempt.last_error)?;
+    }
+    Ok(attempt.completed)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_single_post_attempt(
+    cdn_http: &reqwest::Client,
+    catalog: &Catalog,
+    destination_root: &Path,
+    cfg: &Config,
+    em: &dyn ProgressSink,
+    dir: &Path,
+    post: &Post,
+    cancel: Option<tokio::sync::watch::Receiver<bool>>,
+    allow_loopback: bool,
+) -> Result<PostDownloadAttempt, JobFail> {
     std::fs::create_dir_all(dir)?;
     let base = taken_at_name(post.taken_at, &post.code);
     let item_metadata = post_catalog_metadata(post);
@@ -1764,6 +1800,13 @@ async fn run_single_post(
         )
         .await
         {
+            bytes_total = bytes_total.saturating_add(file.bytes);
+            let file_name = file
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "file".into());
+            em.progress(idx + 1, total, bytes_total, &file_name);
             downloaded.push(file);
             has_successful_resource = true;
             continue;
@@ -1819,11 +1862,15 @@ async fn run_single_post(
     }
 
     if media_files_written == 0 && !sidecar_written && resource_errors.is_empty() {
-        return Ok(CompletedPostDownload {
-            outcome: JobOutcome::default(),
-            media: None,
-            bytes_downloaded: bytes_total,
-            has_successful_resource,
+        return Ok(PostDownloadAttempt {
+            completed: CompletedPostDownload {
+                outcome: JobOutcome::default(),
+                media: None,
+                bytes_downloaded: bytes_total,
+                has_successful_resource,
+            },
+            resource_errors,
+            last_error,
         });
     }
 
@@ -1834,7 +1881,7 @@ async fn run_single_post(
         let media = DownloadedMedia {
             item: item_metadata,
             files: downloaded,
-            resource_errors,
+            resource_errors: resource_errors.clone(),
         };
         if (media_files_written > 0 || sidecar_written)
             && catalog_downloaded_media(catalog, destination_root, &media)
@@ -1845,16 +1892,15 @@ async fn run_single_post(
         }
         Some(media)
     };
-    let outcome = if media.is_some() {
-        outcome
-    } else {
-        finish_downloads(outcome, last_error)?
-    };
-    Ok(CompletedPostDownload {
-        outcome,
-        media,
-        bytes_downloaded: bytes_total,
-        has_successful_resource,
+    Ok(PostDownloadAttempt {
+        completed: CompletedPostDownload {
+            outcome,
+            media,
+            bytes_downloaded: bytes_total,
+            has_successful_resource,
+        },
+        resource_errors,
+        last_error,
     })
 }
 
@@ -1918,7 +1964,7 @@ async fn run_fetched_posts_job(
             bytes_offset,
             reported_bytes: &reported_bytes,
         };
-        match run_single_post(
+        match run_single_post_attempt(
             cdn_http,
             catalog,
             destination_root,
@@ -1931,13 +1977,15 @@ async fn run_fetched_posts_job(
         )
         .await
         {
-            Ok(completed) => {
+            Ok(attempt) => {
+                let completed = attempt.completed;
                 outcome.files_written += completed.outcome.files_written;
                 outcome.catalog_warnings += completed.outcome.catalog_warnings;
                 bytes_offset = bytes_offset.saturating_add(completed.bytes_downloaded);
                 has_successful_resource |= completed.has_successful_resource;
-                if let Some(media) = completed.media {
-                    resource_errors.extend(media.resource_errors);
+                resource_errors.extend(attempt.resource_errors);
+                if let Some(error) = attempt.last_error {
+                    last_error = Some(error);
                 }
             }
             Err(JobFail::Cancelled) => return Err(JobFail::Cancelled),

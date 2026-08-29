@@ -653,6 +653,156 @@ async fn fetched_batch_already_cancelled_writes_no_media_or_catalog_items() {
     );
 }
 
+#[tokio::test]
+async fn fetched_batch_retains_every_fatal_post_error_and_continues_to_later_posts() {
+    let server = MockServer::start().await;
+    Mock::given(path("/first-forbidden"))
+        .respond_with(ResponseTemplate::new(403))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(path("/second-missing"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&server)
+        .await;
+    mount_media(&server, "/later-success", "image/jpeg", &JPEG).await;
+    let fixture = Fixture::new();
+    let failed = post(
+        "batch-all-resource-failures",
+        "BATCH-ALL-RESOURCE-FAILURES",
+        vec![
+            resource(&server, "/first-forbidden", MediaKind::Photo),
+            resource(&server, "/second-missing", MediaKind::Video),
+        ],
+    );
+    let succeeded = post(
+        "batch-later-success",
+        "BATCH-LATER-SUCCESS",
+        vec![resource(&server, "/later-success", MediaKind::Photo)],
+    );
+
+    let completed = fixture
+        .run_fetched_posts(&[failed, succeeded], false, &NoopProgress, None)
+        .await
+        .unwrap_or_else(|failure| match failure {
+            JobFail::Cancelled => panic!("fetched batch was unexpectedly cancelled"),
+            JobFail::Fatal(error) => panic!("fetched batch failed: {error}"),
+        });
+
+    assert_eq!(completed.outcome.files_written, 1);
+    assert_eq!(completed.resource_errors.len(), 2);
+    assert!(completed
+        .resource_errors
+        .iter()
+        .any(|error| error.contains("HTTP 403")));
+    assert!(completed
+        .resource_errors
+        .iter()
+        .any(|error| error.contains("HTTP 404")));
+    assert_eq!(fixture.all_items().len(), 1);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/later-success")
+            .count(),
+        1,
+        "a fatal first post must not prevent a later download"
+    );
+}
+
+#[tokio::test]
+async fn fetched_batch_with_no_successful_resources_is_fatal_after_trying_every_post() {
+    let server = MockServer::start().await;
+    Mock::given(path("/failed-first-post"))
+        .respond_with(ResponseTemplate::new(403))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(path("/failed-second-post"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let fixture = Fixture::new();
+    let first = post(
+        "batch-failed-first",
+        "BATCH-FAILED-FIRST",
+        vec![resource(&server, "/failed-first-post", MediaKind::Photo)],
+    );
+    let second = post(
+        "batch-failed-second",
+        "BATCH-FAILED-SECOND",
+        vec![resource(&server, "/failed-second-post", MediaKind::Video)],
+    );
+
+    let result = fixture
+        .run_fetched_posts(&[first, second], false, &NoopProgress, None)
+        .await;
+
+    match result {
+        Err(JobFail::Fatal(error)) => assert!(error.contains("HTTP 404")),
+        Err(JobFail::Cancelled) => panic!("fetched batch was unexpectedly cancelled"),
+        Ok(_) => panic!("an all-failed fetched batch must be fatal"),
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2, "every post must be attempted");
+}
+
+#[tokio::test]
+async fn fetched_batch_final_recovered_resource_emits_terminal_monotonic_progress() {
+    let server = MockServer::start().await;
+    mount_media(&server, "/new-first", "image/jpeg", &JPEG).await;
+    mount_media(&server, "/recovered-final", "video/mp4", &MP4).await;
+    let fixture = Fixture::new();
+    let recovered = post(
+        "batch-recovered-final",
+        "BATCH-RECOVERED-FINAL",
+        vec![resource(&server, "/recovered-final", MediaKind::Video)],
+    );
+    let seeded = fixture
+        .run_fetched_posts(std::slice::from_ref(&recovered), false, &NoopProgress, None)
+        .await
+        .unwrap_or_else(|failure| match failure {
+            JobFail::Cancelled => panic!("seed batch was unexpectedly cancelled"),
+            JobFail::Fatal(error) => panic!("seed batch failed: {error}"),
+        });
+    assert_eq!(seeded.outcome.files_written, 1);
+    let new = post(
+        "batch-new-first",
+        "BATCH-NEW-FIRST",
+        vec![resource(&server, "/new-first", MediaKind::Photo)],
+    );
+    let progress = RecordingProgress::default();
+
+    let completed = fixture
+        .run_fetched_posts(&[new, recovered], false, &progress, None)
+        .await
+        .unwrap_or_else(|failure| match failure {
+            JobFail::Cancelled => panic!("fetched batch was unexpectedly cancelled"),
+            JobFail::Fatal(error) => panic!("fetched batch failed: {error}"),
+        });
+
+    assert_eq!(completed.outcome.files_written, 1);
+    assert!(completed.resource_errors.is_empty());
+    let updates = progress.updates();
+    assert!(updates.iter().all(|(_, total, _)| *total == 2));
+    assert!(updates
+        .windows(2)
+        .all(|pair| { pair[0].0 <= pair[1].0 && pair[0].2 <= pair[1].2 }));
+    assert_eq!(updates.last().copied(), Some((2, 2, 24)));
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/recovered-final")
+            .count(),
+        1,
+        "the terminal resource must be recovered instead of downloaded again"
+    );
+}
+
 fn absolute(root: &Path, relative: &str) -> PathBuf {
     root.join(relative)
 }
