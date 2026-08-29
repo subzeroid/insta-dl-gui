@@ -22,7 +22,7 @@ Transient network errors and CDN server errors are retried automatically, up to 
 
 ## macOS: "Apple could not verify…" / «Файл не был открыт» (Gatekeeper) {#macos-blocks-the-app}
 
-The app is not code-signed yet, so macOS blocks the first launch. Two ways through:
+The app is not yet signed with an Apple Developer ID or notarized, so macOS blocks the first launch. Two ways through:
 
 **GUI:** dismiss the dialog with **Done/Готово** (don't press "Move to Trash"), then open **System Settings → Privacy & Security** and click **Open Anyway**.
 
@@ -33,6 +33,14 @@ xattr -cr /Applications/insta-dl-gui.app
 ```
 
 Both only affect the first launch; after that the app opens normally.
+
+## macOS keeps asking for access to Downloads in Library
+
+Starting with version 0.3.1, the app asks once per configured download folder during an app session. Choose **Allow** to load local photo and video previews. The app only reads files inside the Library root; it does not move, edit or delete them.
+
+If you chose **Don't Allow**, the Library keeps placeholders instead of opening more system dialogs. Open **System Settings → Privacy & Security → Files and Folders**, enable access to Downloads for **insta-dl-gui**, return to Library and press **Retry previews**.
+
+Changing the download folder causes one new access check for that folder. Installing a new release without Apple Developer ID signing may also make macOS ask again.
 
 ## Windows SmartScreen blocked the installer
 

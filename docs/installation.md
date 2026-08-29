@@ -10,7 +10,7 @@ Or install via Homebrew for automatic updates on `brew upgrade`:
 brew install --cask subzeroid/tap/insta-dl-gui
 ```
 
-> **Note:** the app is not code-signed yet, so Gatekeeper will ask for confirmation on first launch no matter how you installed it ("Open Anyway" or right-click → Open). See [Troubleshooting → macOS blocks the app](troubleshooting.md#macos-blocks-the-app).
+> **Note:** the app is not yet signed with an Apple Developer ID or notarized, so Gatekeeper will ask for confirmation on first launch no matter how you installed it ("Open Anyway" or right-click → Open). See [Troubleshooting → macOS blocks the app](troubleshooting.md#macos-blocks-the-app).
 
 ## Windows
 

@@ -10,6 +10,7 @@ import {
   onLibraryScanProgress,
   openLibraryFile,
   queryLibrary,
+  requestLibraryPreviewAccess,
   revealLibraryFile,
   startLibraryScan,
   type FileAvailability,
@@ -31,16 +32,30 @@ export interface LibraryCardView extends LibraryCard {
   previewFileKind: MediaFileKind | null;
 }
 
+export type LibraryPreviewAccess = "unknown" | "checking" | "allowed" | "denied";
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function toLibraryCardView(card: LibraryCard): LibraryCardView {
+function mockPreviewUrl(card: LibraryCard): string | null {
   const mockPreview = (card as LibraryCard & { preview_url?: unknown }).preview_url;
+  return typeof mockPreview === "string" && mockPreview.startsWith("data:image/svg+xml,")
+    ? mockPreview
+    : null;
+}
+
+function toLibraryCardView(
+  card: LibraryCard,
+  filePreviewAccessAllowed: boolean,
+): LibraryCardView {
+  const mockPreview = mockPreviewUrl(card);
   const previewUrl =
-    typeof mockPreview === "string" && mockPreview.startsWith("data:image/svg+xml,")
+    mockPreview !== null
       ? mockPreview
-      : card.availability === "missing" || card.preview_file_id === null
+      : !filePreviewAccessAllowed ||
+          card.availability === "missing" ||
+          card.preview_file_id === null
         ? null
         : libraryMediaUrl(card.preview_file_id);
   return {
@@ -76,6 +91,10 @@ export const useLibraryStore = defineStore("library", () => {
   const loadingMore = ref(false);
   const error = ref<string | null>(null);
   const requestGeneration = ref(0);
+  const previewAccess = ref<LibraryPreviewAccess>("unknown");
+  let previewAccessPromise: Promise<boolean> | null = null;
+  let previewAccessRootId: number | null = null;
+  let previewAccessGeneration = 0;
 
   const selected = ref<LibraryItemDetail | null>(null);
   const detailLoading = ref(false);
@@ -153,6 +172,49 @@ export const useLibraryStore = defineStore("library", () => {
     };
   }
 
+  function firstPreviewFileId(items: LibraryCard[]): number | null {
+    const candidate = items.find(
+      (card) =>
+        mockPreviewUrl(card) === null &&
+        card.availability !== "missing" &&
+        card.preview_file_id !== null,
+    );
+    return candidate?.preview_file_id ?? null;
+  }
+
+  function ensurePreviewAccess(fileId: number): Promise<boolean> {
+    if (previewAccess.value === "allowed") return Promise.resolve(true);
+    if (previewAccess.value === "denied") return Promise.resolve(false);
+    if (previewAccessPromise !== null) return previewAccessPromise;
+
+    previewAccess.value = "checking";
+    const generation = previewAccessGeneration;
+    const pending = requestLibraryPreviewAccess(fileId)
+      .then((allowed) => {
+        if (generation !== previewAccessGeneration) return false;
+        previewAccess.value = allowed ? "allowed" : "denied";
+        return allowed;
+      })
+      .catch(() => {
+        if (generation !== previewAccessGeneration) return false;
+        previewAccess.value = "denied";
+        return false;
+      });
+    previewAccessPromise = pending;
+    void pending.then(() => {
+      if (previewAccessPromise === pending) previewAccessPromise = null;
+    });
+    return pending;
+  }
+
+  function usePreviewAccessRoot(rootId: number) {
+    if (previewAccessRootId === rootId) return;
+    previewAccessRootId = rootId;
+    previewAccessGeneration += 1;
+    previewAccessPromise = null;
+    previewAccess.value = "unknown";
+  }
+
   async function loadPage(append: boolean) {
     if (append && (cursor.value === null || loadingMore.value)) return;
     const pageCursor = append ? cursor.value : null;
@@ -165,7 +227,10 @@ export const useLibraryStore = defineStore("library", () => {
     try {
       const page = await queryLibrary(buildQuery(pageCursor));
       if (generation !== requestGeneration.value) return;
-      const incomingCards = page.items.map(toLibraryCardView);
+      const filePreviewAccessAllowed = previewAccess.value === "allowed";
+      const incomingCards = page.items.map((card) =>
+        toLibraryCardView(card, filePreviewAccessAllowed),
+      );
       if (append) {
         const seenIds = new Set(cards.value.map((card) => card.id));
         cards.value = [
@@ -180,6 +245,17 @@ export const useLibraryStore = defineStore("library", () => {
         cards.value = incomingCards;
       }
       cursor.value = page.next_cursor;
+
+      if (!filePreviewAccessAllowed && previewAccess.value !== "denied") {
+        const previewFileId = firstPreviewFileId(page.items);
+        if (previewFileId !== null) {
+          const allowed = await ensurePreviewAccess(previewFileId);
+          if (generation !== requestGeneration.value) return;
+          if (allowed) {
+            cards.value = cards.value.map((card) => toLibraryCardView(card, true));
+          }
+        }
+      }
     } catch (cause) {
       if (generation === requestGeneration.value) error.value = errorMessage(cause);
     } finally {
@@ -197,6 +273,12 @@ export const useLibraryStore = defineStore("library", () => {
 
   async function loadMore() {
     await loadPage(true);
+  }
+
+  async function retryPreviewAccess() {
+    if (previewAccess.value !== "denied") return;
+    previewAccess.value = "unknown";
+    await refresh();
   }
 
   async function selectItem(id: number) {
@@ -236,6 +318,7 @@ export const useLibraryStore = defineStore("library", () => {
         ? listed
         : [...listed, configured];
       activeRoot.value = roots.value.find((root) => root.id === configured.id) ?? configured;
+      usePreviewAccessRoot(activeRoot.value.id);
     } catch (cause) {
       if (isCurrent()) rootsError.value = errorMessage(cause);
     } finally {
@@ -419,6 +502,7 @@ export const useLibraryStore = defineStore("library", () => {
     loadingMore,
     error,
     requestGeneration,
+    previewAccess,
     selected,
     detailLoading,
     detailError,
@@ -435,6 +519,7 @@ export const useLibraryStore = defineStore("library", () => {
     dispose,
     refresh,
     loadMore,
+    retryPreviewAccess,
     selectItem,
     clearSelection,
     setSearch,

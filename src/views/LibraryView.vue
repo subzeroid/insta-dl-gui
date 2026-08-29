@@ -116,6 +116,10 @@ async function cancelScan() {
   }
 }
 
+async function retryPreviewAccess() {
+  await library.retryPreviewAccess();
+}
+
 function toggleKind(kind: MediaItemKind) {
   const next = library.kinds.includes(kind)
     ? library.kinds.filter((candidate) => candidate !== kind)
@@ -468,6 +472,30 @@ onBeforeUnmount(() => {
             {{ dateError }}
           </p>
         </div>
+      </section>
+
+      <section
+        v-if="library.previewAccess === 'denied'"
+        data-testid="library-preview-access-notice"
+        class="card flex flex-wrap items-center justify-between gap-4 border-warn/40 bg-warn/10 p-4"
+        role="status"
+        aria-live="polite"
+      >
+        <div>
+          <p class="text-sm font-medium text-slate-200">Preview access is blocked</p>
+          <p class="mt-1 text-xs text-slate-400">
+            Enable insta-dl-gui in System Settings → Privacy &amp; Security → Files and Folders,
+            then retry. Your files stay local.
+          </p>
+        </div>
+        <button
+          type="button"
+          class="btn-secondary"
+          data-action="retry-library-previews"
+          @click="retryPreviewAccess"
+        >
+          Retry previews
+        </button>
       </section>
 
       <p

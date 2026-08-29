@@ -77,4 +77,16 @@ jobs:
           workspaces: src-tauri
       - run: npm ci
       - name: Debug build (compiles the full app)
+        if: matrix.os != 'macos-latest'
         run: npm run tauri build -- --debug --no-bundle
+      - name: Debug macOS app bundle
+        if: matrix.os == 'macos-latest'
+        run: npm run tauri build -- --debug --bundles app
+      - name: Verify macOS app bundle signature
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          app_path="src-tauri/target/debug/bundle/macos/insta-dl-gui.app"
+          codesign --verify --deep --strict "$app_path"
+          requirements="$(codesign --display --requirements - "$app_path" 2>&1)"
+          grep -Fq "designated =>" <<<"$requirements"

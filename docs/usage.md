@@ -76,7 +76,9 @@ Downloads completed by the app are cataloged automatically. The initial scan is 
 - The captured-date range uses local calendar dates.
 - Sort by **Publication date** or **Import date**.
 
-Photo and video previews load directly from the local archive. Open an item to inspect its metadata and files. **Open file** launches an available file with the system default app; **Show in folder** reveals it in the system file manager. These actions are disabled for missing files.
+Photo and video previews load directly from the local archive. On macOS, allow the single folder-access request when Library first loads previews. If access is denied, previews stay as placeholders until you enable **insta-dl-gui** under **System Settings → Privacy & Security → Files and Folders** and press **Retry previews**. See [troubleshooting](troubleshooting.md#macos-keeps-asking-for-access-to-downloads-in-library).
+
+Open an item to inspect its metadata and files. **Open file** launches an available file with the system default app; **Show in folder** reveals it in the system file manager. These actions are disabled for missing files.
 
 ### Rescans and missing files
 

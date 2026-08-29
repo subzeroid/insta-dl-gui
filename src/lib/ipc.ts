@@ -160,6 +160,10 @@ export async function getLibraryItem(id: number): Promise<LibraryItemDetail> {
   return invoke("get_library_item", { id });
 }
 
+export async function requestLibraryPreviewAccess(fileId: number): Promise<boolean> {
+  return invoke("request_library_preview_access", { fileId });
+}
+
 export async function openLibraryFile(fileId: number): Promise<void> {
   return invoke("open_library_file", { fileId });
 }

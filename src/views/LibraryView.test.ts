@@ -20,6 +20,7 @@ const ipc = vi.hoisted(() => ({
   queryLibrary: vi.fn(),
   getLibraryItem: vi.fn(),
   openLibraryFile: vi.fn(),
+  requestLibraryPreviewAccess: vi.fn(),
   revealLibraryFile: vi.fn(),
   onLibraryScanProgress: vi.fn(),
   libraryMediaUrl: vi.fn(),
@@ -34,6 +35,7 @@ vi.mock("../lib/ipc", () => ({
   queryLibrary: ipc.queryLibrary,
   getLibraryItem: ipc.getLibraryItem,
   openLibraryFile: ipc.openLibraryFile,
+  requestLibraryPreviewAccess: ipc.requestLibraryPreviewAccess,
   revealLibraryFile: ipc.revealLibraryFile,
   onLibraryScanProgress: ipc.onLibraryScanProgress,
   libraryMediaUrl: ipc.libraryMediaUrl,
@@ -235,6 +237,7 @@ beforeEach(() => {
     ipc.queryLibrary,
     ipc.getLibraryItem,
     ipc.openLibraryFile,
+    ipc.requestLibraryPreviewAccess,
     ipc.revealLibraryFile,
     ipc.onLibraryScanProgress,
     ipc.libraryMediaUrl,
@@ -250,6 +253,7 @@ beforeEach(() => {
   ipc.queryLibrary.mockResolvedValue(page([]));
   ipc.getLibraryItem.mockResolvedValue(detail());
   ipc.openLibraryFile.mockResolvedValue(undefined);
+  ipc.requestLibraryPreviewAccess.mockResolvedValue(true);
   ipc.revealLibraryFile.mockResolvedValue(undefined);
   ipc.libraryMediaUrl.mockImplementation(
     (fileId: number) => `library://localhost/media/${fileId}`,
@@ -364,6 +368,35 @@ describe("Library first-scan flow", () => {
 });
 
 describe("Library browsing", () => {
+  it("shows one preview-access recovery notice and retries only on button click", async () => {
+    ipc.queryLibrary.mockResolvedValue(page([card(1)]));
+    ipc.requestLibraryPreviewAccess
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    const wrapper = await render({ root: scannedRoot });
+    const libraryCard = wrapper.get("[data-library-card-id='1']");
+
+    const accessNotice = wrapper.get("[data-testid='library-preview-access-notice']");
+    expect(accessNotice.text()).toContain("Preview access is blocked");
+    expect(accessNotice.text()).toContain(
+      "System Settings → Privacy & Security → Files and Folders",
+    );
+    expect(libraryCard.find("img").exists()).toBe(false);
+    expect(ipc.requestLibraryPreviewAccess).toHaveBeenCalledTimes(1);
+
+    await wrapper.get("button[data-action='retry-library-previews']").trigger("click");
+    await flushPromises();
+
+    expect(ipc.requestLibraryPreviewAccess).toHaveBeenCalledTimes(2);
+    expect(wrapper.find("[data-testid='library-preview-access-notice']").exists()).toBe(false);
+    const retriedLibraryCard = wrapper.get("[data-library-card-id='1']");
+    TestIntersectionObserver.trigger(retriedLibraryCard.element);
+    await flushPromises();
+    expect(retriedLibraryCard.get("img").attributes("src")).toBe(
+      "library://localhost/media/1001",
+    );
+  });
+
   it("mounts only visible rows plus two-row overscan for 1,000 cards", async () => {
     ipc.queryLibrary.mockResolvedValue(
       page(Array.from({ length: 1_000 }, (_, index) => card(index + 1))),
