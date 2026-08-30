@@ -512,19 +512,29 @@ describe("library mock", () => {
     await expect(revealLibraryFile(999_999)).rejects.toThrow("Library file is unavailable");
   });
 
-  it("registers every static catalog file with a media fixture matching its kind", async () => {
+  it("registers available static files and rejects known missing files", async () => {
     installTauriMock();
     const page = await queryLibrary(query);
     const details = await Promise.all(page.items.map((item) => getLibraryItem(item.id)));
     const files = details.flatMap((detail) => detail.files);
+    const availableFiles = files.filter((file) => file.exists_on_disk);
+    const missingFiles = files.filter((file) => !file.exists_on_disk);
 
-    expect(files.length).toBeGreaterThan(0);
-    for (const file of files) {
+    expect(availableFiles.length).toBeGreaterThan(0);
+    expect(missingFiles.length).toBeGreaterThan(0);
+    for (const file of availableFiles) {
       const url = libraryMediaUrl(file.id);
       expect(url).toMatch(
         file.kind === "video" ? /^data:video\/mp4;base64,/ : /^data:image\/svg\+xml,/,
       );
       await expect(requestLibraryPreviewAccess(file.id)).resolves.toBe(true);
+      await expect(openLibraryFile(file.id)).resolves.toBeNull();
+      await expect(revealLibraryFile(file.id)).resolves.toBeNull();
+    }
+    for (const file of missingFiles) {
+      await expect(requestLibraryPreviewAccess(file.id)).resolves.toBe(false);
+      await expect(openLibraryFile(file.id)).rejects.toThrow("Library file is unavailable");
+      await expect(revealLibraryFile(file.id)).rejects.toThrow("Library file is unavailable");
     }
   });
 

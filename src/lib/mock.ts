@@ -765,7 +765,7 @@ export function installTauriMock(): void {
 
   for (const card of mockLibraryCards()) {
     for (const file of mockFiles(card)) {
-      if (file.kind === "photo" || file.kind === "video") {
+      if (file.exists_on_disk && (file.kind === "photo" || file.kind === "video")) {
         registeredMedia.set(file.id, mockMediaFixture(file.kind));
       }
     }
