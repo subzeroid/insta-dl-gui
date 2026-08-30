@@ -4,6 +4,7 @@ import { useJobsStore, type JobView } from "../stores/jobs";
 import { formatBytes } from "../lib/ipc";
 
 const props = defineProps<{ job: JobView }>();
+const emit = defineEmits<{ inspect: [job: JobView, origin: HTMLElement] }>();
 const jobs = useJobsStore();
 
 const active = computed(() => props.job.state === "downloading" || props.job.state === "fetching");
@@ -12,6 +13,9 @@ const catalogWarnings = computed(() => props.job.catalogWarnings ?? 0);
 const resourceFailures = computed(() => props.job.resourceFailures ?? 0);
 const doneWithWarnings = computed(
   () => props.job.state === "done" && (catalogWarnings.value > 0 || resourceFailures.value > 0),
+);
+const actionable = computed(
+  () => props.job.state === "done" && (props.job.outputs?.length ?? 0) > 0,
 );
 const fileCountText = computed(
   () => `${resultCount.value} file${resultCount.value === 1 ? "" : "s"}`,
@@ -37,10 +41,32 @@ const statusText = computed(() => {
       return "failed";
   }
 });
+
+function inspect(event: MouseEvent | KeyboardEvent) {
+  if (!actionable.value) return;
+  const origin = event.currentTarget;
+  if (!(origin instanceof HTMLElement)) return;
+  emit("inspect", props.job, origin);
+}
+
+function onKeydown(event: KeyboardEvent) {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  inspect(event);
+}
 </script>
 
 <template>
-  <div class="card p-4">
+  <div
+    class="card p-4"
+    :class="actionable ? 'cursor-pointer hover:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent' : ''"
+    :data-job-id="job.id"
+    :role="actionable ? 'button' : undefined"
+    :tabindex="actionable ? 0 : undefined"
+    :aria-label="actionable ? `Inspect downloaded files for ${job.label}` : undefined"
+    @click="inspect"
+    @keydown="onKeydown"
+  >
     <div class="flex items-center justify-between gap-3">
       <span class="truncate font-medium text-slate-200">{{ job.label }}</span>
       <span class="flex shrink-0 items-center gap-2">
@@ -60,7 +86,7 @@ const statusText = computed(() => {
         <button
           v-if="active"
           class="rounded-md border border-line px-2 py-0.5 text-xs text-slate-400 hover:border-err hover:text-err"
-          @click="jobs.cancel(job.id)"
+          @click.stop="jobs.cancel(job.id)"
         >
           Cancel
         </button>

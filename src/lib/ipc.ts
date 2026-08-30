@@ -190,6 +190,14 @@ export async function saveSettings(opts: { dest_dir?: string; sidecar?: boolean 
   return invoke("save_settings", { destDir: opts.dest_dir, sidecar: opts.sidecar });
 }
 
+export interface JobOutputFile {
+  file_id?: number;
+  basename: string;
+  kind: "photo" | "video";
+  byte_size: number;
+  ordinal: number;
+}
+
 export interface JobProgress {
   job_id: string;
   state: "fetching" | "downloading" | "done" | "failed" | "cancelled";
@@ -203,6 +211,8 @@ export interface JobProgress {
   dir?: string;
   catalog_warnings?: number;
   resource_failures?: number;
+  requested_items?: number;
+  outputs?: JobOutputFile[];
 }
 
 export type Target =

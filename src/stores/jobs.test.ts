@@ -77,6 +77,90 @@ describe("jobs warning state", () => {
   });
 });
 
+describe("jobs completed output metadata", () => {
+  it("maps safe output metadata and requested item count from a done event", async () => {
+    const store = useJobsStore();
+    await store.init();
+
+    ipc.listener?.({
+      job_id: "selected-posts",
+      state: "done",
+      label: "@nike posts · selected · 4",
+      count: 5,
+      requested_items: 4,
+      outputs: [
+        { file_id: 41, basename: "one.jpg", kind: "photo", byte_size: 1200, ordinal: 0 },
+        { basename: "two.mp4", kind: "video", byte_size: 3400, ordinal: 1 },
+      ],
+    });
+
+    expect(store.jobs.get("selected-posts")).toMatchObject({
+      requestedItems: 4,
+      outputs: [
+        { file_id: 41, basename: "one.jpg", kind: "photo", byte_size: 1200, ordinal: 0 },
+        { basename: "two.mp4", kind: "video", byte_size: 3400, ordinal: 1 },
+      ],
+    });
+    expect(JSON.stringify(store.jobs.get("selected-posts"))).not.toContain("path");
+  });
+
+  it("replaces output metadata on repeated done events instead of retaining stale files", async () => {
+    const store = useJobsStore();
+    await store.init();
+    ipc.listener?.({
+      job_id: "repeat",
+      state: "done",
+      label: "First terminal event",
+      requested_items: 2,
+      outputs: [
+        { file_id: 1, basename: "stale.jpg", kind: "photo", byte_size: 1, ordinal: 0 },
+      ],
+    });
+
+    ipc.listener?.({
+      job_id: "repeat",
+      state: "done",
+      label: "Second terminal event",
+      requested_items: 1,
+      outputs: [
+        { file_id: 2, basename: "fresh.mp4", kind: "video", byte_size: 2, ordinal: 0 },
+      ],
+    });
+
+    expect(store.jobs.get("repeat")?.requestedItems).toBe(1);
+    expect(store.jobs.get("repeat")?.outputs).toEqual([
+      { file_id: 2, basename: "fresh.mp4", kind: "video", byte_size: 2, ordinal: 0 },
+    ]);
+  });
+
+  it("clears output metadata for a legacy replacement and keeps placeholders non-actionable", async () => {
+    const store = useJobsStore();
+    store.addPlaceholder("placeholder", "Waiting");
+    expect(store.jobs.get("placeholder")?.outputs).toBeUndefined();
+    expect(store.jobs.get("placeholder")?.requestedItems).toBeUndefined();
+
+    await store.init();
+    ipc.listener?.({
+      job_id: "legacy-replacement",
+      state: "done",
+      label: "First",
+      requested_items: 1,
+      outputs: [
+        { file_id: 3, basename: "indexed.jpg", kind: "photo", byte_size: 3, ordinal: 0 },
+      ],
+    });
+    ipc.listener?.({
+      job_id: "legacy-replacement",
+      state: "done",
+      label: "Legacy",
+      count: 1,
+    });
+
+    expect(store.jobs.get("legacy-replacement")?.outputs).toBeUndefined();
+    expect(store.jobs.get("legacy-replacement")?.requestedItems).toBeUndefined();
+  });
+});
+
 describe("jobs conflict metadata", () => {
   it("reserves pending conflicts atomically and releases them by token", () => {
     const store = useJobsStore();
