@@ -29,6 +29,8 @@ import type { MediaPage, ProfilePreview } from "../lib/ipc";
 import { useExplorerStore } from "../stores/explorer";
 import { useJobsStore } from "../stores/jobs";
 
+const wrappers: Array<{ unmount: () => void }> = [];
+
 const preview = {
   profile: {
     pk: "42",
@@ -107,12 +109,14 @@ function deferred<T>() {
 
 function render(pinia: Pinia = createPinia()) {
   setActivePinia(pinia);
-  return mount(ExplorerView, {
+  const wrapper = mount(ExplorerView, {
     global: {
       plugins: [pinia],
       stubs: { JobCard: true, PostModal: true },
     },
   });
+  wrappers.push(wrapper);
+  return wrapper;
 }
 
 async function loadProfile(
@@ -155,6 +159,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  for (const wrapper of wrappers.splice(0)) wrapper.unmount();
+  document.body.replaceChildren();
   vi.useRealTimers();
 });
 
