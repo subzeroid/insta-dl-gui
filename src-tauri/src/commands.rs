@@ -77,6 +77,7 @@ fn validate_fetched_posts(posts: Vec<Post>, allow_loopback: bool) -> Result<Vec<
 
 #[derive(Debug, Clone, Serialize)]
 struct JobOutputFile {
+    #[serde(skip_serializing_if = "Option::is_none")]
     file_id: Option<i64>,
     basename: String,
     kind: MediaFileKind,
@@ -96,7 +97,9 @@ enum JobState {
     Done {
         count: usize,
         dir: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         outputs: Vec<JobOutputFile>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         requested_items: Option<usize>,
         #[serde(skip_serializing_if = "is_zero")]
         catalog_warnings: usize,
@@ -156,7 +159,7 @@ impl JobEvents {
         outcome: JobOutcome,
         resource_failures: usize,
         dir: &Path,
-        outputs: &[JobOutputFile],
+        outputs: Vec<JobOutputFile>,
         requested_items: Option<usize>,
     ) {
         self.app
@@ -168,7 +171,7 @@ impl JobEvents {
                     state: JobState::Done {
                         count: outcome.files_written,
                         dir: dir.to_string_lossy().into_owned(),
-                        outputs: outputs.to_vec(),
+                        outputs,
                         requested_items,
                         catalog_warnings: outcome.catalog_warnings,
                         resource_failures,
@@ -1184,7 +1187,7 @@ pub async fn download_direct(
                 completed.outcome,
                 completed.resource_errors.len(),
                 &dir,
-                &completed.outputs,
+                completed.outputs,
                 completed.requested_items,
             ),
             Err(JobFail::Cancelled) => em.cancelled(),
@@ -1381,7 +1384,7 @@ pub async fn enqueue_profile_download(
                 completed.outcome,
                 completed.resource_errors.len(),
                 &dir,
-                &completed.outputs,
+                completed.outputs,
                 completed.requested_items,
             ),
             Err(JobFail::Cancelled) => em.cancelled(),
@@ -1944,7 +1947,7 @@ pub async fn download_post(
                     completed.outcome,
                     resource_failures,
                     &dir,
-                    &completed.outputs,
+                    completed.outputs,
                     completed.requested_items,
                 );
             }
@@ -2282,7 +2285,7 @@ pub(crate) async fn enqueue_fetched_post_download(
                     completed.outcome,
                     completed.resource_errors.len(),
                     &dir,
-                    &completed.outputs,
+                    completed.outputs,
                     completed.requested_items,
                 );
             }
@@ -2989,6 +2992,27 @@ mod tests {
         assert!(legacy.get("catalog_warnings").is_none());
         assert!(legacy.get("resource_failures").is_none());
 
+        let uncataloged = serde_json::to_value(JobProgress {
+            job_id: "job".into(),
+            label: "label".into(),
+            state: JobState::Done {
+                count: 1,
+                dir: "/configured/root".into(),
+                outputs: vec![JobOutputFile {
+                    file_id: None,
+                    basename: "uncataloged.jpg".into(),
+                    kind: MediaFileKind::Photo,
+                    byte_size: 8,
+                    ordinal: 0,
+                }],
+                requested_items: Some(1),
+                catalog_warnings: 1,
+                resource_failures: 0,
+            },
+        })
+        .unwrap();
+        assert!(uncataloged["outputs"][0].get("file_id").is_none());
+
         let warning = serde_json::to_value(JobProgress {
             job_id: "job".into(),
             label: "label".into(),
@@ -3004,7 +3028,8 @@ mod tests {
         .unwrap();
         assert_eq!(warning["catalog_warnings"], 1);
         assert_eq!(warning["resource_failures"], 2);
-        assert!(warning["requested_items"].is_null());
+        assert!(warning.get("outputs").is_none());
+        assert!(warning.get("requested_items").is_none());
         assert!(!warning.to_string().contains("secret-token"));
     }
 

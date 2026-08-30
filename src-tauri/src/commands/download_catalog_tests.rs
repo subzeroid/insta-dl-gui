@@ -616,21 +616,29 @@ async fn fetched_batch_preserves_carousels_catalog_sidecars_and_global_progress(
         .all(|output| output.file_id.is_some()));
     let items = fixture.all_items();
     assert_eq!(items.len(), 4, "expected one catalog item per post");
-    let catalog_file_ids = items
+    let catalog_files = items
         .iter()
         .flat_map(|item| item.files.iter())
         .filter(|file| matches!(file.kind, MediaFileKind::Photo | MediaFileKind::Video))
-        .map(|file| file.id)
-        .collect::<std::collections::HashSet<_>>();
-    assert_eq!(
-        completed
-            .outputs
-            .iter()
-            .filter_map(|output| output.file_id)
-            .collect::<std::collections::HashSet<_>>(),
-        catalog_file_ids,
-        "output file IDs must be the real stable catalog rows"
-    );
+        .map(|file| (file.id, file))
+        .collect::<std::collections::HashMap<_, _>>();
+    for output in &completed.outputs {
+        let file_id = output
+            .file_id
+            .expect("cataloged output must have a file ID");
+        let catalog_file = catalog_files
+            .get(&file_id)
+            .expect("output file ID must resolve to a catalog file row");
+        assert_eq!(
+            Path::new(&catalog_file.relative_path)
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some(output.basename.as_str()),
+            "catalog file ID must resolve to this output's basename"
+        );
+        assert_eq!(catalog_file.kind, output.kind);
+        assert_eq!(catalog_file.ordinal, i64::from(output.ordinal));
+    }
     for item in &items {
         assert_eq!(item.owner_username.as_deref(), Some("nike"));
         assert_eq!(item.owner_pk.as_deref(), Some("123"));
