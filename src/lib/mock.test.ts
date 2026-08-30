@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   cancelLibraryScan,
+  enqueueFetchedPostDownload,
   ensureConfiguredLibraryRoot,
   getLibraryItem,
   libraryMediaUrl,
@@ -74,6 +75,20 @@ describe("profile pagination mock", () => {
     ).toBe(true);
     expect(first.end_cursor).toBe("reels-cursor");
     expect(second.end_cursor).toBeNull();
+  });
+
+  it("supports exact fetched-media downloads in the Explore demo", async () => {
+    installTauriMock();
+
+    await expect(
+      enqueueFetchedPostDownload("natgeo", "posts", "shown", [
+        {
+          pk: "1",
+          code: "POST1",
+          resources: [{ url: "https://cdn.example/photo.jpg", kind: "photo" }],
+        },
+      ]),
+    ).resolves.toBe("mock-job-id");
   });
 });
 

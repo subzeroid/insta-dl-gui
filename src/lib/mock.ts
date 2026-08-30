@@ -326,6 +326,7 @@ function reply(cmd: string, args?: CmdArgs): unknown {
       ];
     case "download_direct":
     case "download_post":
+    case "enqueue_fetched_post_download":
       return "mock-job-id";
     case "enqueue_profile_download":
       return "mock-job-id";
