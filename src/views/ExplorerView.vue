@@ -14,6 +14,7 @@ import {
   type Post,
   type SearchUser,
   type StoryItem,
+  type FetchedPostCategory,
 } from "../lib/ipc";
 import { useExplorerStore, type ExploreTab, type PostFilter } from "../stores/explorer";
 import { useJobsStore } from "../stores/jobs";
@@ -54,6 +55,7 @@ const reelsRetryCursor = ref<string | null>(null);
 
 const modalPost = ref<Post | null>(null);
 const modalStory = ref<StoryItem | null>(null);
+const modalPostCategory = ref<FetchedPostCategory>("posts");
 
 const requests = createExplorerRequestState();
 const activeActions = reactive(new Set<string>());
@@ -482,6 +484,11 @@ function closeModal() {
   modalStory.value = null;
 }
 
+function openPostModal(post: Post) {
+  modalPostCategory.value = activeTab.value === "reels" ? "reels" : "posts";
+  modalPost.value = post;
+}
+
 onMounted(() => {
   if (preview.value) {
     if (
@@ -699,7 +706,7 @@ onUnmounted(() => {
                 data-action="preview"
                 class="absolute inset-0 cursor-pointer overflow-hidden rounded-lg transition hover:brightness-110"
                 :aria-label="`Preview ${previewMediaLabel(p)} ${p.code}`"
-                @click="modalPost = p"
+                @click="openPostModal(p)"
               >
                 <img
                   v-if="thumbUrl(p)"
@@ -822,6 +829,7 @@ onUnmounted(() => {
       v-if="modalPost || modalStory"
       :username="preview?.profile.username ?? ''"
       :post="modalPost"
+      :post-category="modalPostCategory"
       :story="modalStory"
       @close="closeModal"
     />

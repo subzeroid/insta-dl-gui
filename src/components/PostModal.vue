@@ -1,18 +1,29 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
-import { downloadDirect, downloadPost, type Post, type StoryItem } from "../lib/ipc";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import {
+  downloadDirect,
+  downloadPost,
+  type FetchedPostCategory,
+  type Post,
+  type StoryItem,
+} from "../lib/ipc";
+import { canonicalInstagramUrl } from "../lib/postDisplay";
 import { useJobsStore } from "../stores/jobs";
 
 const props = defineProps<{
   username: string;
   post?: Post | null;
   story?: StoryItem | null;
+  postCategory?: FetchedPostCategory;
 }>();
 
 const emit = defineEmits<{ close: [] }>();
 const jobs = useJobsStore();
 const busy = ref(false);
 const error = ref<string | null>(null);
+const copyError = ref<string | null>(null);
+const copyFeedback = ref<"description" | "link" | null>(null);
+let clearCopyFeedbackTimer: number | undefined;
 
 const videoUrl = computed(() => {
   if (props.post) return props.post.resources.find((r) => r.kind === "video")?.url ?? null;
@@ -27,6 +38,10 @@ const imageUrl = computed(() => {
 });
 
 const caption = computed(() => props.post?.caption ?? "");
+const hasCaption = computed(() => caption.value.trim().length > 0);
+const canonicalPostUrl = computed(() =>
+  props.post ? canonicalInstagramUrl(props.post.code, props.postCategory ?? "posts") : "",
+);
 const meta = computed(() => {
   if (props.post) {
     const who = props.post.owner_username ?? props.username;
@@ -34,6 +49,33 @@ const meta = computed(() => {
   }
   return `Story · @${props.username}`;
 });
+
+function clearCopyFeedback() {
+  if (clearCopyFeedbackTimer !== undefined) {
+    window.clearTimeout(clearCopyFeedbackTimer);
+    clearCopyFeedbackTimer = undefined;
+  }
+  copyFeedback.value = null;
+  copyError.value = null;
+}
+
+async function copy(value: string, kind: "description" | "link") {
+  if (!value) return;
+  clearCopyFeedback();
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable");
+    await navigator.clipboard.writeText(value);
+    copyFeedback.value = kind;
+    clearCopyFeedbackTimer = window.setTimeout(clearCopyFeedback, 2000);
+  } catch {
+    copyError.value = "Could not copy. Please try again.";
+  }
+}
+
+function close() {
+  clearCopyFeedback();
+  emit("close");
+}
 
 async function download() {
   if (busy.value) return;
@@ -49,7 +91,7 @@ async function download() {
       ]);
       jobs.addPlaceholder(id, `@${props.username} story`);
     }
-    emit("close");
+    close();
   } catch (e) {
     error.value = String(e);
   } finally {
@@ -58,16 +100,24 @@ async function download() {
 }
 
 function onKey(e: KeyboardEvent) {
-  if (e.key === "Escape") emit("close");
+  if (e.key === "Escape") close();
 }
 
 onMounted(() => window.addEventListener("keydown", onKey));
-onUnmounted(() => window.removeEventListener("keydown", onKey));
+onUnmounted(() => {
+  window.removeEventListener("keydown", onKey);
+  clearCopyFeedback();
+});
+
+watch(
+  [() => props.post?.code, () => props.story?.pk, () => props.postCategory],
+  clearCopyFeedback,
+);
 </script>
 
 <template>
   <Teleport to="body">
-    <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" @click.self="emit('close')">
+    <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" @click.self="close">
       <div class="card w-full max-w-xl overflow-hidden">
         <video v-if="videoUrl" :src="videoUrl" controls class="max-h-[60vh] w-full bg-black" />
         <img
@@ -84,7 +134,36 @@ onUnmounted(() => window.removeEventListener("keydown", onKey));
           <p class="text-xs text-slate-500">{{ meta }}</p>
           <p v-if="caption" class="line-clamp-4 text-sm text-slate-300">{{ caption }}</p>
           <p v-if="error" class="rounded-lg border border-err/40 bg-err/10 px-3 py-2 text-sm text-err">{{ error }}</p>
-          <div class="flex justify-end">
+          <p
+            v-if="copyError"
+            data-copy-error
+            class="rounded-lg border border-err/40 bg-err/10 px-3 py-2 text-sm text-err"
+          >
+            {{ copyError }}
+          </p>
+          <p class="sr-only" aria-live="polite">
+            {{ copyFeedback === "description" ? "Copy description copied" : copyFeedback === "link" ? "Copy link copied" : "" }}
+          </p>
+          <div class="flex flex-wrap items-center justify-end gap-2">
+            <button
+              v-if="post"
+              data-action="copy-description"
+              class="btn-secondary"
+              :disabled="!hasCaption"
+              :aria-disabled="!hasCaption"
+              :title="hasCaption ? undefined : 'This post has no description to copy.'"
+              @click="copy(caption, 'description')"
+            >
+              Copy description<span v-if="copyFeedback === 'description'" class="ml-2 text-ok">Copied</span>
+            </button>
+            <button
+              v-if="post"
+              data-action="copy-link"
+              class="btn-secondary"
+              @click="copy(canonicalPostUrl, 'link')"
+            >
+              Copy link<span v-if="copyFeedback === 'link'" class="ml-2 text-ok">Copied</span>
+            </button>
             <button class="btn-primary" :disabled="busy" @click="download">
               {{ busy ? "Starting…" : "Download" }}
             </button>
