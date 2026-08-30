@@ -73,6 +73,8 @@ impl ProgressSink for CancelOnTerminalProgress {
 
 struct TestResult {
     outcome: JobOutcome,
+    outputs: Vec<JobOutputFile>,
+    requested_items: Option<usize>,
     resource_errors: Vec<String>,
     relative_paths: Vec<String>,
 }
@@ -136,6 +138,8 @@ impl Fixture {
         };
         TestResult {
             outcome: completed.outcome,
+            outputs: completed.outputs,
+            requested_items: completed.requested_items,
             resource_errors,
             relative_paths,
         }
@@ -478,6 +482,8 @@ async fn reels_only_profile_job_caps_by_unique_reel_count_across_overlapping_pag
         .await;
 
     assert_eq!(completed.outcome.files_written, 3);
+    assert_eq!(completed.requested_items, None);
+    assert_eq!(completed.outputs.len(), 3);
     assert!(completed.resource_errors.is_empty());
 }
 
@@ -562,20 +568,70 @@ async fn fetched_batch_preserves_carousels_catalog_sidecars_and_global_progress(
     single.owner_pk = Some("123".into());
     let progress = RecordingProgress::default();
 
+    let mut third = post(
+        "batch-3",
+        "BATCH-THIRD",
+        vec![resource(&server, "/single-photo", MediaKind::Photo)],
+    );
+    third.owner_username = Some("nike".into());
+    third.owner_pk = Some("123".into());
+    let mut fourth = post(
+        "batch-4",
+        "BATCH-FOURTH",
+        vec![resource(&server, "/single-photo", MediaKind::Photo)],
+    );
+    fourth.owner_username = Some("nike".into());
+    fourth.owner_pk = Some("123".into());
+
     let completed = fixture
-        .run_fetched_posts(&[carousel, single], true, &progress, None)
+        .run_fetched_posts(&[carousel, single, third, fourth], true, &progress, None)
         .await
         .unwrap_or_else(|failure| match failure {
             JobFail::Cancelled => panic!("fetched batch was unexpectedly cancelled"),
             JobFail::Fatal(error) => panic!("fetched batch failed: {error}"),
         });
 
-    assert_eq!(completed.outcome.files_written, 3);
+    assert_eq!(completed.requested_items, Some(4));
+    assert_eq!(completed.outcome.files_written, 5);
     assert_eq!(completed.outcome.catalog_warnings, 0);
     assert!(completed.resource_errors.is_empty());
+    assert_eq!(completed.outputs.len(), 5);
+    assert_eq!(
+        completed
+            .outputs
+            .iter()
+            .map(|output| (output.ordinal, output.kind, output.byte_size))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, MediaFileKind::Photo, JPEG.len() as u64),
+            (1, MediaFileKind::Video, MP4.len() as u64),
+            (0, MediaFileKind::Photo, JPEG.len() as u64),
+            (0, MediaFileKind::Photo, JPEG.len() as u64),
+            (0, MediaFileKind::Photo, JPEG.len() as u64),
+        ]
+    );
+    assert!(completed
+        .outputs
+        .iter()
+        .all(|output| output.file_id.is_some()));
     let items = fixture.all_items();
-    assert_eq!(items.len(), 2, "expected one catalog item per post");
-    for item in items {
+    assert_eq!(items.len(), 4, "expected one catalog item per post");
+    let catalog_file_ids = items
+        .iter()
+        .flat_map(|item| item.files.iter())
+        .filter(|file| matches!(file.kind, MediaFileKind::Photo | MediaFileKind::Video))
+        .map(|file| file.id)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        completed
+            .outputs
+            .iter()
+            .filter_map(|output| output.file_id)
+            .collect::<std::collections::HashSet<_>>(),
+        catalog_file_ids,
+        "output file IDs must be the real stable catalog rows"
+    );
+    for item in &items {
         assert_eq!(item.owner_username.as_deref(), Some("nike"));
         assert_eq!(item.owner_pk.as_deref(), Some("123"));
         let sidecars = item
@@ -588,12 +644,12 @@ async fn fetched_batch_preserves_carousels_catalog_sidecars_and_global_progress(
     }
     let updates = progress.updates();
     assert!(!updates.is_empty());
-    assert!(updates.iter().all(|(_, total, _)| *total == 3));
+    assert!(updates.iter().all(|(_, total, _)| *total == 5));
     assert!(updates
         .windows(2)
         .all(|pair| { pair[0].0 <= pair[1].0 && pair[0].2 <= pair[1].2 }));
-    assert_eq!(updates.last().map(|update| update.0), Some(3));
-    assert_eq!(updates.last().map(|update| update.2), Some(32));
+    assert_eq!(updates.last().map(|update| update.0), Some(5));
+    assert_eq!(updates.last().map(|update| update.2), Some(48));
 }
 
 #[tokio::test]
@@ -1222,7 +1278,13 @@ async fn sidecar_is_metadata_and_media_kind_comes_from_verified_bytes() {
         vec![resource(&server, "/misleading.mp4", MediaKind::Video)],
     );
 
-    fixture.run(&item, true).await;
+    let result = fixture.run(&item, true).await;
+
+    assert_eq!(result.requested_items, Some(1));
+    assert_eq!(result.outcome.files_written, 1);
+    assert_eq!(result.outputs.len(), 1, "sidecars are not job outputs");
+    assert_eq!(result.outputs[0].kind, MediaFileKind::Photo);
+    assert_eq!(result.outputs[0].byte_size, JPEG.len() as u64);
 
     let detail = fixture.only_item();
     assert_eq!(
@@ -1280,6 +1342,12 @@ async fn catalog_failure_after_disk_success_is_only_one_warning() {
     assert_eq!(result.outcome.files_written, 1);
     assert_eq!(result.outcome.catalog_warnings, 1);
     assert!(result.resource_errors.is_empty());
+    assert_eq!(result.outputs.len(), 1);
+    assert_eq!(result.outputs[0].file_id, None);
+    assert!(result.outputs[0].basename.ends_with("_DURABLE.jpg"));
+    assert!(!result.outputs[0].basename.contains('/'));
+    assert!(!result.outputs[0].basename.contains('\\'));
+    assert!(!Path::new(&result.outputs[0].basename).is_absolute());
     assert_eq!(result.relative_paths.len(), 1);
     assert_eq!(
         fs::read(absolute(&fixture.root, &result.relative_paths[0])).unwrap(),
@@ -1462,6 +1530,8 @@ async fn direct_propic_round_trip_keeps_avatar_identity_and_file_link() {
     });
 
     assert_eq!(outcome.outcome.files_written, 1);
+    assert_eq!(outcome.requested_items, Some(1));
+    assert_eq!(outcome.outputs.len(), 1);
     assert!(outcome.resource_errors.is_empty());
     let downloaded = fixture.only_item();
     assert_eq!(downloaded.remote_key, "avatar:445566");
