@@ -343,6 +343,8 @@ function reply(cmd: string, args?: CmdArgs): unknown {
       return null;
     case "plugin:opener|open_url":
       return null;
+    case "plugin:clipboard-manager|write_text":
+      return null;
     default:
       throw new Error(`mock ipc: unhandled command "${cmd}"`);
   }

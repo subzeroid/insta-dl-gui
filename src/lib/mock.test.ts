@@ -37,6 +37,14 @@ afterEach(() => {
 });
 
 describe("profile pagination mock", () => {
+  it("handles the official clipboard manager write command", async () => {
+    installTauriMock();
+
+    await expect(
+      invoke()("plugin:clipboard-manager|write_text", { text: "Copy this caption" }),
+    ).resolves.toBeNull();
+  });
+
   it("returns a distinct final page for the supplied end cursor", async () => {
     installTauriMock();
     const first = (await invoke()("fetch_profile", {

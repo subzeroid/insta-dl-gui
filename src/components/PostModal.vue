@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
   downloadDirect,
   downloadPost,
@@ -70,8 +71,7 @@ async function copy(value: string, kind: "description" | "link") {
   const generation = ++copyGeneration;
   clearCopyFeedback();
   try {
-    if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable");
-    await navigator.clipboard.writeText(value);
+    await writeText(value);
     if (generation !== copyGeneration) return;
     copyFeedback.value = kind;
     clearCopyFeedbackTimer = window.setTimeout(clearCopyFeedback, 2000);
@@ -146,6 +146,7 @@ watch(
           <p
             v-if="copyError"
             data-copy-error
+            role="alert"
             class="rounded-lg border border-err/40 bg-err/10 px-3 py-2 text-sm text-err"
           >
             {{ copyError }}

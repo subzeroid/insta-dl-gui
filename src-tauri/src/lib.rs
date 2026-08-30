@@ -177,6 +177,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .register_asynchronous_uri_scheme_protocol("library", |context, request, responder| {
             let catalog = context.app_handle().state::<AppState>().catalog.clone();
             let webview_label = context.webview_label().to_owned();

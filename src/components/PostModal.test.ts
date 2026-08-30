@@ -8,12 +8,15 @@ const ipc = vi.hoisted(() => ({
   downloadDirect: vi.fn(),
   downloadPost: vi.fn(),
 }));
+const clipboard = vi.hoisted(() => ({ writeText: vi.fn() }));
 
 vi.mock("../lib/ipc", () => ({
   ...ipc,
   cancelJob: vi.fn(),
   onJobProgress: vi.fn(),
 }));
+
+vi.mock("@tauri-apps/plugin-clipboard-manager", () => clipboard);
 
 import PostModal from "./PostModal.vue";
 import type { Post, StoryItem } from "../lib/ipc";
@@ -32,7 +35,6 @@ const story: StoryItem = {
 };
 
 const wrappers: Array<{ unmount: () => void }> = [];
-let writeText: ReturnType<typeof vi.fn>;
 
 function render(props: Partial<InstanceType<typeof PostModal>["$props"]> = {}) {
   setActivePinia(createPinia());
@@ -65,11 +67,7 @@ function deferred<T>() {
 
 beforeEach(() => {
   vi.useFakeTimers();
-  writeText = vi.fn().mockResolvedValue(undefined);
-  Object.defineProperty(navigator, "clipboard", {
-    configurable: true,
-    value: { writeText },
-  });
+  clipboard.writeText.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -86,7 +84,7 @@ describe("PostModal copy actions", () => {
     await action(wrapper, "copy-description").trigger("click");
     await flushPromises();
 
-    expect(writeText).toHaveBeenCalledWith(post.caption);
+    expect(clipboard.writeText).toHaveBeenCalledWith(post.caption);
     expect(action(wrapper, "copy-description").text()).toContain("Copied");
     expect(wrapper.get("[aria-live='polite']").text()).toContain("description copied");
   });
@@ -97,7 +95,7 @@ describe("PostModal copy actions", () => {
     await action(wrapper, "copy-link").trigger("click");
     await flushPromises();
 
-    expect(writeText).toHaveBeenCalledWith("https://www.instagram.com/p/POSTCODE/");
+    expect(clipboard.writeText).toHaveBeenCalledWith("https://www.instagram.com/p/POSTCODE/");
   });
 
   it("copies a canonical reel URL", async () => {
@@ -106,7 +104,7 @@ describe("PostModal copy actions", () => {
     await action(wrapper, "copy-link").trigger("click");
     await flushPromises();
 
-    expect(writeText).toHaveBeenCalledWith("https://www.instagram.com/reel/POSTCODE/");
+    expect(clipboard.writeText).toHaveBeenCalledWith("https://www.instagram.com/reel/POSTCODE/");
   });
 
   it("disables description copy when the caption is absent", () => {
@@ -124,12 +122,13 @@ describe("PostModal copy actions", () => {
   });
 
   it("renders a concise inline error without success when clipboard access fails", async () => {
-    writeText.mockRejectedValueOnce(new Error("Clipboard blocked"));
+    clipboard.writeText.mockRejectedValueOnce(new Error("Clipboard blocked"));
     const wrapper = render();
 
     await action(wrapper, "copy-link").trigger("click");
     await flushPromises();
 
+    expect(wrapper.get("[data-copy-error]").attributes("role")).toBe("alert");
     expect(wrapper.get("[data-copy-error]").text()).toContain("Could not copy");
     expect(action(wrapper, "copy-link").text()).not.toContain("Copied");
     expect(wrapper.get("[aria-live='polite']").text()).toBe("");
@@ -160,7 +159,7 @@ describe("PostModal copy actions", () => {
 
   it("ignores a delayed clipboard completion after the modal closes", async () => {
     const pending = deferred<void>();
-    writeText.mockReturnValueOnce(pending.promise);
+    clipboard.writeText.mockReturnValueOnce(pending.promise);
     const wrapper = render();
 
     await action(wrapper, "copy-link").trigger("click");
@@ -175,7 +174,7 @@ describe("PostModal copy actions", () => {
 
   it("ignores a delayed clipboard failure after the preview item changes", async () => {
     const pending = deferred<void>();
-    writeText.mockReturnValueOnce(pending.promise);
+    clipboard.writeText.mockReturnValueOnce(pending.promise);
     const wrapper = render();
 
     await action(wrapper, "copy-description").trigger("click");
@@ -189,7 +188,7 @@ describe("PostModal copy actions", () => {
 
   it("does not create delayed feedback or a timer after unmount", async () => {
     const pending = deferred<void>();
-    writeText.mockReturnValueOnce(pending.promise);
+    clipboard.writeText.mockReturnValueOnce(pending.promise);
     const startTimer = vi.spyOn(window, "setTimeout");
     const wrapper = render();
 
