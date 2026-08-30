@@ -2,6 +2,28 @@
 
 All notable changes to insta-dl-gui are documented in this file.
 
+## 0.4.0 - 2026-08-30
+
+### Added
+
+- Explore is now the first screen and keeps the current profile, tab, loaded pages, Stories, and selections while navigating through the app.
+- Posts, Reels, and Stories can be selected individually and downloaded with one consistent **All / Shown / Selected** control.
+- Stories load automatically alongside the profile without blocking Posts or Reels.
+
+### Changed
+
+- **Shown** and **Selected** download the exact media currently in Explore, including carousel resources, while **All** remains the complete archive action.
+- Exact snapshots are limited to 500 items with a clear fallback to **All**; accepted selections clear safely while failed or changed selections remain selected.
+- Explore downloads now share Queue and footer reservations, cancellation, byte progress, and terminal results across navigation and remounts.
+- Release smoke verification retries transient CDN delivery failures.
+
+### Fixed
+
+- Exact batch downloads now validate identifiers, media URLs, duplicate payloads, and resource limits before writing files.
+- Partial failures, retries, recovered files, metadata sidecars, catalog entries, and cancellation keep accurate progress and concrete results across a batch.
+- Stories reuse the loaded profile ID, survive navigation while pending, ignore stale responses, and expose a recoverable retry state.
+- The browser-based Explore demo now supports scoped fetched-media downloads.
+
 ## 0.3.2 - 2026-08-29
 
 ### Added
