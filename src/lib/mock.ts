@@ -224,7 +224,7 @@ function mockOutput(
 ): JobOutputFile {
   return {
     file_id: 10_000 + jobNumber * 100 + outputIndex + 1,
-    basename: `${safeBasenameSegment(stem, "media")}_${ordinal}.${kind === "video" ? "mp4" : "jpg"}`,
+    basename: `${safeBasenameSegment(stem, "media")}_${ordinal + 1}.${kind === "video" ? "mp4" : "jpg"}`,
     kind,
     byte_size: kind === "video" ? 2_000_000 : 1_500_000,
     ordinal,

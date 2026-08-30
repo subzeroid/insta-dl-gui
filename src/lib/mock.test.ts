@@ -163,7 +163,7 @@ describe("download journey mock", () => {
         current_file: 1,
         total_files: 5,
         bytes_done: expect.any(Number),
-        file_name: "PHOTO1_0.jpg",
+        file_name: "PHOTO1_1.jpg",
       }),
     ]);
     await vi.advanceTimersByTimeAsync(500);
@@ -179,11 +179,11 @@ describe("download journey mock", () => {
         dir: "/mock/instagram-archive/nike/posts",
         requested_items: 4,
         outputs: [
-          { file_id: 10101, basename: "PHOTO1_0.jpg", kind: "photo", byte_size: 1_500_000, ordinal: 0 },
-          { file_id: 10102, basename: "VIDEO2_0.mp4", kind: "video", byte_size: 2_000_000, ordinal: 0 },
-          { file_id: 10103, basename: "ALBUM3_0.jpg", kind: "photo", byte_size: 1_500_000, ordinal: 0 },
-          { file_id: 10104, basename: "ALBUM3_1.mp4", kind: "video", byte_size: 2_000_000, ordinal: 1 },
-          { file_id: 10105, basename: "PHOTO4_0.jpg", kind: "photo", byte_size: 1_500_000, ordinal: 0 },
+          { file_id: 10101, basename: "PHOTO1_1.jpg", kind: "photo", byte_size: 1_500_000, ordinal: 0 },
+          { file_id: 10102, basename: "VIDEO2_1.mp4", kind: "video", byte_size: 2_000_000, ordinal: 0 },
+          { file_id: 10103, basename: "ALBUM3_1.jpg", kind: "photo", byte_size: 1_500_000, ordinal: 0 },
+          { file_id: 10104, basename: "ALBUM3_2.mp4", kind: "video", byte_size: 2_000_000, ordinal: 1 },
+          { file_id: 10105, basename: "PHOTO4_1.jpg", kind: "photo", byte_size: 1_500_000, ordinal: 0 },
         ],
       }),
     );

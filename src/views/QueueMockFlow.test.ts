@@ -86,11 +86,11 @@ describe("Queue mock download journey", () => {
     const rows = dialog.findAll("[data-output-row]");
     expect(rows).toHaveLength(5);
     expect(rows.map((row) => row.get("[data-output-basename]").text())).toEqual([
-      "ONE_0.jpg",
-      "TWO_0.mp4",
-      "THREE_0.jpg",
-      "THREE_1.mp4",
-      "FOUR_0.jpg",
+      "ONE_1.jpg",
+      "TWO_1.mp4",
+      "THREE_1.jpg",
+      "THREE_2.mp4",
+      "FOUR_1.jpg",
     ]);
 
     const probes = invokeSpy.mock.calls.filter(([cmd]) => cmd === "request_library_preview_access");
