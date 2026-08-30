@@ -5,7 +5,7 @@ import { DOMWrapper, flushPromises, mount, type VueWrapper } from "@vue/test-uti
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { enqueueFetchedPostDownload, libraryMediaUrl, type Post } from "../lib/ipc";
-import { installTauriMock } from "../lib/mock";
+import { installTauriMock, uninstallTauriMock } from "../lib/mock";
 import { useJobsStore } from "../stores/jobs";
 import QueueView from "./QueueView.vue";
 
@@ -22,6 +22,7 @@ beforeEach(() => {
 afterEach(() => {
   wrapper?.unmount();
   wrapper = undefined;
+  uninstallTauriMock();
   vi.runOnlyPendingTimers();
   vi.useRealTimers();
   document.body.replaceChildren();
@@ -49,17 +50,17 @@ describe("Queue mock download journey", () => {
       global: { plugins: [pinia] },
     });
     const posts: Post[] = [
-      { pk: "1", code: "ONE", resources: [{ url: "one.jpg", kind: "photo" }] },
-      { pk: "2", code: "TWO", resources: [{ url: "two.mp4", kind: "video" }] },
+      { pk: "1", code: "ONE", resources: [{ url: "https://cdninstagram.com/one.jpg", kind: "photo" }] },
+      { pk: "2", code: "TWO", resources: [{ url: "https://cdninstagram.com/two.mp4", kind: "video" }] },
       {
         pk: "3",
         code: "THREE",
         resources: [
-          { url: "three.jpg", kind: "photo" },
-          { url: "three.mp4", kind: "video" },
+          { url: "https://cdninstagram.com/three.jpg", kind: "photo" },
+          { url: "https://cdninstagram.com/three.mp4", kind: "video" },
         ],
       },
-      { pk: "4", code: "FOUR", resources: [{ url: "four.jpg", kind: "photo" }] },
+      { pk: "4", code: "FOUR", resources: [{ url: "https://cdninstagram.com/four.jpg", kind: "photo" }] },
     ];
 
     const jobId = await enqueueFetchedPostDownload("nike", "posts", "selected", posts);

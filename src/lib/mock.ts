@@ -20,6 +20,8 @@ import type {
 
 type CmdArgs = Record<string, unknown>;
 type MockLibraryCard = LibraryCard & { preview_url: string };
+type MockWindow = Record<PropertyKey, unknown>;
+type FileIdAllocator = () => number;
 type MockEventPayloads = {
   "library-scan-progress": LibraryScanProgress;
   "job-progress": JobProgress;
@@ -31,6 +33,14 @@ interface MockDownloadManifest {
   requestedItems?: number;
   outputs: JobOutputFile[];
 }
+
+const MOCK_DISPOSER = Symbol("insta-dl-gui-tauri-mock-disposer");
+const MAX_DOWNLOAD_ITEMS = 500;
+const MAX_RESOURCES_PER_POST = 20;
+const MAX_SHORTCODE_BYTES = 256;
+const ALLOWED_CDN_HOSTS = ["cdninstagram.com", "fbcdn.net"];
+const MOCK_PROFILE_PK_START = 9_000_000;
+const MOCK_REEL_PK_START = 9_100_000;
 
 const AVATAR =
   "data:image/svg+xml," +
@@ -60,6 +70,31 @@ function libraryPreview(label: string, start: string, end: string): string {
     )
   );
 }
+
+const MOCK_STORIES = [
+  {
+    pk: "s1",
+    taken_at: 1_776_787_455,
+    kind: "photo" as const,
+    media_url: "",
+    thumb_url: libraryPreview("STORY 1", "#7c3aed", "#db2777"),
+  },
+  {
+    pk: "s2",
+    taken_at: 1_776_787_500,
+    kind: "video" as const,
+    media_url: "",
+    thumb_url: libraryPreview("STORY 2", "#0f766e", "#2563eb"),
+  },
+  {
+    pk: "s3",
+    taken_at: 1_776_787_600,
+    kind: "photo" as const,
+    media_url: "",
+    thumb_url: libraryPreview("STORY 3", "#b45309", "#dc2626"),
+  },
+];
+const MOCK_STORY_KINDS = new Map(MOCK_STORIES.map((story) => [story.pk, story.kind]));
 
 const LIBRARY_ROOT: LibraryRoot = {
   id: 1,
@@ -216,14 +251,13 @@ function safeBasenameSegment(value: unknown, fallback: string): string {
 }
 
 function mockOutput(
-  jobNumber: number,
-  outputIndex: number,
+  allocateFileId: FileIdAllocator,
   stem: string,
   kind: "photo" | "video",
   ordinal: number,
 ): JobOutputFile {
   return {
-    file_id: 10_000 + jobNumber * 100 + outputIndex + 1,
+    file_id: allocateFileId(),
     basename: `${safeBasenameSegment(stem, "media")}_${ordinal + 1}.${kind === "video" ? "mp4" : "jpg"}`,
     kind,
     byte_size: kind === "video" ? 2_000_000 : 1_500_000,
@@ -231,16 +265,222 @@ function mockOutput(
   };
 }
 
-function fetchedPostManifest(args: CmdArgs | undefined, jobNumber: number): MockDownloadManifest {
-  const username = safeBasenameSegment(args?.username, "instagram");
-  const category = args?.category === "reels" ? "reels" : "posts";
-  const scope = args?.scope === "selected" ? "selected" : "shown";
-  const posts = Array.isArray(args?.posts) ? (args.posts as Post[]) : [];
-  let outputIndex = 0;
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeUsername(value: unknown): string {
+  if (typeof value !== "string") throw new Error("Instagram username must be a string");
+  const trimmed = value.trim();
+  const username = (trimmed.startsWith("@") ? trimmed.slice(1) : trimmed).toLowerCase();
+  if (
+    username.length === 0 ||
+    username.length > 30 ||
+    username === "." ||
+    username === ".." ||
+    !/^[A-Za-z0-9._]+$/.test(username)
+  ) {
+    throw new Error(
+      "Instagram username must use 1 to 30 ASCII letters, digits, periods, or underscores",
+    );
+  }
+  return username;
+}
+
+function isOwnMockFetchedResource(
+  post: Record<string, unknown>,
+  resource: Record<string, unknown>,
+): boolean {
+  const numeric = Number(post.pk);
+  const profileIndex = numeric - MOCK_PROFILE_PK_START;
+  const reelIndex = numeric - MOCK_REEL_PK_START;
+  const matchesFixture =
+    (Number.isInteger(profileIndex) &&
+      profileIndex >= 0 &&
+      profileIndex < 100 &&
+      post.code === `DEMO${profileIndex}`) ||
+    (Number.isInteger(reelIndex) &&
+      reelIndex >= 0 &&
+      reelIndex < 100 &&
+      post.code === `REEL${reelIndex}`);
+  return (
+    matchesFixture &&
+    typeof post.thumbnail_url === "string" &&
+    post.thumbnail_url.startsWith("data:image/svg+xml,") &&
+    resource.url === ""
+  );
+}
+
+function isAllowedRemoteUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const parsed = new URL(value);
+    return (
+      parsed.protocol === "https:" &&
+      ALLOWED_CDN_HOSTS.some(
+        (host) => parsed.hostname === host || parsed.hostname.endsWith(`.${host}`),
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
+function validateFetchedPosts(value: unknown): Post[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error("Fetched post batch must not be empty");
+  }
+  if (value.length > MAX_DOWNLOAD_ITEMS) {
+    throw new Error("Fetched post batch exceeds maximum of 500 posts");
+  }
+  const seen = new Map<string, string>();
+  const validated: Post[] = [];
+  for (const candidate of value) {
+    if (!isPlainObject(candidate)) throw new Error("Fetched post is malformed");
+    if (typeof candidate.pk !== "string" || !/^\d+$/.test(candidate.pk)) {
+      throw new Error("Fetched post PK must contain only ASCII digits");
+    }
+    if (typeof candidate.code !== "string" || candidate.code.length === 0) {
+      throw new Error("Fetched post shortcode must not be empty");
+    }
+    if (new TextEncoder().encode(candidate.code).length > MAX_SHORTCODE_BYTES) {
+      throw new Error("Fetched post shortcode exceeds maximum of 256 bytes");
+    }
+    if (
+      !Array.isArray(candidate.resources) ||
+      candidate.resources.length === 0 ||
+      candidate.resources.length > MAX_RESOURCES_PER_POST
+    ) {
+      throw new Error("Fetched post must contain between 1 and 20 resources");
+    }
+    for (const resource of candidate.resources) {
+      if (
+        !isPlainObject(resource) ||
+        (resource.kind !== "photo" && resource.kind !== "video") ||
+        (!isAllowedRemoteUrl(resource.url) && !isOwnMockFetchedResource(candidate, resource))
+      ) {
+        throw new Error("Fetched post contains an invalid media resource");
+      }
+    }
+    const post = candidate as unknown as Post;
+    const canonical = JSON.stringify(post);
+    const existing = seen.get(post.pk);
+    if (existing !== undefined && existing !== canonical) {
+      throw new Error("Fetched post batch contains conflicting posts with the same PK");
+    }
+    if (existing === undefined) {
+      seen.set(post.pk, canonical);
+      validated.push(post);
+    }
+  }
+  return validated;
+}
+
+function validateFetchedArgs(args: CmdArgs | undefined): CmdArgs {
+  const username = normalizeUsername(args?.username);
+  if (args?.category !== "posts" && args?.category !== "reels") {
+    throw new Error("Fetched post category must be posts or reels");
+  }
+  if (args?.scope !== "shown" && args?.scope !== "selected") {
+    throw new Error("Fetched post scope must be shown or selected");
+  }
+  return { ...args, username, posts: validateFetchedPosts(args?.posts) };
+}
+
+function validateDirectArgs(args: CmdArgs | undefined): CmdArgs {
+  if (typeof args?.label !== "string" || args.label.trim().length === 0) {
+    throw new Error("Download label must not be empty");
+  }
+  if (typeof args?.subfolder !== "string" || args.subfolder.trim().length === 0) {
+    throw new Error("Download subfolder must not be empty");
+  }
+  if (!Array.isArray(args.items) || args.items.length === 0) {
+    throw new Error("Nothing to download");
+  }
+  if (args.items.length > MAX_DOWNLOAD_ITEMS) {
+    throw new Error("Direct download exceeds maximum of 500 items");
+  }
+  const storyContext = args.subfolder.trim().toLowerCase() === "stories";
+  for (const candidate of args.items) {
+    if (
+      !isPlainObject(candidate) ||
+      typeof candidate.pk !== "string" ||
+      candidate.pk.trim().length === 0 ||
+      typeof candidate.url !== "string" ||
+      (candidate.taken_at !== undefined &&
+        candidate.taken_at !== null &&
+        !Number.isSafeInteger(candidate.taken_at))
+    ) {
+      throw new Error("Direct download item is malformed");
+    }
+    const ownStoryFixture = storyContext && MOCK_STORY_KINDS.has(candidate.pk) && candidate.url === "";
+    const ownDataFixture = candidate.url === AVATAR;
+    if (!ownStoryFixture && !ownDataFixture && !isAllowedRemoteUrl(candidate.url)) {
+      throw new Error("Direct download item contains an invalid media URL");
+    }
+  }
+  return { ...args, label: args.label.trim(), subfolder: args.subfolder.trim() };
+}
+
+function validateStandaloneArgs(args: CmdArgs | undefined): CmdArgs {
+  if (
+    typeof args?.code !== "string" ||
+    args.code.trim().length === 0 ||
+    new TextEncoder().encode(args.code.trim()).length > MAX_SHORTCODE_BYTES
+  ) {
+    throw new Error("Post shortcode must contain between 1 and 256 bytes");
+  }
+  return { ...args, code: args.code.trim() };
+}
+
+function validateProfileArgs(args: CmdArgs | undefined): CmdArgs {
+  const username = normalizeUsername(args?.username);
+  if (!isPlainObject(args?.opts)) throw new Error("Profile options are malformed");
+  const opts = args.opts;
+  const optionKeys = ["posts", "reels", "stories", "highlights", "avatar"] as const;
+  if (optionKeys.some((key) => typeof opts[key] !== "boolean")) {
+    throw new Error("Profile options are malformed");
+  }
+  if (!optionKeys.some((key) => opts[key] === true)) {
+    throw new Error("Select at least one profile category");
+  }
+  if (
+    opts.max_posts !== undefined &&
+    opts.max_posts !== null &&
+    (!Number.isSafeInteger(opts.max_posts) || Number(opts.max_posts) <= 0)
+  ) {
+    throw new Error("Profile max_posts must be a positive integer or null");
+  }
+  return { ...args, username, opts };
+}
+
+function validateDownloadArgs(cmd: string, args: CmdArgs | undefined): CmdArgs {
+  switch (cmd) {
+    case "enqueue_fetched_post_download":
+      return validateFetchedArgs(args);
+    case "download_direct":
+      return validateDirectArgs(args);
+    case "download_post":
+      return validateStandaloneArgs(args);
+    case "enqueue_profile_download":
+      return validateProfileArgs(args);
+    default:
+      throw new Error(`mock download: unhandled command "${cmd}"`);
+  }
+}
+
+function fetchedPostManifest(
+  args: CmdArgs | undefined,
+  allocateFileId: FileIdAllocator,
+): MockDownloadManifest {
+  const username = String(args?.username);
+  const category = args?.category as "posts" | "reels";
+  const scope = args?.scope as "shown" | "selected";
+  const posts = args?.posts as Post[];
   const outputs = posts.flatMap((post, postIndex) => {
     const stem = safeBasenameSegment(post.code, `post-${postIndex + 1}`);
     return post.resources.map((resource, ordinal) =>
-      mockOutput(jobNumber, outputIndex++, stem, resource.kind, ordinal),
+      mockOutput(allocateFileId, stem, resource.kind, ordinal),
     );
   });
   return {
@@ -251,15 +491,18 @@ function fetchedPostManifest(args: CmdArgs | undefined, jobNumber: number): Mock
   };
 }
 
-function directManifest(args: CmdArgs | undefined, jobNumber: number): MockDownloadManifest {
+function directManifest(
+  args: CmdArgs | undefined,
+  allocateFileId: FileIdAllocator,
+): MockDownloadManifest {
   const label = safeBasenameSegment(args?.label, "instagram");
   const subfolder = safeBasenameSegment(args?.subfolder, "media");
-  const items = Array.isArray(args?.items) ? (args.items as DirectItem[]) : [];
+  const items = args?.items as DirectItem[];
   const outputs = items.map((item, outputIndex) => {
-    const kind = /\.(?:mp4|mov|webm)(?:[?#]|$)/i.test(item.url) ? "video" : "photo";
+    const fixtureKind = subfolder.toLowerCase() === "stories" ? MOCK_STORY_KINDS.get(item.pk) : undefined;
+    const kind = fixtureKind ?? (/\.(?:mp4|mov|webm)(?:[?#]|$)/i.test(item.url) ? "video" : "photo");
     return mockOutput(
-      jobNumber,
-      outputIndex,
+      allocateFileId,
       safeBasenameSegment(item.pk, `media-${outputIndex + 1}`),
       kind,
       0,
@@ -273,17 +516,23 @@ function directManifest(args: CmdArgs | undefined, jobNumber: number): MockDownl
   };
 }
 
-function standalonePostManifest(args: CmdArgs | undefined, jobNumber: number): MockDownloadManifest {
+function standalonePostManifest(
+  args: CmdArgs | undefined,
+  allocateFileId: FileIdAllocator,
+): MockDownloadManifest {
   const code = safeBasenameSegment(args?.code, "post");
   return {
     label: `Post ${code}`,
     dir: "/mock/instagram-archive/posts",
     requestedItems: 1,
-    outputs: [mockOutput(jobNumber, 0, code, "photo", 0)],
+    outputs: [mockOutput(allocateFileId, code, "photo", 0)],
   };
 }
 
-function profileManifest(args: CmdArgs | undefined, jobNumber: number): MockDownloadManifest {
+function profileManifest(
+  args: CmdArgs | undefined,
+  allocateFileId: FileIdAllocator,
+): MockDownloadManifest {
   const username = safeBasenameSegment(args?.username, "instagram");
   const opts = (args?.opts ?? {}) as Partial<ProfileOptions>;
   const kinds: Array<{ suffix: string; kind: "photo" | "video" }> = [];
@@ -292,12 +541,11 @@ function profileManifest(args: CmdArgs | undefined, jobNumber: number): MockDown
   if (opts.stories) kinds.push({ suffix: "story", kind: "photo" });
   if (opts.highlights) kinds.push({ suffix: "highlight", kind: "video" });
   if (opts.avatar) kinds.push({ suffix: "avatar", kind: "photo" });
-  if (kinds.length === 0) kinds.push({ suffix: "post", kind: "photo" });
   return {
     label: `@${username} archive`,
     dir: `/mock/instagram-archive/${username}`,
-    outputs: kinds.map(({ suffix, kind }, outputIndex) =>
-      mockOutput(jobNumber, outputIndex, `${username}_${suffix}`, kind, 0),
+    outputs: kinds.map(({ suffix, kind }) =>
+      mockOutput(allocateFileId, `${username}_${suffix}`, kind, 0),
     ),
   };
 }
@@ -305,17 +553,17 @@ function profileManifest(args: CmdArgs | undefined, jobNumber: number): MockDown
 function downloadManifest(
   cmd: string,
   args: CmdArgs | undefined,
-  jobNumber: number,
+  allocateFileId: FileIdAllocator,
 ): MockDownloadManifest {
   switch (cmd) {
     case "enqueue_fetched_post_download":
-      return fetchedPostManifest(args, jobNumber);
+      return fetchedPostManifest(args, allocateFileId);
     case "download_direct":
-      return directManifest(args, jobNumber);
+      return directManifest(args, allocateFileId);
     case "download_post":
-      return standalonePostManifest(args, jobNumber);
+      return standalonePostManifest(args, allocateFileId);
     case "enqueue_profile_download":
-      return profileManifest(args, jobNumber);
+      return profileManifest(args, allocateFileId);
     default:
       throw new Error(`mock download: unhandled command "${cmd}"`);
   }
@@ -395,7 +643,7 @@ function reply(cmd: string, args?: CmdArgs): unknown {
             );
           const isVideo = index % 3 === 0;
           return {
-            pk: `p${index}`,
+            pk: String(MOCK_PROFILE_PK_START + index),
             code: `DEMO${index}`,
             caption: `Demo post #${index} — golden hour somewhere far away`,
             like_count: 1200 * (24 - index),
@@ -426,7 +674,7 @@ function reply(cmd: string, args?: CmdArgs): unknown {
                </svg>`,
             );
           return {
-            pk: `r${index}`,
+            pk: String(MOCK_REEL_PK_START + index),
             code: `REEL${index}`,
             caption: `Demo reel #${index}`,
             taken_at: 1_776_000_000 + index * 86_400,
@@ -450,11 +698,7 @@ function reply(cmd: string, args?: CmdArgs): unknown {
       return pool.filter((u) => u.username.includes(q.replace(/^@/, "")));
     }
     case "fetch_stories":
-      return [
-        { pk: "s1", taken_at: 1776787455, kind: "photo", media_url: "mock://stories/s1.jpg", thumb_url: "" },
-        { pk: "s2", taken_at: 1776787500, kind: "video", media_url: "mock://stories/s2.mp4", thumb_url: "" },
-        { pk: "s3", taken_at: 1776787600, kind: "photo", media_url: "mock://stories/s3.jpg", thumb_url: "" },
-      ];
+      return MOCK_STORIES.map((story) => ({ ...story }));
     case "validate_token":
       return reply("__balance");
     case "save_settings":
@@ -473,8 +717,18 @@ function reply(cmd: string, args?: CmdArgs): unknown {
   }
 }
 
+export function uninstallTauriMock(): void {
+  const w = window as unknown as MockWindow;
+  const dispose = w[MOCK_DISPOSER];
+  if (typeof dispose === "function") dispose();
+  delete w[MOCK_DISPOSER];
+  delete w.__TAURI_INTERNALS__;
+  delete w.__TAURI_EVENT_PLUGIN_INTERNALS__;
+}
+
 export function installTauriMock(): void {
-  const w = window as unknown as Record<string, unknown>;
+  uninstallTauriMock();
+  const w = window as unknown as MockWindow;
   const callbacks = new Map<number, (data: unknown) => void>();
   const listeners = new Map<string, number[]>();
   const activeJobs = new Map<
@@ -483,6 +737,12 @@ export function installTauriMock(): void {
   >();
   let nextCallbackId = 1;
   let nextJobNumber = 1;
+  let nextFileId = 10_101;
+  let disposed = false;
+
+  function allocateFileId(): number {
+    return nextFileId++;
+  }
 
   function unregisterCallback(id: number) {
     callbacks.delete(id);
@@ -511,9 +771,10 @@ export function installTauriMock(): void {
   }
 
   function enqueueDownload(cmd: string, args?: CmdArgs): string {
+    const validatedArgs = validateDownloadArgs(cmd, args);
     const jobNumber = nextJobNumber++;
     const jobId = `mock-job-${jobNumber}`;
-    const manifest = downloadManifest(cmd, args, jobNumber);
+    const manifest = downloadManifest(cmd, validatedArgs, allocateFileId);
     const active = { label: manifest.label, timers: [] as Array<ReturnType<typeof setTimeout>> };
     activeJobs.set(jobId, active);
     active.timers.push(
@@ -587,7 +848,7 @@ export function installTauriMock(): void {
     });
   }
 
-  w.__TAURI_INTERNALS__ = {
+  const tauriInternals = {
     invoke: (cmd: string, args?: CmdArgs) => {
       if (cmd === "plugin:event|listen") {
         const event = String(args?.event);
@@ -637,7 +898,7 @@ export function installTauriMock(): void {
     metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
     plugins: {},
   };
-  w.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
+  const eventPluginInternals = {
     unregisterListener: (event: string, eventId: number) => {
       unregisterCallback(eventId);
       listeners.set(
@@ -646,6 +907,25 @@ export function installTauriMock(): void {
       );
     },
   };
+  w.__TAURI_INTERNALS__ = tauriInternals;
+  w.__TAURI_EVENT_PLUGIN_INTERNALS__ = eventPluginInternals;
+
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    for (const active of activeJobs.values()) {
+      for (const timer of active.timers) clearTimeout(timer);
+    }
+    activeJobs.clear();
+    callbacks.clear();
+    listeners.clear();
+    if (w.__TAURI_INTERNALS__ === tauriInternals) delete w.__TAURI_INTERNALS__;
+    if (w.__TAURI_EVENT_PLUGIN_INTERNALS__ === eventPluginInternals) {
+      delete w.__TAURI_EVENT_PLUGIN_INTERNALS__;
+    }
+    if (w[MOCK_DISPOSER] === dispose) delete w[MOCK_DISPOSER];
+  };
+  w[MOCK_DISPOSER] = dispose;
 }
 
 export function isMockMode(): boolean {

@@ -28,7 +28,7 @@ import {
   type Post,
   type ProfilePreview,
 } from "./ipc";
-import { installTauriMock } from "./mock";
+import { installTauriMock, uninstallTauriMock } from "./mock";
 
 type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 
@@ -37,6 +37,7 @@ function invoke(): Invoke {
 }
 
 afterEach(() => {
+  uninstallTauriMock();
   delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   delete (window as unknown as { __TAURI_EVENT_PLUGIN_INTERNALS__?: unknown })
     .__TAURI_EVENT_PLUGIN_INTERNALS__;
@@ -99,7 +100,7 @@ describe("profile pagination mock", () => {
         {
           pk: "1",
           code: "POST1",
-          resources: [{ url: "https://cdn.example/photo.jpg", kind: "photo" }],
+          resources: [{ url: "https://cdninstagram.com/photo.jpg", kind: "photo" }],
         },
       ]);
 
@@ -123,6 +124,17 @@ describe("download journey mock", () => {
     return { events, unlisten };
   }
 
+  function validPost(pk: string, resourceCount = 1): Post {
+    return {
+      pk,
+      code: `POST${pk}`,
+      resources: Array.from({ length: resourceCount }, (_, ordinal) => ({
+        url: `https://cdninstagram.com/${pk}-${ordinal}.jpg`,
+        kind: "photo" as const,
+      })),
+    };
+  }
+
   it("emits ordered exact outputs for four fetched posts containing five resources", async () => {
     installTauriMock();
     const { events, unlisten } = await collectJobEvents();
@@ -130,25 +142,25 @@ describe("download journey mock", () => {
       {
         pk: "1",
         code: "PHOTO1",
-        resources: [{ url: "https://cdn.example/one.jpg", kind: "photo" }],
+        resources: [{ url: "https://cdninstagram.com/one.jpg", kind: "photo" }],
       },
       {
         pk: "2",
         code: "VIDEO2",
-        resources: [{ url: "https://cdn.example/two.mp4", kind: "video" }],
+        resources: [{ url: "https://cdninstagram.com/two.mp4", kind: "video" }],
       },
       {
         pk: "3",
         code: "ALBUM3",
         resources: [
-          { url: "https://cdn.example/three.jpg", kind: "photo" },
-          { url: "https://cdn.example/four.mp4", kind: "video" },
+          { url: "https://cdninstagram.com/three.jpg", kind: "photo" },
+          { url: "https://cdninstagram.com/four.mp4", kind: "video" },
         ],
       },
       {
         pk: "4",
         code: "PHOTO4",
-        resources: [{ url: "https://cdn.example/five.jpg", kind: "photo" }],
+        resources: [{ url: "https://cdninstagram.com/five.jpg", kind: "photo" }],
       },
     ];
 
@@ -208,6 +220,29 @@ describe("download journey mock", () => {
     expect([first, second, third]).toEqual(["mock-job-1", "mock-job-2", "mock-job-3"]);
   });
 
+  it("allocates globally unique file IDs when an earlier job has over 100 outputs", async () => {
+    installTauriMock();
+    const { events, unlisten } = await collectJobEvents();
+
+    const firstId = await enqueueFetchedPostDownload(
+      "nike",
+      "posts",
+      "shown",
+      Array.from({ length: 101 }, (_, index) => validPost(String(index + 1))),
+    );
+    const secondId = await downloadPost("AFTER101");
+    await vi.runAllTimersAsync();
+
+    const outputs = events
+      .filter((event) => event.state === "done" && (event.job_id === firstId || event.job_id === secondId))
+      .flatMap((event) => event.outputs ?? []);
+    const ids = outputs.map((output) => output.file_id);
+    expect(outputs).toHaveLength(102);
+    expect(ids.every((id) => typeof id === "number" && id > 0)).toBe(true);
+    expect(new Set(ids).size).toBe(ids.length);
+    await unlisten();
+  });
+
   it("reports requested item semantics for profile, standalone, and direct downloads", async () => {
     installTauriMock();
     const { events, unlisten } = await collectJobEvents();
@@ -239,6 +274,136 @@ describe("download journey mock", () => {
     expect(direct).toEqual(expect.objectContaining({ requested_items: 3, count: 3 }));
     expect(direct?.outputs?.map((output) => output.kind)).toEqual(["photo", "video", "photo"]);
     await unlisten();
+  });
+
+  it("keeps story fixtures browser-safe while preserving fixture media kinds", async () => {
+    installTauriMock();
+    const { events, unlisten } = await collectJobEvents();
+    const stories = await fetchStories("42");
+
+    expect(stories.every((story) => story.media_url === "" || story.media_url.startsWith("data:")))
+      .toBe(true);
+    expect(stories.every((story) => story.thumb_url?.startsWith("data:image/svg+xml,")))
+      .toBe(true);
+    const jobId = await downloadDirect(
+      "nike",
+      "stories",
+      stories.map((story) => ({ pk: story.pk, taken_at: story.taken_at, url: story.media_url })),
+    );
+
+    await vi.advanceTimersByTimeAsync(15);
+    expect(events.at(-1)).toEqual(
+      expect.objectContaining({ job_id: jobId, state: "downloading", file_name: "s1_1.jpg" }),
+    );
+    await vi.runAllTimersAsync();
+    expect(events.at(-1)?.outputs?.map((output) => output.kind)).toEqual([
+      "photo",
+      "video",
+      "photo",
+    ]);
+    await unlisten();
+  });
+
+  it("rejects malformed download input without allocating a job or emitting progress", async () => {
+    installTauriMock();
+    const { events, unlisten } = await collectJobEvents();
+    const valid = validPost("100");
+    const directItem = { pk: "100", url: "https://cdninstagram.com/direct.jpg" };
+    const validOptions = {
+      posts: true,
+      reels: false,
+      stories: false,
+      highlights: false,
+      avatar: false,
+      max_posts: null,
+    };
+    const invalidCalls: Array<() => Promise<unknown>> = [
+      () => enqueueFetchedPostDownload("nike", "posts", "shown", []),
+      () => enqueueFetchedPostDownload(
+        "nike",
+        "posts",
+        "shown",
+        Array.from({ length: 501 }, (_, index) => validPost(String(index + 1))),
+      ),
+      () => invoke()("enqueue_fetched_post_download", {
+        username: "nike",
+        category: "stories",
+        scope: "shown",
+        posts: [valid],
+      }),
+      () => invoke()("enqueue_fetched_post_download", {
+        username: "nike",
+        category: "posts",
+        scope: "all",
+        posts: [valid],
+      }),
+      () => invoke()("enqueue_fetched_post_download", {
+        username: "nike",
+        category: "posts",
+        scope: "shown",
+        posts: [{ ...valid, pk: "not-numeric" }],
+      }),
+      () => invoke()("enqueue_fetched_post_download", {
+        username: "nike",
+        category: "posts",
+        scope: "shown",
+        posts: [{ ...valid, resources: [{ url: "http://127.0.0.1/private", kind: "audio" }] }],
+      }),
+      () => downloadDirect("nike", "stories", []),
+      () => downloadDirect(
+        "nike",
+        "stories",
+        Array.from({ length: 501 }, (_, index) => ({ ...directItem, pk: String(index + 1) })),
+      ),
+      () => invoke()("download_direct", {
+        label: "nike",
+        subfolder: "stories",
+        items: [{ pk: "", url: "not-a-url" }],
+      }),
+      () => invoke()("download_direct", {
+        label: "nike",
+        subfolder: "stories",
+        items: [{ pk: "100", url: "mock://stories/unsupported.mp4" }],
+      }),
+      () => downloadPost("   "),
+      () => enqueueProfileDownload("", validOptions),
+      () => enqueueProfileDownload("nike", { ...validOptions, posts: false }),
+      () => invoke()("enqueue_profile_download", {
+        username: "nike",
+        opts: { ...validOptions, posts: "yes" },
+      }),
+    ];
+
+    for (const invalidCall of invalidCalls) {
+      await expect(invalidCall()).rejects.toBeDefined();
+    }
+    await vi.runAllTimersAsync();
+    expect(events).toEqual([]);
+
+    const validJobId = await downloadPost("VALID");
+    expect(validJobId).toBe("mock-job-1");
+    await vi.runAllTimersAsync();
+    expect(events.at(-1)).toEqual(
+      expect.objectContaining({
+        job_id: validJobId,
+        state: "done",
+        outputs: [expect.objectContaining({ file_id: 10101 })],
+      }),
+    );
+    await unlisten();
+  });
+
+  it("disposes pending timers and listeners before reinstalling the mock", async () => {
+    installTauriMock();
+    const { events } = await collectJobEvents();
+    await downloadPost("OLD");
+    await vi.advanceTimersByTimeAsync(15);
+    expect(events.map((event) => event.state)).toEqual(["downloading"]);
+
+    installTauriMock();
+    await vi.runAllTimersAsync();
+
+    expect(events.map((event) => event.state)).toEqual(["downloading"]);
   });
 
   it("cancels an active job and prevents its later Done event", async () => {
