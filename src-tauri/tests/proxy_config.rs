@@ -1,5 +1,7 @@
 use insta_dl_gui_lib::config::Config;
-use insta_dl_gui_lib::proxy::normalize_proxy_url;
+use insta_dl_gui_lib::proxy::{apply_proxy, normalize_proxy_url};
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const INVALID_PROXY: &str = "Enter a valid HTTP, HTTPS, SOCKS5, or SOCKS5H proxy URL";
 
@@ -43,6 +45,25 @@ fn none_or_whitespace_disables_proxy() {
 }
 
 #[test]
+fn http_and_https_accept_known_default_ports_but_socks_requires_an_explicit_port() {
+    assert_eq!(
+        normalize_proxy_url(Some("http://proxy.example")),
+        Ok(Some("http://proxy.example/".to_owned()))
+    );
+    assert_eq!(
+        normalize_proxy_url(Some("https://proxy.example")),
+        Ok(Some("https://proxy.example/".to_owned()))
+    );
+
+    for input in ["socks5://proxy.example", "socks5h://proxy.example"] {
+        assert_eq!(
+            normalize_proxy_url(Some(input)),
+            Err(INVALID_PROXY.to_owned())
+        );
+    }
+}
+
+#[test]
 fn rejects_unsafe_or_unsupported_proxy_urls_without_echoing_input() {
     let cases = [
         "ftp://secret@proxy.example:21",
@@ -75,11 +96,77 @@ fn proxy_hint_redacts_password_without_losing_connection_context() {
 }
 
 #[test]
-fn config_debug_output_does_not_expose_proxy_password() {
+fn config_proxy_url_round_trips_raw_value_while_hint_is_redacted() {
+    let raw_proxy_url = "socks5h://user:secret@proxy.example:1080";
     let config = Config {
+        proxy_url: Some(raw_proxy_url.to_owned()),
+        ..Config::default()
+    };
+
+    let serialized = serde_json::to_string(&config).unwrap();
+    assert!(serialized.contains(raw_proxy_url));
+
+    let round_tripped: Config = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(round_tripped.proxy_url.as_deref(), Some(raw_proxy_url));
+    assert!(!round_tripped.proxy_hint().unwrap().contains("secret"));
+}
+
+#[test]
+fn config_debug_output_does_not_expose_hiker_token_or_proxy_password() {
+    let config = Config {
+        token: Some("raw-hiker-token".to_owned()),
         proxy_url: Some("socks5h://user:secret@proxy.example:1080".to_owned()),
         ..Config::default()
     };
 
-    assert!(!format!("{config:?}").contains("secret"));
+    let debug = format!("{config:?}");
+    assert!(!debug.contains("raw-hiker-token"));
+    assert!(!debug.contains("secret"));
+}
+
+#[tokio::test]
+async fn disabled_proxy_returns_direct_clients_that_reach_wiremock() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/direct"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("direct"))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    for proxy_url in [None, Some(" \t ")] {
+        let client = apply_proxy(reqwest::Client::builder(), proxy_url)
+            .unwrap()
+            .build()
+            .unwrap();
+        let response = client
+            .get(format!("{}/direct", server.uri()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.text().await.unwrap(), "direct");
+    }
+}
+
+#[tokio::test]
+async fn explicit_http_proxy_is_used_for_non_resolving_target() {
+    let proxy = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/through-proxy"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("proxied"))
+        .expect(1)
+        .mount(&proxy)
+        .await;
+
+    let client = apply_proxy(reqwest::Client::builder(), Some(&proxy.uri()))
+        .unwrap()
+        .build()
+        .unwrap();
+    let response = client
+        .get("http://target.invalid/through-proxy")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.text().await.unwrap(), "proxied");
 }
