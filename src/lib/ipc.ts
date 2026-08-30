@@ -1,6 +1,10 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+const MOCK_LIBRARY_MEDIA_URL_RESOLVER = Symbol.for(
+  "insta-dl-gui.mock-library-media-url-resolver",
+);
+
 export interface ConfigState {
   has_token: boolean;
   token_hint: string | null;
@@ -182,6 +186,13 @@ export async function onLibraryScanProgress(
 }
 
 export function libraryMediaUrl(fileId: number): string {
+  const resolver = (globalThis as unknown as Record<PropertyKey, unknown>)[
+    MOCK_LIBRARY_MEDIA_URL_RESOLVER
+  ];
+  if (typeof resolver === "function") {
+    const resolved = (resolver as (id: number) => unknown)(fileId);
+    if (typeof resolved === "string" && resolved.length > 0) return resolved;
+  }
   const mediaBase = convertFileSrc("media", "library").replace(/\/$/, "");
   return `${mediaBase}/${fileId}`;
 }

@@ -4,7 +4,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { DOMWrapper, flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { enqueueFetchedPostDownload, libraryMediaUrl, type Post } from "../lib/ipc";
+import { enqueueFetchedPostDownload, type Post } from "../lib/ipc";
 import { installTauriMock, uninstallTauriMock } from "../lib/mock";
 import { useJobsStore } from "../stores/jobs";
 import QueueView from "./QueueView.vue";
@@ -97,9 +97,16 @@ describe("Queue mock download journey", () => {
     const probes = invokeSpy.mock.calls.filter(([cmd]) => cmd === "request_library_preview_access");
     expect(probes).toHaveLength(1);
     expect(probes[0]?.[1]?.fileId).toBe(10101);
-    expect(dialog.findAll("[data-output-preview]").map((preview) => preview.attributes("src"))).toEqual(
-      [10101, 10102, 10103, 10104, 10105].map(libraryMediaUrl),
-    );
+    const previewSources = dialog
+      .findAll("[data-output-preview]")
+      .map((preview) => preview.attributes("src"));
+    expect(previewSources).toHaveLength(5);
+    expect(previewSources[0]).toMatch(/^data:image\/svg\+xml,/);
+    expect(previewSources[1]).toMatch(/^data:video\/mp4;base64,/);
+    expect(previewSources[2]).toMatch(/^data:image\/svg\+xml,/);
+    expect(previewSources[3]).toMatch(/^data:video\/mp4;base64,/);
+    expect(previewSources[4]).toMatch(/^data:image\/svg\+xml,/);
+    expect(previewSources.some((source) => source?.startsWith("library://"))).toBe(false);
 
     await rows[0].get("[data-action='open-output']").trigger("click");
     await flushPromises();

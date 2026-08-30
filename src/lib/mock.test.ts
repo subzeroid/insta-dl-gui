@@ -406,6 +406,39 @@ describe("download journey mock", () => {
     expect(events.map((event) => event.state)).toEqual(["downloading"]);
   });
 
+  it("registers browser-loadable media fixtures by output kind and drops them on reinstall", async () => {
+    installTauriMock();
+    const { events, unlisten } = await collectJobEvents();
+    const jobId = await enqueueFetchedPostDownload("nike", "posts", "shown", [
+      {
+        pk: "1",
+        code: "MIXED",
+        resources: [
+          { url: "https://cdninstagram.com/photo.jpg", kind: "photo" },
+          { url: "https://cdninstagram.com/video.mp4", kind: "video" },
+        ],
+      },
+    ]);
+    await vi.runAllTimersAsync();
+    const outputs = events.find((event) => event.job_id === jobId && event.state === "done")?.outputs;
+    const photoUrl = libraryMediaUrl(outputs?.[0]?.file_id ?? -1);
+    const videoUrl = libraryMediaUrl(outputs?.[1]?.file_id ?? -1);
+
+    expect(photoUrl).toMatch(/^data:image\/svg\+xml,/);
+    expect(videoUrl).toMatch(/^data:video\/mp4;base64,/);
+    const videoBytes = Uint8Array.from(atob(videoUrl.split(",")[1] ?? ""), (char) =>
+      char.charCodeAt(0),
+    );
+    expect(new TextDecoder().decode(videoBytes.slice(4, 8))).toBe("ftyp");
+    await expect(requestLibraryPreviewAccess(outputs?.[0]?.file_id ?? -1)).resolves.toBe(true);
+    await expect(requestLibraryPreviewAccess(outputs?.[1]?.file_id ?? -1)).resolves.toBe(true);
+    await unlisten();
+
+    installTauriMock();
+    expect(libraryMediaUrl(outputs?.[0]?.file_id ?? -1)).toMatch(/^library:\/\//);
+    await expect(requestLibraryPreviewAccess(outputs?.[0]?.file_id ?? -1)).resolves.toBe(false);
+  });
+
   it("cancels an active job and prevents its later Done event", async () => {
     installTauriMock();
     const { events, unlisten } = await collectJobEvents();
@@ -462,13 +495,37 @@ describe("library mock", () => {
     expect(page.items).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: 1, resource_count: 1, availability: "available" }),
-        expect.objectContaining({ id: 2, kind: "reel", availability: "available" }),
+        expect.objectContaining({
+          id: 2,
+          kind: "reel",
+          preview_file_kind: "video",
+          availability: "available",
+        }),
         expect.objectContaining({ id: 3, resource_count: 3, availability: "available" }),
         expect.objectContaining({ id: 4, availability: "missing" }),
       ]),
     );
     expect(detail.id).toBe(page.items[0].id);
-    expect(libraryMediaUrl(42)).toBe("library://localhost/media/42");
+    expect(libraryMediaUrl(detail.files[0].id)).toMatch(/^data:image\/svg\+xml,/);
+    await expect(requestLibraryPreviewAccess(999_999)).resolves.toBe(false);
+    await expect(openLibraryFile(999_999)).rejects.toThrow("Library file is unavailable");
+    await expect(revealLibraryFile(999_999)).rejects.toThrow("Library file is unavailable");
+  });
+
+  it("registers every static catalog file with a media fixture matching its kind", async () => {
+    installTauriMock();
+    const page = await queryLibrary(query);
+    const details = await Promise.all(page.items.map((item) => getLibraryItem(item.id)));
+    const files = details.flatMap((detail) => detail.files);
+
+    expect(files.length).toBeGreaterThan(0);
+    for (const file of files) {
+      const url = libraryMediaUrl(file.id);
+      expect(url).toMatch(
+        file.kind === "video" ? /^data:video\/mp4;base64,/ : /^data:image\/svg\+xml,/,
+      );
+      await expect(requestLibraryPreviewAccess(file.id)).resolves.toBe(true);
+    }
   });
 
   it("builds a canonical custom-protocol URL without encoding path separators", () => {

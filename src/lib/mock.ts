@@ -21,7 +21,8 @@ import type {
 type CmdArgs = Record<string, unknown>;
 type MockLibraryCard = LibraryCard & { preview_url: string };
 type MockWindow = Record<PropertyKey, unknown>;
-type FileIdAllocator = () => number;
+type DownloadMediaKind = "photo" | "video";
+type FileIdAllocator = (kind: DownloadMediaKind) => number;
 type MockEventPayloads = {
   "library-scan-progress": LibraryScanProgress;
   "job-progress": JobProgress;
@@ -35,6 +36,9 @@ interface MockDownloadManifest {
 }
 
 const MOCK_DISPOSER = Symbol("insta-dl-gui-tauri-mock-disposer");
+const MOCK_LIBRARY_MEDIA_URL_RESOLVER = Symbol.for(
+  "insta-dl-gui.mock-library-media-url-resolver",
+);
 const MAX_DOWNLOAD_ITEMS = 500;
 const MAX_RESOURCES_PER_POST = 20;
 const MAX_SHORTCODE_BYTES = 256;
@@ -55,6 +59,10 @@ const AVATAR =
      </svg>`,
   );
 
+const MOCK_VIDEO =
+  "data:video/mp4;base64," +
+  "AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAMvbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAAHgAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAll0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAAHgAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAABAAAAAQAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAB4AAAAAAABAAAAAAHRbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAAAyAAAABgBVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABfG1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAATxzdGJsAAAAuHN0c2QAAAAAAAAAAQAAAKhhdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAABAAEABIAAAASAAAAAAAAAABFUxhdmM2Mi4yOC4xMDAgbGlieDI2NAAAAAAAAAAAAAAAGP//AAAALmF2Y0MBQsAe/+EAFmdCwB7ZHsBEAAADAAQAAAMAyDxYuSABAAVoy4PLIAAAABBwYXNwAAAAAQAAAAEAAAAUYnRydAAAAAAAAAiYAAAAAAAAABhzdHRzAAAAAAAAAAEAAAADAAACAAAAABRzdHNzAAAAAAAAAAEAAAABAAAAHHN0c2MAAAAAAAAAAQAAAAEAAAADAAAAAQAAACBzdHN6AAAAAAAAAAAAAAADAAAADgAAAAkAAAAKAAAAFHN0Y28AAAAAAAAAAQAAA18AAABidWR0YQAAAFptZXRhAAAAAAAAACFoZGxyAAAAAAAAAABtZGlyYXBwbAAAAAAAAAAAAAAAAC1pbHN0AAAAJal0b28AAAAdZGF0YQAAAAEAAAAATGF2ZjYyLjEyLjEwMAAAAAhmcmVlAAAAKW1kYXQAAAAKZYiEC/JigACrzgAAAAVBmjgX6gAAAAZBmlQFeoA=";
+
 function libraryPreview(label: string, start: string, end: string): string {
   return (
     "data:image/svg+xml," +
@@ -69,6 +77,12 @@ function libraryPreview(label: string, start: string, end: string): string {
        </svg>`,
     )
   );
+}
+
+function mockMediaFixture(kind: DownloadMediaKind): string {
+  return kind === "video"
+    ? MOCK_VIDEO
+    : libraryPreview("PHOTO", "#14532d", "#0f766e");
 }
 
 const MOCK_STORIES = [
@@ -137,7 +151,7 @@ const LIBRARY_CARDS: MockLibraryCard[] = [
     imported_at: 1_776_100_020,
     updated_at: 1_776_100_010,
     preview_file_id: 201,
-    preview_file_kind: "photo",
+    preview_file_kind: "video",
     resource_count: 1,
     availability: "available",
     preview_url: libraryPreview("VIDEO", "#312e81", "#be185d"),
@@ -257,7 +271,7 @@ function mockOutput(
   ordinal: number,
 ): JobOutputFile {
   return {
-    file_id: allocateFileId(),
+    file_id: allocateFileId(kind),
     basename: `${safeBasenameSegment(stem, "media")}_${ordinal + 1}.${kind === "video" ? "mp4" : "jpg"}`,
     kind,
     byte_size: kind === "video" ? 2_000_000 : 1_500_000,
@@ -569,7 +583,11 @@ function downloadManifest(
   }
 }
 
-function reply(cmd: string, args?: CmdArgs): unknown {
+function reply(
+  cmd: string,
+  args?: CmdArgs,
+  registeredMedia?: ReadonlyMap<number, string>,
+): unknown {
   switch (cmd) {
     case "config_state":
       return {
@@ -598,10 +616,13 @@ function reply(cmd: string, args?: CmdArgs): unknown {
       return mockDetail(card);
     }
     case "request_library_preview_access":
-      return Number.isInteger(args?.fileId) && Number(args?.fileId) > 0;
+      return Number.isInteger(args?.fileId) && registeredMedia?.has(Number(args?.fileId)) === true;
     case "open_library_file":
     case "reveal_library_file":
-      if (!Number.isInteger(args?.fileId) || Number(args?.fileId) <= 0) {
+      if (
+        !Number.isInteger(args?.fileId) ||
+        registeredMedia?.has(Number(args?.fileId)) !== true
+      ) {
         throw new Error("Library file is unavailable");
       }
       return null;
@@ -700,9 +721,9 @@ function reply(cmd: string, args?: CmdArgs): unknown {
     case "fetch_stories":
       return MOCK_STORIES.map((story) => ({ ...story }));
     case "validate_token":
-      return reply("__balance");
+      return reply("__balance", undefined, registeredMedia);
     case "save_settings":
-      return reply("config_state");
+      return reply("config_state", undefined, registeredMedia);
     // event plugin stubs
     case "plugin:event|listen":
       return 1;
@@ -722,6 +743,7 @@ export function uninstallTauriMock(): void {
   const dispose = w[MOCK_DISPOSER];
   if (typeof dispose === "function") dispose();
   delete w[MOCK_DISPOSER];
+  delete w[MOCK_LIBRARY_MEDIA_URL_RESOLVER];
   delete w.__TAURI_INTERNALS__;
   delete w.__TAURI_EVENT_PLUGIN_INTERNALS__;
 }
@@ -739,9 +761,20 @@ export function installTauriMock(): void {
   let nextJobNumber = 1;
   let nextFileId = 10_101;
   let disposed = false;
+  const registeredMedia = new Map<number, string>();
 
-  function allocateFileId(): number {
-    return nextFileId++;
+  for (const card of mockLibraryCards()) {
+    for (const file of mockFiles(card)) {
+      if (file.kind === "photo" || file.kind === "video") {
+        registeredMedia.set(file.id, mockMediaFixture(file.kind));
+      }
+    }
+  }
+
+  function allocateFileId(kind: DownloadMediaKind): number {
+    const fileId = nextFileId++;
+    registeredMedia.set(fileId, mockMediaFixture(kind));
+    return fileId;
   }
 
   function unregisterCallback(id: number) {
@@ -878,7 +911,7 @@ export function installTauriMock(): void {
         return Promise.resolve(cancelDownload(String(args?.jobId ?? "")));
       }
       try {
-        const response = Promise.resolve(reply(cmd, args));
+        const response = Promise.resolve(reply(cmd, args, registeredMedia));
         if (cmd === "start_library_scan") {
           void response.then(() => {
             queueMicrotask(() => emitScan(Number(args?.rootId)));
@@ -909,6 +942,8 @@ export function installTauriMock(): void {
   };
   w.__TAURI_INTERNALS__ = tauriInternals;
   w.__TAURI_EVENT_PLUGIN_INTERNALS__ = eventPluginInternals;
+  const mediaUrlResolver = (fileId: number) => registeredMedia.get(fileId);
+  w[MOCK_LIBRARY_MEDIA_URL_RESOLVER] = mediaUrlResolver;
 
   const dispose = () => {
     if (disposed) return;
@@ -917,11 +952,15 @@ export function installTauriMock(): void {
       for (const timer of active.timers) clearTimeout(timer);
     }
     activeJobs.clear();
+    registeredMedia.clear();
     callbacks.clear();
     listeners.clear();
     if (w.__TAURI_INTERNALS__ === tauriInternals) delete w.__TAURI_INTERNALS__;
     if (w.__TAURI_EVENT_PLUGIN_INTERNALS__ === eventPluginInternals) {
       delete w.__TAURI_EVENT_PLUGIN_INTERNALS__;
+    }
+    if (w[MOCK_LIBRARY_MEDIA_URL_RESOLVER] === mediaUrlResolver) {
+      delete w[MOCK_LIBRARY_MEDIA_URL_RESOLVER];
     }
     if (w[MOCK_DISPOSER] === dispose) delete w[MOCK_DISPOSER];
   };
