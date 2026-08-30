@@ -1,13 +1,19 @@
 /** @vitest-environment happy-dom */
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  cancelJob,
+  downloadDirect,
+  downloadPost,
   cancelLibraryScan,
   enqueueFetchedPostDownload,
+  enqueueProfileDownload,
   ensureConfiguredLibraryRoot,
+  fetchStories,
   getLibraryItem,
   libraryMediaUrl,
   listLibraryRoots,
+  onJobProgress,
   onLibraryScanProgress,
   openLibraryFile,
   queryLibrary,
@@ -18,6 +24,7 @@ import {
   type LibraryPage,
   type LibraryQuery,
   type LibraryScanProgress,
+  type JobProgress,
   type Post,
   type ProfilePreview,
 } from "./ipc";
@@ -88,15 +95,166 @@ describe("profile pagination mock", () => {
   it("supports exact fetched-media downloads in the Explore demo", async () => {
     installTauriMock();
 
-    await expect(
-      enqueueFetchedPostDownload("natgeo", "posts", "shown", [
+    const jobId = await enqueueFetchedPostDownload("natgeo", "posts", "shown", [
         {
           pk: "1",
           code: "POST1",
           resources: [{ url: "https://cdn.example/photo.jpg", kind: "photo" }],
         },
-      ]),
-    ).resolves.toBe("mock-job-id");
+      ]);
+
+    expect(jobId).toMatch(/^mock-job-\d+$/);
+  });
+});
+
+describe("download journey mock", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+  });
+
+  async function collectJobEvents() {
+    const events: JobProgress[] = [];
+    const unlisten = await onJobProgress((event) => events.push(event));
+    return { events, unlisten };
+  }
+
+  it("emits ordered exact outputs for four fetched posts containing five resources", async () => {
+    installTauriMock();
+    const { events, unlisten } = await collectJobEvents();
+    const posts: Post[] = [
+      {
+        pk: "1",
+        code: "PHOTO1",
+        resources: [{ url: "https://cdn.example/one.jpg", kind: "photo" }],
+      },
+      {
+        pk: "2",
+        code: "VIDEO2",
+        resources: [{ url: "https://cdn.example/two.mp4", kind: "video" }],
+      },
+      {
+        pk: "3",
+        code: "ALBUM3",
+        resources: [
+          { url: "https://cdn.example/three.jpg", kind: "photo" },
+          { url: "https://cdn.example/four.mp4", kind: "video" },
+        ],
+      },
+      {
+        pk: "4",
+        code: "PHOTO4",
+        resources: [{ url: "https://cdn.example/five.jpg", kind: "photo" }],
+      },
+    ];
+
+    const jobId = await enqueueFetchedPostDownload("nike", "posts", "selected", posts);
+    expect(events).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(15);
+    expect(events).toEqual([
+      expect.objectContaining({
+        job_id: jobId,
+        state: "downloading",
+        current_file: 1,
+        total_files: 5,
+        bytes_done: expect.any(Number),
+        file_name: "PHOTO1_0.jpg",
+      }),
+    ]);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(events).toHaveLength(1);
+
+    await vi.runAllTimersAsync();
+    const done = events.at(-1);
+    expect(done).toEqual(
+      expect.objectContaining({
+        job_id: jobId,
+        state: "done",
+        count: 5,
+        dir: "/mock/instagram-archive/nike/posts",
+        requested_items: 4,
+        outputs: [
+          { file_id: 10101, basename: "PHOTO1_0.jpg", kind: "photo", byte_size: 1_500_000, ordinal: 0 },
+          { file_id: 10102, basename: "VIDEO2_0.mp4", kind: "video", byte_size: 2_000_000, ordinal: 0 },
+          { file_id: 10103, basename: "ALBUM3_0.jpg", kind: "photo", byte_size: 1_500_000, ordinal: 0 },
+          { file_id: 10104, basename: "ALBUM3_1.mp4", kind: "video", byte_size: 2_000_000, ordinal: 1 },
+          { file_id: 10105, basename: "PHOTO4_0.jpg", kind: "photo", byte_size: 1_500_000, ordinal: 0 },
+        ],
+      }),
+    );
+    expect(done?.outputs?.every((output) => output.file_id && output.file_id > 0)).toBe(true);
+    expect(done?.outputs?.every((output) => !("path" in output))).toBe(true);
+    await unlisten();
+  });
+
+  it("returns a unique deterministic ID for each enqueue", async () => {
+    installTauriMock();
+
+    const first = await downloadPost("ONE");
+    const second = await downloadPost("TWO");
+    const third = await enqueueProfileDownload("nike", {
+      posts: true,
+      reels: false,
+      stories: false,
+      highlights: false,
+      avatar: false,
+    });
+
+    expect([first, second, third]).toEqual(["mock-job-1", "mock-job-2", "mock-job-3"]);
+  });
+
+  it("reports requested item semantics for profile, standalone, and direct downloads", async () => {
+    installTauriMock();
+    const { events, unlisten } = await collectJobEvents();
+
+    const profileId = await enqueueProfileDownload("nike", {
+      posts: true,
+      reels: false,
+      stories: false,
+      highlights: false,
+      avatar: false,
+    });
+    const postId = await downloadPost("POSTCODE");
+    const stories = await fetchStories("42");
+    const directId = await downloadDirect(
+      "nike",
+      "stories",
+      stories.map((story) => ({ pk: story.pk, taken_at: story.taken_at, url: story.media_url })),
+    );
+
+    await vi.runAllTimersAsync();
+    const completed = events.filter((event) => event.state === "done");
+    const profile = completed.find((event) => event.job_id === profileId);
+    const post = completed.find((event) => event.job_id === postId);
+    const direct = completed.find((event) => event.job_id === directId);
+
+    expect(profile).not.toHaveProperty("requested_items");
+    expect(profile?.outputs?.length).toBeGreaterThan(0);
+    expect(post).toEqual(expect.objectContaining({ requested_items: 1, count: 1 }));
+    expect(direct).toEqual(expect.objectContaining({ requested_items: 3, count: 3 }));
+    expect(direct?.outputs?.map((output) => output.kind)).toEqual(["photo", "video", "photo"]);
+    await unlisten();
+  });
+
+  it("cancels an active job and prevents its later Done event", async () => {
+    installTauriMock();
+    const { events, unlisten } = await collectJobEvents();
+
+    const jobId = await downloadPost("CANCELME");
+    await vi.advanceTimersByTimeAsync(15);
+    await expect(cancelJob(jobId)).resolves.toBe(true);
+    await vi.runAllTimersAsync();
+
+    expect(events.map((event) => event.state)).toEqual(["downloading", "cancelled"]);
+    expect(events.at(-1)).toEqual(expect.objectContaining({ job_id: jobId, state: "cancelled" }));
+    await expect(cancelJob(jobId)).resolves.toBe(false);
+    await expect(cancelJob("missing-job")).resolves.toBe(false);
+    await unlisten();
   });
 });
 

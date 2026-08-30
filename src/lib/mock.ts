@@ -4,6 +4,9 @@
  */
 
 import type {
+  DirectItem,
+  JobOutputFile,
+  JobProgress,
   LibraryCard,
   LibraryFile,
   LibraryItemDetail,
@@ -11,10 +14,23 @@ import type {
   LibraryQuery,
   LibraryRoot,
   LibraryScanProgress,
+  Post,
+  ProfileOptions,
 } from "./ipc";
 
 type CmdArgs = Record<string, unknown>;
 type MockLibraryCard = LibraryCard & { preview_url: string };
+type MockEventPayloads = {
+  "library-scan-progress": LibraryScanProgress;
+  "job-progress": JobProgress;
+};
+
+interface MockDownloadManifest {
+  label: string;
+  dir: string;
+  requestedItems?: number;
+  outputs: JobOutputFile[];
+}
 
 const AVATAR =
   "data:image/svg+xml," +
@@ -190,6 +206,121 @@ function mockLibraryPage(query: LibraryQuery): LibraryPage {
   return { items: items.slice(0, query.limit), next_cursor: null };
 }
 
+function safeBasenameSegment(value: unknown, fallback: string): string {
+  const safe = String(value ?? "")
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, "_")
+    .replace(/^\.+/, "")
+    .replace(/_+$/g, "");
+  return safe || fallback;
+}
+
+function mockOutput(
+  jobNumber: number,
+  outputIndex: number,
+  stem: string,
+  kind: "photo" | "video",
+  ordinal: number,
+): JobOutputFile {
+  return {
+    file_id: 10_000 + jobNumber * 100 + outputIndex + 1,
+    basename: `${safeBasenameSegment(stem, "media")}_${ordinal}.${kind === "video" ? "mp4" : "jpg"}`,
+    kind,
+    byte_size: kind === "video" ? 2_000_000 : 1_500_000,
+    ordinal,
+  };
+}
+
+function fetchedPostManifest(args: CmdArgs | undefined, jobNumber: number): MockDownloadManifest {
+  const username = safeBasenameSegment(args?.username, "instagram");
+  const category = args?.category === "reels" ? "reels" : "posts";
+  const scope = args?.scope === "selected" ? "selected" : "shown";
+  const posts = Array.isArray(args?.posts) ? (args.posts as Post[]) : [];
+  let outputIndex = 0;
+  const outputs = posts.flatMap((post, postIndex) => {
+    const stem = safeBasenameSegment(post.code, `post-${postIndex + 1}`);
+    return post.resources.map((resource, ordinal) =>
+      mockOutput(jobNumber, outputIndex++, stem, resource.kind, ordinal),
+    );
+  });
+  return {
+    label: `@${username} ${category} · ${scope} · ${posts.length}`,
+    dir: `/mock/instagram-archive/${username}/${category}`,
+    requestedItems: posts.length,
+    outputs,
+  };
+}
+
+function directManifest(args: CmdArgs | undefined, jobNumber: number): MockDownloadManifest {
+  const label = safeBasenameSegment(args?.label, "instagram");
+  const subfolder = safeBasenameSegment(args?.subfolder, "media");
+  const items = Array.isArray(args?.items) ? (args.items as DirectItem[]) : [];
+  const outputs = items.map((item, outputIndex) => {
+    const kind = /\.(?:mp4|mov|webm)(?:[?#]|$)/i.test(item.url) ? "video" : "photo";
+    return mockOutput(
+      jobNumber,
+      outputIndex,
+      safeBasenameSegment(item.pk, `media-${outputIndex + 1}`),
+      kind,
+      0,
+    );
+  });
+  return {
+    label: `@${label} ${subfolder}`,
+    dir: `/mock/instagram-archive/${label}/${subfolder}`,
+    requestedItems: items.length,
+    outputs,
+  };
+}
+
+function standalonePostManifest(args: CmdArgs | undefined, jobNumber: number): MockDownloadManifest {
+  const code = safeBasenameSegment(args?.code, "post");
+  return {
+    label: `Post ${code}`,
+    dir: "/mock/instagram-archive/posts",
+    requestedItems: 1,
+    outputs: [mockOutput(jobNumber, 0, code, "photo", 0)],
+  };
+}
+
+function profileManifest(args: CmdArgs | undefined, jobNumber: number): MockDownloadManifest {
+  const username = safeBasenameSegment(args?.username, "instagram");
+  const opts = (args?.opts ?? {}) as Partial<ProfileOptions>;
+  const kinds: Array<{ suffix: string; kind: "photo" | "video" }> = [];
+  if (opts.posts) kinds.push({ suffix: "post", kind: "photo" });
+  if (opts.reels) kinds.push({ suffix: "reel", kind: "video" });
+  if (opts.stories) kinds.push({ suffix: "story", kind: "photo" });
+  if (opts.highlights) kinds.push({ suffix: "highlight", kind: "video" });
+  if (opts.avatar) kinds.push({ suffix: "avatar", kind: "photo" });
+  if (kinds.length === 0) kinds.push({ suffix: "post", kind: "photo" });
+  return {
+    label: `@${username} archive`,
+    dir: `/mock/instagram-archive/${username}`,
+    outputs: kinds.map(({ suffix, kind }, outputIndex) =>
+      mockOutput(jobNumber, outputIndex, `${username}_${suffix}`, kind, 0),
+    ),
+  };
+}
+
+function downloadManifest(
+  cmd: string,
+  args: CmdArgs | undefined,
+  jobNumber: number,
+): MockDownloadManifest {
+  switch (cmd) {
+    case "enqueue_fetched_post_download":
+      return fetchedPostManifest(args, jobNumber);
+    case "download_direct":
+      return directManifest(args, jobNumber);
+    case "download_post":
+      return standalonePostManifest(args, jobNumber);
+    case "enqueue_profile_download":
+      return profileManifest(args, jobNumber);
+    default:
+      throw new Error(`mock download: unhandled command "${cmd}"`);
+  }
+}
+
 function reply(cmd: string, args?: CmdArgs): unknown {
   switch (cmd) {
     case "config_state":
@@ -320,18 +451,10 @@ function reply(cmd: string, args?: CmdArgs): unknown {
     }
     case "fetch_stories":
       return [
-        { pk: "s1", taken_at: 1776787455, kind: "photo", media_url: "", thumb_url: "" },
-        { pk: "s2", taken_at: 1776787500, kind: "video", media_url: "", thumb_url: "" },
-        { pk: "s3", taken_at: 1776787600, kind: "photo", media_url: "", thumb_url: "" },
+        { pk: "s1", taken_at: 1776787455, kind: "photo", media_url: "mock://stories/s1.jpg", thumb_url: "" },
+        { pk: "s2", taken_at: 1776787500, kind: "video", media_url: "mock://stories/s2.mp4", thumb_url: "" },
+        { pk: "s3", taken_at: 1776787600, kind: "photo", media_url: "mock://stories/s3.jpg", thumb_url: "" },
       ];
-    case "download_direct":
-    case "download_post":
-    case "enqueue_fetched_post_download":
-      return "mock-job-id";
-    case "enqueue_profile_download":
-      return "mock-job-id";
-    case "cancel_job":
-      return true;
     case "validate_token":
       return reply("__balance");
     case "save_settings":
@@ -354,7 +477,12 @@ export function installTauriMock(): void {
   const w = window as unknown as Record<string, unknown>;
   const callbacks = new Map<number, (data: unknown) => void>();
   const listeners = new Map<string, number[]>();
+  const activeJobs = new Map<
+    string,
+    { label: string; timers: Array<ReturnType<typeof setTimeout>> }
+  >();
   let nextCallbackId = 1;
+  let nextJobNumber = 1;
 
   function unregisterCallback(id: number) {
     callbacks.delete(id);
@@ -373,10 +501,67 @@ export function installTauriMock(): void {
     callbacks.get(id)?.(data);
   }
 
-  function emit(event: string, payload: LibraryScanProgress) {
+  function emit<EventName extends keyof MockEventPayloads>(
+    event: EventName,
+    payload: MockEventPayloads[EventName],
+  ) {
     for (const handler of listeners.get(event) ?? []) {
       runCallback(handler, { event, id: handler, payload });
     }
+  }
+
+  function enqueueDownload(cmd: string, args?: CmdArgs): string {
+    const jobNumber = nextJobNumber++;
+    const jobId = `mock-job-${jobNumber}`;
+    const manifest = downloadManifest(cmd, args, jobNumber);
+    const active = { label: manifest.label, timers: [] as Array<ReturnType<typeof setTimeout>> };
+    activeJobs.set(jobId, active);
+    active.timers.push(
+      setTimeout(() => {
+        if (!activeJobs.has(jobId)) return;
+        const first = manifest.outputs[0];
+        emit("job-progress", {
+          job_id: jobId,
+          state: "downloading",
+          label: manifest.label,
+          current_file: first ? 1 : 0,
+          total_files: manifest.outputs.length,
+          bytes_done: first ? Math.max(1, Math.floor(first.byte_size / 2)) : 0,
+          file_name: first?.basename ?? "Preparing download",
+        });
+      }, 10),
+      setTimeout(() => {
+        if (!activeJobs.delete(jobId)) return;
+        const done: JobProgress = {
+          job_id: jobId,
+          state: "done",
+          label: manifest.label,
+          count: manifest.outputs.length,
+          dir: manifest.dir,
+          catalog_warnings: 0,
+          resource_failures: 0,
+          outputs: manifest.outputs.map((output) => ({ ...output })),
+        };
+        if (manifest.requestedItems !== undefined) {
+          done.requested_items = manifest.requestedItems;
+        }
+        emit("job-progress", done);
+      }, 900),
+    );
+    return jobId;
+  }
+
+  function cancelDownload(jobId: string): boolean {
+    const active = activeJobs.get(jobId);
+    if (!active) return false;
+    activeJobs.delete(jobId);
+    for (const timer of active.timers) clearTimeout(timer);
+    emit("job-progress", {
+      job_id: jobId,
+      state: "cancelled",
+      label: active.label,
+    });
+    return true;
   }
 
   function emitScan(rootId: number) {
@@ -418,6 +603,18 @@ export function installTauriMock(): void {
           (listeners.get(event) ?? []).filter((id) => id !== eventId),
         );
         return Promise.resolve(null);
+      }
+      if (
+        cmd === "download_direct" ||
+        cmd === "download_post" ||
+        cmd === "enqueue_fetched_post_download" ||
+        cmd === "enqueue_profile_download"
+      ) {
+        const response = Promise.resolve().then(() => enqueueDownload(cmd, args));
+        return response;
+      }
+      if (cmd === "cancel_job") {
+        return Promise.resolve(cancelDownload(String(args?.jobId ?? "")));
       }
       try {
         const response = Promise.resolve(reply(cmd, args));
