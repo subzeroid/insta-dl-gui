@@ -53,6 +53,16 @@ function action(wrapper: ReturnType<typeof render>, name: string) {
   return wrapper.get(`[data-action="${name}"]`);
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   writeText = vi.fn().mockResolvedValue(undefined);
@@ -146,5 +156,48 @@ describe("PostModal copy actions", () => {
     vi.advanceTimersByTime(2000);
     await flushPromises();
     expect(action(wrapper, "copy-link").text()).not.toContain("Copied");
+  });
+
+  it("ignores a delayed clipboard completion after the modal closes", async () => {
+    const pending = deferred<void>();
+    writeText.mockReturnValueOnce(pending.promise);
+    const wrapper = render();
+
+    await action(wrapper, "copy-link").trigger("click");
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    pending.resolve();
+    await flushPromises();
+
+    expect(wrapper.emitted("close")).toHaveLength(1);
+    expect(action(wrapper, "copy-link").text()).not.toContain("Copied");
+    expect(wrapper.get("[aria-live='polite']").text()).toBe("");
+  });
+
+  it("ignores a delayed clipboard failure after the preview item changes", async () => {
+    const pending = deferred<void>();
+    writeText.mockReturnValueOnce(pending.promise);
+    const wrapper = render();
+
+    await action(wrapper, "copy-description").trigger("click");
+    await wrapper.setProps({ post: { ...post, code: "NEXT" } });
+    pending.reject(new Error("Clipboard blocked"));
+    await flushPromises();
+
+    expect(wrapper.find("[data-copy-error]").exists()).toBe(false);
+    expect(action(wrapper, "copy-description").text()).not.toContain("Copied");
+  });
+
+  it("does not create delayed feedback or a timer after unmount", async () => {
+    const pending = deferred<void>();
+    writeText.mockReturnValueOnce(pending.promise);
+    const startTimer = vi.spyOn(window, "setTimeout");
+    const wrapper = render();
+
+    await action(wrapper, "copy-link").trigger("click");
+    wrapper.unmount();
+    pending.resolve();
+    await flushPromises();
+
+    expect(startTimer).not.toHaveBeenCalled();
   });
 });

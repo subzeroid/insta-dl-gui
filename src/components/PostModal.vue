@@ -24,6 +24,7 @@ const error = ref<string | null>(null);
 const copyError = ref<string | null>(null);
 const copyFeedback = ref<"description" | "link" | null>(null);
 let clearCopyFeedbackTimer: number | undefined;
+let copyGeneration = 0;
 
 const videoUrl = computed(() => {
   if (props.post) return props.post.resources.find((r) => r.kind === "video")?.url ?? null;
@@ -59,21 +60,29 @@ function clearCopyFeedback() {
   copyError.value = null;
 }
 
+function invalidateCopyOperations() {
+  copyGeneration++;
+  clearCopyFeedback();
+}
+
 async function copy(value: string, kind: "description" | "link") {
   if (!value) return;
+  const generation = ++copyGeneration;
   clearCopyFeedback();
   try {
     if (!navigator.clipboard?.writeText) throw new Error("Clipboard access is unavailable");
     await navigator.clipboard.writeText(value);
+    if (generation !== copyGeneration) return;
     copyFeedback.value = kind;
     clearCopyFeedbackTimer = window.setTimeout(clearCopyFeedback, 2000);
   } catch {
+    if (generation !== copyGeneration) return;
     copyError.value = "Could not copy. Please try again.";
   }
 }
 
 function close() {
-  clearCopyFeedback();
+  invalidateCopyOperations();
   emit("close");
 }
 
@@ -106,12 +115,12 @@ function onKey(e: KeyboardEvent) {
 onMounted(() => window.addEventListener("keydown", onKey));
 onUnmounted(() => {
   window.removeEventListener("keydown", onKey);
-  clearCopyFeedback();
+  invalidateCopyOperations();
 });
 
 watch(
   [() => props.post?.code, () => props.story?.pk, () => props.postCategory],
-  clearCopyFeedback,
+  invalidateCopyOperations,
 );
 </script>
 
