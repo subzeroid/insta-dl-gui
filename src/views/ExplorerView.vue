@@ -89,8 +89,6 @@ const shownCount = computed(() =>
 );
 const selectedIdSet = computed(() => new Set(explorer.selected[activeTab.value]));
 const selectedCount = computed(() => explorer.selected[activeTab.value].length);
-const snapshotHelperText =
-  "Exact Shown and Selected snapshots are limited to 500 items. Use All for a complete archive.";
 const shownDisabledReason = computed(() =>
   shownCount.value > MAX_EXACT_SNAPSHOT_ITEMS
     ? `Shown has ${shownCount.value} items, above the 500-item exact snapshot limit.`
@@ -630,7 +628,6 @@ onUnmounted(() => {
             :selected-count="selectedCount"
             :busy="activeGroupBusy"
             :all-title="allDownloadTitle"
-            :helper-text="snapshotHelperText"
             :shown-disabled-reason="shownDisabledReason"
             :selected-disabled-reason="selectedDisabledReason"
             @download-all="downloadAll"

@@ -417,9 +417,12 @@ describe("ExplorerView async wiring", () => {
       "Selected 0",
     ]);
     expect(button(wrapper, "All").attributes("title")).toMatch(/complete Posts archive.*API requests/i);
-    expect(wrapper.text()).toContain(
-      "Exact Shown and Selected snapshots are limited to 500 items. Use All for a complete archive.",
-    );
+    const scopeHelp = wrapper.get('[data-action="scope-help"]');
+    expect(scopeHelp.attributes("aria-expanded")).toBe("false");
+    expect(wrapper.text()).not.toContain("complete category archive");
+    await scopeHelp.trigger("click");
+    expect(scopeHelp.attributes("aria-expanded")).toBe("true");
+    expect(wrapper.text()).toContain("complete category archive");
     expect(button(wrapper, "Selected 0").attributes("disabled")).toBeDefined();
 
     await button(wrapper, "Reels").trigger("click");
