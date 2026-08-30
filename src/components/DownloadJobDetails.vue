@@ -13,11 +13,14 @@ import type { JobView } from "../stores/jobs";
 
 const props = defineProps<{ job: JobView }>();
 const emit = defineEmits<{ close: [] }>();
+const OUTPUT_PAGE_SIZE = 50;
 
 const dialog = ref<HTMLElement | null>(null);
 const accessState = ref<"idle" | "pending" | "allowed" | "denied" | "error" | "unindexed">("idle");
 const rowErrors = reactive<Record<number, string>>({});
 const busyAction = ref<string | null>(null);
+const visibleCount = ref(OUTPUT_PAGE_SIZE);
+const previewUrls = reactive(new Map<number, string>());
 let accessGeneration = 0;
 let mounted = false;
 let previousBodyOverflow = "";
@@ -29,6 +32,8 @@ const vInitialFocus = {
 };
 
 const outputs = computed(() => props.job.outputs ?? []);
+const visibleOutputs = computed(() => outputs.value.slice(0, visibleCount.value));
+const remainingCount = computed(() => Math.max(0, outputs.value.length - visibleCount.value));
 const summary = computed(() => {
   const count = outputs.value.length;
   const files = `${count} file${count === 1 ? "" : "s"} saved`;
@@ -36,16 +41,15 @@ const summary = computed(() => {
   const requested = props.job.requestedItems;
   return `${requested} item${requested === 1 ? "" : "s"} requested · ${files}`;
 });
-const previewUrls = computed(() => {
-  const urls = new Map<number, string>();
-  if (accessState.value !== "allowed") return urls;
-  for (const output of outputs.value) {
-    if (typeof output.file_id === "number") {
-      urls.set(output.file_id, libraryMediaUrl(output.file_id));
+
+function syncPreviewUrls() {
+  if (accessState.value !== "allowed") return;
+  for (const output of visibleOutputs.value) {
+    if (typeof output.file_id === "number" && !previewUrls.has(output.file_id)) {
+      previewUrls.set(output.file_id, libraryMediaUrl(output.file_id));
     }
   }
-  return urls;
-});
+}
 
 function invalidateAccess() {
   accessGeneration++;
@@ -53,6 +57,7 @@ function invalidateAccess() {
 
 async function loadPreviewAccess() {
   const generation = ++accessGeneration;
+  previewUrls.clear();
   for (const key of Object.keys(rowErrors)) delete rowErrors[Number(key)];
   busyAction.value = null;
   const firstIndexed = outputs.value.find((output) => typeof output.file_id === "number");
@@ -65,10 +70,16 @@ async function loadPreviewAccess() {
     const allowed = await requestLibraryPreviewAccess(firstIndexed.file_id);
     if (!mounted || generation !== accessGeneration) return;
     accessState.value = allowed ? "allowed" : "denied";
+    if (allowed) syncPreviewUrls();
   } catch {
     if (!mounted || generation !== accessGeneration) return;
     accessState.value = "error";
   }
+}
+
+function showMore() {
+  visibleCount.value = Math.min(outputs.value.length, visibleCount.value + OUTPUT_PAGE_SIZE);
+  syncPreviewUrls();
 }
 
 function close() {
@@ -131,6 +142,7 @@ function onKeydown(event: KeyboardEvent) {
 watch(
   () => props.job.id,
   () => {
+    visibleCount.value = OUTPUT_PAGE_SIZE;
     if (mounted) void loadPreviewAccess();
   },
 );
@@ -194,7 +206,7 @@ onBeforeUnmount(() => {
           </p>
 
           <article
-            v-for="(output, index) in outputs"
+            v-for="(output, index) in visibleOutputs"
             :key="`${output.ordinal}-${index}`"
             :data-output-row="index"
             class="rounded-lg border border-line bg-surface-2 p-3"
@@ -208,6 +220,7 @@ onBeforeUnmount(() => {
                     :data-file-id="output.file_id"
                     :src="previewUrls.get(output.file_id)"
                     controls
+                    preload="none"
                     class="h-full w-full object-contain"
                   />
                   <img
@@ -216,6 +229,7 @@ onBeforeUnmount(() => {
                     :data-file-id="output.file_id"
                     :src="previewUrls.get(output.file_id)"
                     alt=""
+                    loading="lazy"
                     class="h-full w-full object-contain"
                   />
                 </template>
@@ -240,6 +254,7 @@ onBeforeUnmount(() => {
                     <button
                       type="button"
                       data-action="open-output"
+                      :aria-label="`Open ${output.basename}`"
                       class="btn-secondary !px-3 !py-1.5 text-xs"
                       :disabled="typeof output.file_id !== 'number' || busyAction !== null"
                       @click="runAction('open', output, index)"
@@ -249,6 +264,7 @@ onBeforeUnmount(() => {
                     <button
                       type="button"
                       data-action="reveal-output"
+                      :aria-label="`Show ${output.basename} in Finder`"
                       class="btn-secondary !px-3 !py-1.5 text-xs"
                       :disabled="typeof output.file_id !== 'number' || busyAction !== null"
                       @click="runAction('reveal', output, index)"
@@ -263,6 +279,16 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </article>
+          <div v-if="remainingCount > 0" class="flex justify-center pt-2">
+            <button
+              type="button"
+              data-action="show-more-outputs"
+              class="btn-secondary"
+              @click="showMore"
+            >
+              Show more · {{ remainingCount }} remaining
+            </button>
+          </div>
         </div>
       </section>
     </div>

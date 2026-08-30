@@ -121,8 +121,49 @@ describe("DownloadJobDetails", () => {
     expect(ipc.requestLibraryPreviewAccess).toHaveBeenCalledTimes(1);
     expect(ipc.libraryMediaUrl.mock.calls.map((call) => call[0])).toEqual([101, 102, 104, 105]);
     expect(wrapper.get("img[data-file-id='101']").attributes("src")).toBe("library://localhost/media/101");
+    expect(wrapper.get("img[data-file-id='101']").attributes("loading")).toBe("lazy");
     expect(wrapper.get("video[data-file-id='102']").attributes("src")).toBe("library://localhost/media/102");
     expect(wrapper.get("video[data-file-id='102']").attributes("controls")).toBeDefined();
+    expect(wrapper.get("video[data-file-id='102']").attributes("preload")).toBe("none");
+  });
+
+  it("renders large manifests in stable 50-row pages and builds URLs only for shown rows", async () => {
+    const outputs = Array.from({ length: 125 }, (_, index) => ({
+      file_id: 1_000 + index,
+      basename: `file-${String(index).padStart(3, "0")}.jpg`,
+      kind: "photo" as const,
+      byte_size: index + 1,
+      ordinal: index,
+    }));
+    const wrapper = render(job({ requestedItems: 100, outputs }));
+    await flushPromises();
+
+    expect(wrapper.get("[data-output-summary]").text()).toBe("100 items requested · 125 files saved");
+    expect(wrapper.findAll("[data-output-row]")).toHaveLength(50);
+    expect(wrapper.findAll("[data-output-basename]").map((row) => row.text())).toEqual(
+      outputs.slice(0, 50).map((output) => output.basename),
+    );
+    expect(ipc.libraryMediaUrl.mock.calls.map((call) => call[0])).toEqual(
+      outputs.slice(0, 50).map((output) => output.file_id),
+    );
+    expect(wrapper.get("[data-action='show-more-outputs']").text()).toContain("75 remaining");
+
+    await wrapper.get("[data-action='show-more-outputs']").trigger("click");
+    await flushPromises();
+    expect(wrapper.findAll("[data-output-row]")).toHaveLength(100);
+    expect(wrapper.findAll("[data-output-basename]").at(-1)?.text()).toBe("file-099.jpg");
+    expect(ipc.libraryMediaUrl.mock.calls.map((call) => call[0])).toEqual(
+      outputs.slice(0, 100).map((output) => output.file_id),
+    );
+
+    await wrapper.get("[data-action='show-more-outputs']").trigger("click");
+    await flushPromises();
+    expect(wrapper.findAll("[data-output-row]")).toHaveLength(125);
+    expect(wrapper.findAll("[data-output-basename]").at(-1)?.text()).toBe("file-124.jpg");
+    expect(wrapper.find("[data-action='show-more-outputs']").exists()).toBe(false);
+    expect(ipc.libraryMediaUrl.mock.calls.map((call) => call[0])).toEqual(
+      outputs.map((output) => output.file_id),
+    );
   });
 
   it.each([
@@ -156,6 +197,22 @@ describe("DownloadJobDetails", () => {
     expect(ipc.revealLibraryFile).not.toHaveBeenCalled();
   });
 
+  it("gives every indexed file action a basename-specific accessible name", async () => {
+    const wrapper = render();
+    await flushPromises();
+    const first = wrapper.get("[data-output-row='0']");
+    const second = wrapper.get("[data-output-row='1']");
+
+    expect(first.get("[data-action='open-output']").attributes("aria-label")).toBe("Open first.jpg");
+    expect(first.get("[data-action='reveal-output']").attributes("aria-label")).toBe(
+      "Show first.jpg in Finder",
+    );
+    expect(second.get("[data-action='open-output']").attributes("aria-label")).toBe("Open second.mp4");
+    expect(second.get("[data-action='reveal-output']").attributes("aria-label")).toBe(
+      "Show second.mp4 in Finder",
+    );
+  });
+
   it("opens and reveals only by numeric file id and reports errors on the affected row", async () => {
     ipc.openLibraryFile.mockRejectedValueOnce(new Error("File moved"));
     ipc.revealLibraryFile.mockRejectedValueOnce("Reveal unavailable");
@@ -174,6 +231,26 @@ describe("DownloadJobDetails", () => {
     expect(wrapper.get("[data-output-row='0'] [data-row-error]").text()).toContain("Reveal unavailable");
     expect(typeof ipc.openLibraryFile.mock.calls[0][0]).toBe("number");
     expect(typeof ipc.revealLibraryFile.mock.calls[0][0]).toBe("number");
+  });
+
+  it("keeps indexed file action failures isolated to their own rows", async () => {
+    ipc.openLibraryFile.mockRejectedValueOnce(new Error("First file unavailable"));
+    ipc.revealLibraryFile.mockRejectedValueOnce(new Error("Second file unavailable"));
+    const wrapper = render();
+    await flushPromises();
+
+    await wrapper.get("[data-output-row='0'] [data-action='open-output']").trigger("click");
+    await flushPromises();
+    await wrapper.get("[data-output-row='1'] [data-action='reveal-output']").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get("[data-output-row='0'] [data-row-error]").text()).toContain(
+      "First file unavailable",
+    );
+    expect(wrapper.get("[data-output-row='1'] [data-row-error]").text()).toContain(
+      "Second file unavailable",
+    );
+    expect(wrapper.find("[data-output-row='3'] [data-row-error]").exists()).toBe(false);
   });
 
   it("renders malicious-looking basenames as inert text", () => {

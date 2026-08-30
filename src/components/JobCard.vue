@@ -83,6 +83,13 @@ function onKeydown(event: KeyboardEvent) {
         >
         <span v-else-if="job.state === 'cancelled'" class="text-xs text-warn">{{ statusText }}</span>
         <span v-else class="text-xs text-err">{{ statusText }}</span>
+        <span
+          v-if="actionable"
+          data-action="view-files"
+          class="inline-flex items-center gap-1 text-xs font-medium text-accent"
+        >
+          View files <span aria-hidden="true">›</span>
+        </span>
         <button
           v-if="active"
           class="rounded-md border border-line px-2 py-0.5 text-xs text-slate-400 hover:border-err hover:text-err"

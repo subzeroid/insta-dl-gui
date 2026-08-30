@@ -96,12 +96,14 @@ describe("JobCard completed download inspection", () => {
     expect(card.attributes("tabindex")).toBe("0");
     expect(card.attributes("aria-label")).toContain("Inspect downloaded files");
     expect(card.classes().join(" ")).toContain("focus-visible:ring-2");
+    expect(actionable.get("[data-action='view-files']").text()).toContain("View files");
 
     for (const state of ["done", "fetching", "downloading", "failed", "cancelled"] as const) {
       const job = doneJob({ state, outputs: state === "done" ? undefined : outputs });
       const inert = render(job).get("[data-job-id='job-1']");
       expect(inert.attributes("role")).toBeUndefined();
       expect(inert.attributes("tabindex")).toBeUndefined();
+      expect(inert.find("[data-action='view-files']").exists()).toBe(false);
     }
   });
 
