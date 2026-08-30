@@ -86,11 +86,32 @@ const gridPosts = computed(() => {
       : "carousel";
   return sourcePosts.value.filter((post) => classifyPost(post).kind === kind);
 });
+function isDownloadablePost(post: Post): boolean {
+  return (
+    Array.isArray(post.resources) &&
+    post.resources.length > 0 &&
+    post.resources.every((resource) => resource.kind === "photo" || resource.kind === "video")
+  );
+}
+const downloadableGridPosts = computed(() => gridPosts.value.filter(isDownloadablePost));
+const downloadablePostIds = computed(() => {
+  const posts = activeTab.value === "reels" ? reels.value : sourcePosts.value;
+  return new Set(posts.filter(isDownloadablePost).map((post) => post.pk));
+});
 const shownCount = computed(() =>
-  activeTab.value === "stories" ? (stories.value?.length ?? 0) : gridPosts.value.length,
+  activeTab.value === "stories"
+    ? (stories.value?.length ?? 0)
+    : downloadableGridPosts.value.length,
 );
-const selectedIdSet = computed(() => new Set(explorer.selected[activeTab.value]));
-const selectedCount = computed(() => explorer.selected[activeTab.value].length);
+const selectedIdSet = computed(() => {
+  const selectedIds = explorer.selected[activeTab.value];
+  return new Set(
+    activeTab.value === "stories"
+      ? selectedIds
+      : selectedIds.filter((pk) => downloadablePostIds.value.has(pk)),
+  );
+});
+const selectedCount = computed(() => selectedIdSet.value.size);
 const shownDisabledReason = computed(() =>
   shownCount.value > MAX_EXACT_SNAPSHOT_ITEMS
     ? `Shown has ${shownCount.value} items, above the 500-item exact snapshot limit.`
@@ -111,6 +132,9 @@ function previewMediaLabel(post: Post): string {
   const display = classifyPost(post);
   if (display.kind === "carousel") return `carousel with ${display.count} resources`;
   return display.kind === "unknown" ? "post" : display.kind;
+}
+function togglePostSelection(post: Post) {
+  if (isDownloadablePost(post)) explorer.toggleSelected(activeTab.value, post.pk);
 }
 const activeGroupBusy = computed(() => {
   const username = preview.value?.profile.username;
@@ -354,16 +378,19 @@ async function downloadSnapshot(scope: "shown" | "selected") {
   if (tab === "stories" && storiesLoading.value) return;
   const session = profileSession;
   const selectedEntries = scope === "selected" ? explorer.selectionSnapshot(tab) : [];
-  const requestedCount = scope === "shown" ? shownCount.value : selectedEntries.length;
+  const requestedCount = scope === "shown" ? shownCount.value : selectedCount.value;
   if (requestedCount > MAX_EXACT_SNAPSHOT_ITEMS) {
     error.value = `${scope === "shown" ? "Shown" : "Selected"} snapshots are limited to 500 items. Use All for a complete archive.`;
     return;
   }
   const selectedEntriesById = new Map(selectedEntries.map((entry) => [entry.pk, entry]));
+  const postCandidates = scope === "shown"
+    ? downloadableGridPosts.value
+    : (tab === "reels" ? reels.value : sourcePosts.value).filter(isDownloadablePost);
   const postSnapshot =
     tab === "stories"
       ? []
-      : [...(scope === "shown" || tab === "reels" ? gridPosts.value : sourcePosts.value)].filter(
+      : [...postCandidates].filter(
           (item) => scope === "shown" || selectedEntriesById.has(item.pk),
         );
   const storySnapshot =
@@ -724,8 +751,18 @@ onUnmounted(() => {
               <MediaSelectionCheckbox
                 :selected="selectedIdSet.has(p.pk)"
                 :label="`Select ${activeTab === 'reels' ? 'reel' : 'post'} ${p.code}`"
-                @toggle="explorer.toggleSelected(activeTab, p.pk)"
+                :disabled="!isDownloadablePost(p)"
+                :disabled-reason="!isDownloadablePost(p) ? 'This post has no downloadable media.' : undefined"
+                @toggle="togglePostSelection(p)"
               />
+              <span
+                v-if="!isDownloadablePost(p)"
+                data-download-unavailable
+                class="pointer-events-none absolute bottom-2 left-2 z-10 rounded bg-slate-900 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-300"
+                title="This post has no downloadable media."
+              >
+                Unavailable
+              </span>
             </div>
           </div>
           <div

@@ -185,7 +185,7 @@ describe("ExplorerView async wiring", () => {
       "carousel",
       "unknown",
     ]);
-    expect(button(wrapper, "Shown 4").exists()).toBe(true);
+    expect(button(wrapper, "Shown 3").exists()).toBe(true);
 
     await wrapper.get('[data-post-filter="videos"]').trigger("click");
     expect(wrapper.get('[data-post-filter="videos"]').attributes("aria-pressed")).toBe("true");
@@ -238,9 +238,87 @@ describe("ExplorerView async wiring", () => {
       "carousel",
       "unknown",
     ]);
-    expect(button(wrapper, "Shown 4").exists()).toBe(true);
+    expect(button(wrapper, "Shown 3").exists()).toBe(true);
     finishJob("job-selected-filtered");
     await flushPromises();
+  });
+
+  it("keeps resource-less Posts visible but excludes them from exact downloads and selection", async () => {
+    const photo = photoPost("photo", "https://cdninstagram.com/photo");
+    const video = videoPost("video", "https://cdninstagram.com/video");
+    const carousel = carouselPost("carousel", "https://cdninstagram.com/carousel");
+    const unknown = unknownPost("unknown", "https://cdninstagram.com/unknown");
+    ipc.enqueueFetchedPostDownload
+      .mockResolvedValueOnce("job-valid-shown")
+      .mockResolvedValueOnce("job-valid-selected");
+    const wrapper = render();
+    await loadProfile(wrapper, {
+      ...preview,
+      recent_posts: [photo, video, carousel, unknown],
+    });
+
+    expect(wrapper.findAll("[data-media-id]")).toHaveLength(4);
+    expect(button(wrapper, "Shown 3").exists()).toBe(true);
+    const unavailableTile = wrapper.get('[data-media-id="unknown"]');
+    const unavailableInput = selection(wrapper, "Select post UNKNOWN");
+    expect(unavailableTile.get("[data-download-unavailable]").text()).toBe("Unavailable");
+    expect(unavailableInput.attributes("disabled")).toBeDefined();
+    expect(unavailableInput.attributes("aria-describedby")).toBeTruthy();
+    await unavailableInput.trigger("change");
+    expect(useExplorerStore().isSelected("posts", "unknown")).toBe(false);
+
+    await button(wrapper, "Shown 3").trigger("click");
+    await flushPromises();
+    expect(ipc.enqueueFetchedPostDownload).toHaveBeenNthCalledWith(
+      1,
+      "nike",
+      "posts",
+      "shown",
+      [photo, video, carousel],
+    );
+    finishJob("job-valid-shown");
+    await flushPromises();
+
+    const store = useExplorerStore();
+    store.selected.posts.push("unknown");
+    await selection(wrapper, "Select post PHOTO").setValue(true);
+    expect(button(wrapper, "Selected 1").exists()).toBe(true);
+    await button(wrapper, "Selected 1").trigger("click");
+    await flushPromises();
+    expect(ipc.enqueueFetchedPostDownload).toHaveBeenNthCalledWith(
+      2,
+      "nike",
+      "posts",
+      "selected",
+      [photo],
+    );
+  });
+
+  it("applies the downloadable exact-snapshot predicate to Reels", async () => {
+    const reel = videoPost("reel", "https://cdninstagram.com/reel");
+    const unavailable = unknownPost("unknown-reel", "https://cdninstagram.com/unknown-reel");
+    ipc.fetchReels.mockResolvedValue({ posts: [reel, unavailable], end_cursor: null });
+    ipc.enqueueFetchedPostDownload.mockResolvedValue("job-reels-shown");
+    const wrapper = render();
+    await loadProfile(wrapper);
+
+    await button(wrapper, "Reels").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.findAll("[data-media-id]")).toHaveLength(2);
+    expect(button(wrapper, "Shown 1").exists()).toBe(true);
+    expect(selection(wrapper, "Select reel UNKNOWN-REEL").attributes("disabled")).toBeDefined();
+    useExplorerStore().selected.reels.push("unknown-reel");
+    expect(button(wrapper, "Selected 0").attributes("disabled")).toBeDefined();
+
+    await button(wrapper, "Shown 1").trigger("click");
+    await flushPromises();
+    expect(ipc.enqueueFetchedPostDownload).toHaveBeenCalledWith(
+      "nike",
+      "reels",
+      "shown",
+      [reel],
+    );
   });
 
   it("keeps loading more available for an empty Posts filter and hides the filter outside Posts", async () => {
