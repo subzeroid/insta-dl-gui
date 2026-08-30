@@ -6,7 +6,7 @@ import type { PostDisplayType } from "../lib/postDisplay";
 const props = defineProps<PostDisplayType>();
 
 const validCarousel = computed(
-  () => props.kind === "carousel" && Number.isInteger(props.count) && props.count > 0,
+  () => props.kind === "carousel" && Number.isInteger(props.count) && props.count > 1,
 );
 
 const label = computed(() => {

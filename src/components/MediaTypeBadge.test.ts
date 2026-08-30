@@ -21,10 +21,13 @@ describe("MediaTypeBadge", () => {
     expect(badge.classes()).toContain("text-white");
   });
 
-  it("does not render a zero-count carousel when its count is omitted", () => {
-    const wrapper = mount(MediaTypeBadge, { props: { kind: "carousel" } as any });
+  it.each([undefined, 0, 1, 1.5, -1])(
+    "does not render a carousel label for invalid count %s",
+    (count) => {
+      const wrapper = mount(MediaTypeBadge, { props: { kind: "carousel", count } as any });
 
-    expect(wrapper.text()).toBe("POST");
-    expect(wrapper.text()).not.toContain("CAROUSEL · 0");
-  });
+      expect(wrapper.text()).toBe("POST");
+      expect(wrapper.text()).not.toContain("CAROUSEL");
+    },
+  );
 });
