@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 
 import {
   formatBytes,
@@ -77,9 +77,16 @@ async function loadPreviewAccess() {
   }
 }
 
-function showMore() {
+async function showMore() {
+  const firstNewIndex = visibleCount.value;
   visibleCount.value = Math.min(outputs.value.length, visibleCount.value + OUTPUT_PAGE_SIZE);
   syncPreviewUrls();
+  await nextTick();
+  if (!dialog.value) return;
+  const focusTarget = remainingCount.value > 0
+    ? dialog.value.querySelector<HTMLElement>("[data-action='show-more-outputs']")
+    : dialog.value.querySelector<HTMLElement>(`[data-output-row="${firstNewIndex}"]`);
+  focusTarget?.focus();
 }
 
 function close() {
@@ -209,6 +216,7 @@ onBeforeUnmount(() => {
             v-for="(output, index) in visibleOutputs"
             :key="`${output.ordinal}-${index}`"
             :data-output-row="index"
+            tabindex="-1"
             class="rounded-lg border border-line bg-surface-2 p-3"
           >
             <div class="flex flex-wrap gap-4">

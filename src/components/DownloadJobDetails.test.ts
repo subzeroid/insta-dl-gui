@@ -166,6 +166,33 @@ describe("DownloadJobDetails", () => {
     );
   });
 
+  it("keeps pagination focus inside the dialog across intermediate and final pages", async () => {
+    const outputs = Array.from({ length: 125 }, (_, index) => ({
+      file_id: 2_000 + index,
+      basename: `focus-${index}.jpg`,
+      kind: "photo" as const,
+      byte_size: index + 1,
+      ordinal: index,
+    }));
+    const wrapper = render(job({ outputs }));
+    await flushPromises();
+    const firstShowMore = wrapper.get("[data-action='show-more-outputs']");
+    (firstShowMore.element as HTMLElement).focus();
+
+    await firstShowMore.trigger("click");
+    await flushPromises();
+    const finalShowMore = wrapper.get("[data-action='show-more-outputs']");
+    expect(document.activeElement).toBe(finalShowMore.element);
+
+    (finalShowMore.element as HTMLElement).focus();
+    await finalShowMore.trigger("click");
+    await flushPromises();
+    const firstFinalRow = wrapper.get("[data-output-row='100']");
+    expect(firstFinalRow.attributes("tabindex")).toBe("-1");
+    expect(document.activeElement).toBe(firstFinalRow.element);
+    expect(wrapper.get("[role='dialog']").element.contains(document.activeElement)).toBe(true);
+  });
+
   it.each([
     ["denied", false],
     ["failed", new Error("permission IPC failed")],
