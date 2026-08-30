@@ -219,12 +219,20 @@ describe("ExplorerView async wiring", () => {
     expect(wrapper.findAll("[data-media-id]").map((item) => item.attributes("data-media-id"))).toEqual([
       "carousel",
     ]);
+    expect(button(wrapper, "Shown 1").exists()).toBe(true);
     await wrapper.get('[data-post-filter="photos"]').trigger("click");
     expect(wrapper.findAll("[data-media-id]").map((item) => item.attributes("data-media-id"))).toEqual([
       "photo",
     ]);
+    expect(button(wrapper, "Shown 1").exists()).toBe(true);
     await wrapper.get('[data-post-filter="all"]').trigger("click");
-    expect(wrapper.find("[data-media-id=\"unknown\"]").exists()).toBe(true);
+    expect(wrapper.findAll("[data-media-id]").map((item) => item.attributes("data-media-id"))).toEqual([
+      "photo",
+      "video",
+      "carousel",
+      "unknown",
+    ]);
+    expect(button(wrapper, "Shown 4").exists()).toBe(true);
     finishJob("job-selected-filtered");
     await flushPromises();
   });
@@ -246,6 +254,58 @@ describe("ExplorerView async wiring", () => {
     expect(wrapper.find("[data-post-filter]").exists()).toBe(false);
     await button(wrapper, "Stories").trigger("click");
     expect(wrapper.find("[data-post-filter]").exists()).toBe(false);
+  });
+
+  it("uses a filter-specific empty state for every empty Posts media filter", async () => {
+    const cases = [
+      {
+        filter: "photos",
+        posts: [videoPost("video", "https://cdninstagram.com/video")],
+      },
+      {
+        filter: "videos",
+        posts: [photoPost("photo", "https://cdninstagram.com/photo")],
+      },
+      {
+        filter: "carousels",
+        posts: [photoPost("photo", "https://cdninstagram.com/photo")],
+      },
+    ] as const;
+
+    for (const entry of cases) {
+      const wrapper = render();
+      await loadProfile(wrapper, {
+        ...preview,
+        recent_posts: [...entry.posts],
+        end_cursor: `${entry.filter}-next-page`,
+      });
+
+      await wrapper.get(`[data-post-filter="${entry.filter}"]`).trigger("click");
+      expect(wrapper.findAll("[data-media-id]")).toHaveLength(0);
+      expect(wrapper.text()).toContain("No matching loaded posts.");
+      expect(wrapper.text()).not.toContain("No posts yet.");
+      expect(button(wrapper, "Shown 0").attributes("disabled")).toBeDefined();
+      expect(button(wrapper, "Load more").exists()).toBe(true);
+      wrapper.unmount();
+    }
+  });
+
+  it("persists the active Posts filter and filtered grid across an Explorer remount", async () => {
+    const pinia = createPinia();
+    const photo = photoPost("photo", "https://cdninstagram.com/photo");
+    const video = videoPost("video", "https://cdninstagram.com/video");
+    const first = render(pinia);
+    await loadProfile(first, { ...preview, recent_posts: [photo, video] });
+
+    await first.get('[data-post-filter="videos"]').trigger("click");
+    first.unmount();
+
+    const second = render(pinia);
+    expect(second.get('[data-post-filter="videos"]').attributes("aria-pressed")).toBe("true");
+    expect(second.get('[data-post-filter="videos"]').attributes("aria-current")).toBe("true");
+    expect(second.findAll("[data-media-id]").map((item) => item.attributes("data-media-id"))).toEqual([
+      "video",
+    ]);
   });
 
   it("shows media badges and descriptive preview labels for Posts and Reels", async () => {
