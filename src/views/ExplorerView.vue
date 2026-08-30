@@ -4,6 +4,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import {
   downloadDirect,
   downloadPost,
+  enqueueFetchedPostDownload,
   enqueueProfileDownload,
   fetchProfile,
   fetchReels,
@@ -17,6 +18,8 @@ import {
 import { useExplorerStore, type ExploreTab } from "../stores/explorer";
 import { useJobsStore } from "../stores/jobs";
 import { createExplorerRequestState, runOnce } from "../lib/asyncState";
+import DownloadScopeGroup from "../components/DownloadScopeGroup.vue";
+import MediaSelectionCheckbox from "../components/MediaSelectionCheckbox.vue";
 import PostModal from "../components/PostModal.vue";
 
 const jobs = useJobsStore();
@@ -29,6 +32,8 @@ const {
   reelsCursor,
   reelsLoaded,
   stories,
+  storiesError,
+  storiesLoading,
 } = storeToRefs(explorer);
 
 const suggestions = ref<SearchUser[]>([]);
@@ -40,7 +45,6 @@ const loading = ref(false);
 const loadingMore = ref(false);
 const error = ref<string | null>(null);
 
-const storiesLoading = ref(false);
 const reelsLoading = ref(false);
 const reelsError = ref<string | null>(null);
 const reelsRetryCursor = ref<string | null>(null);
@@ -50,6 +54,8 @@ const modalStory = ref<StoryItem | null>(null);
 
 const requests = createExplorerRequestState();
 const activeActions = reactive(new Set<string>());
+let profileSession = Symbol("explorer-profile-session");
+const MAX_EXACT_SNAPSHOT_ITEMS = 500;
 
 const tabs = [
   { id: "posts", label: "Posts" },
@@ -62,6 +68,37 @@ function hasVideo(p: Post): boolean {
 }
 
 const gridPosts = computed(() => (activeTab.value === "reels" ? reels.value : (preview.value?.recent_posts ?? [])));
+const shownCount = computed(() =>
+  activeTab.value === "stories" ? (stories.value?.length ?? 0) : gridPosts.value.length,
+);
+const selectedIdSet = computed(() => new Set(explorer.selected[activeTab.value]));
+const selectedCount = computed(() => explorer.selected[activeTab.value].length);
+const snapshotHelperText =
+  "Exact Shown and Selected snapshots are limited to 500 items. Use All for a complete archive.";
+const shownDisabledReason = computed(() =>
+  shownCount.value > MAX_EXACT_SNAPSHOT_ITEMS
+    ? `Shown has ${shownCount.value} items, above the 500-item exact snapshot limit.`
+    : undefined,
+);
+const selectedDisabledReason = computed(() =>
+  selectedCount.value > MAX_EXACT_SNAPSHOT_ITEMS
+    ? `Selected has ${selectedCount.value} items, above the 500-item exact snapshot limit.`
+    : undefined,
+);
+const allDownloadTitle = computed(() =>
+  activeTab.value === "stories"
+    ? "Refreshes and downloads all current Stories; uses additional API requests."
+    : `Fetch and download the complete ${activeTab.value === "posts" ? "Posts" : "Reels"} archive; uses API requests.`,
+);
+const activeGroupBusy = computed(() => {
+  const username = preview.value?.profile.username;
+  if (!username) return false;
+  const conflicts = downloadConflictKeys(username, activeTab.value, "all");
+  return (
+    jobs.hasActiveConflict(conflicts) ||
+    (activeTab.value === "stories" && storiesLoading.value)
+  );
+});
 
 function thumbUrl(p: Post): string {
   return p.thumbnail_url ?? p.resources.find((r) => r.kind === "photo")?.url ?? p.resources[0]?.url ?? "";
@@ -75,11 +112,9 @@ function onQueryInput() {
   window.clearTimeout(debounce);
   const seq = requests.autocomplete.begin();
   requests.profile.invalidate();
-  requests.stories.invalidate();
   requests.reels.invalidate();
   loading.value = false;
   loadingMore.value = false;
-  storiesLoading.value = false;
   reelsLoading.value = false;
   reelsError.value = null;
   suggestions.value = [];
@@ -161,11 +196,10 @@ async function submit() {
 
 async function loadProfile(username: string) {
   const seq = requests.profile.begin();
-  requests.stories.invalidate();
+  profileSession = Symbol("explorer-profile-session");
   requests.reels.invalidate();
   loading.value = true;
   loadingMore.value = false;
-  storiesLoading.value = false;
   reelsLoading.value = false;
   reelsError.value = null;
   reelsRetryCursor.value = null;
@@ -177,6 +211,9 @@ async function loadProfile(username: string) {
     const result = await fetchProfile(username, null);
     if (!requests.profile.isCurrent(seq)) return;
     explorer.commitProfile(result);
+    if (!result.profile.is_private) {
+      void loadStories();
+    }
   } catch (e) {
     if (!requests.profile.isCurrent(seq)) return;
     error.value = String(e);
@@ -223,44 +260,143 @@ function isActionBusy(kind: string, username: string) {
   return activeActions.has(actionKey(kind, username));
 }
 
-async function downloadAll(kind: "posts" | "reels") {
-  if (!preview.value) return;
-  const username = preview.value.profile.username;
-  await runOnce(activeActions, actionKey(kind, username), async () => {
+function downloadFolderKey(username: string, tab: ExploreTab) {
+  const folder = tab === "stories" ? "stories" : "posts";
+  return `folder:${username.toLowerCase()}:${folder}`;
+}
+
+function downloadConflictKeys(username: string, tab: ExploreTab, scope: "all" | "snapshot") {
+  const folderKey = downloadFolderKey(username, tab);
+  return scope === "all" ? [`profile:${username.toLowerCase()}`, folderKey] : [folderKey];
+}
+
+async function runWithDownloadConflicts<T>(
+  conflictKeys: readonly string[],
+  blockedByKeys: readonly string[],
+  action: (reservationToken: symbol) => Promise<T>,
+): Promise<T | undefined> {
+  if (jobs.hasActiveConflict(blockedByKeys)) return undefined;
+  const reservationToken = Symbol("explore-download-enqueue");
+  if (!jobs.reserveConflictKeys(reservationToken, conflictKeys)) return undefined;
+  try {
+    return await action(reservationToken);
+  } finally {
+    jobs.releaseConflictKeys(reservationToken);
+  }
+}
+
+function isCurrentProfileSession(session: symbol, username: string, profilePk: string) {
+  return (
+    profileSession === session &&
+    preview.value?.profile.username === username &&
+    preview.value.profile.pk === profilePk
+  );
+}
+
+async function downloadAll() {
+  const profile = preview.value?.profile;
+  if (!profile) return;
+  const tab = activeTab.value;
+  if (tab === "stories" && storiesLoading.value) return;
+  const session = profileSession;
+  const conflictKeys = downloadConflictKeys(profile.username, tab, "all");
+  await runWithDownloadConflicts(conflictKeys, conflictKeys, async (reservationToken) => {
+    error.value = null;
     try {
-      const id = await enqueueProfileDownload(username, {
-        posts: kind === "posts",
-        reels: kind === "reels",
-        stories: false,
+      const id = await enqueueProfileDownload(profile.username, {
+        posts: tab === "posts",
+        reels: tab === "reels",
+        stories: tab === "stories",
         highlights: false,
         avatar: false,
         max_posts: null,
       });
-      jobs.addPlaceholder(id, `@${username} ${kind}`);
+      jobs.transferConflictReservation(
+        reservationToken,
+        id,
+        `@${profile.username} ${tab} · all`,
+        conflictKeys,
+      );
     } catch (e) {
-      if (preview.value?.profile.username === username) error.value = String(e);
+      if (isCurrentProfileSession(session, profile.username, profile.pk)) {
+        error.value = String(e);
+      }
     }
   });
 }
 
-async function downloadShownReels() {
-  if (!preview.value || reels.value.length === 0) return;
-  const username = preview.value.profile.username;
-  await runOnce(activeActions, actionKey("reels", username), async () => {
-    try {
-      const id = await enqueueProfileDownload(username, {
-        posts: false,
-        reels: true,
-        stories: false,
-        highlights: false,
-        avatar: false,
-        max_posts: reels.value.length,
-      });
-      jobs.addPlaceholder(id, `@${username} reels`);
-    } catch (e) {
-      if (preview.value?.profile.username === username) error.value = String(e);
-    }
-  });
+async function downloadSnapshot(scope: "shown" | "selected") {
+  const profile = preview.value?.profile;
+  if (!profile) return;
+  const tab = activeTab.value;
+  if (tab === "stories" && storiesLoading.value) return;
+  const session = profileSession;
+  const selectedEntries = scope === "selected" ? explorer.selectionSnapshot(tab) : [];
+  const requestedCount = scope === "shown" ? shownCount.value : selectedEntries.length;
+  if (requestedCount > MAX_EXACT_SNAPSHOT_ITEMS) {
+    error.value = `${scope === "shown" ? "Shown" : "Selected"} snapshots are limited to 500 items. Use All for a complete archive.`;
+    return;
+  }
+  const selectedEntriesById = new Map(selectedEntries.map((entry) => [entry.pk, entry]));
+  const postSnapshot =
+    tab === "stories"
+      ? []
+      : [...gridPosts.value].filter(
+          (item) => scope === "shown" || selectedEntriesById.has(item.pk),
+        );
+  const storySnapshot =
+    tab === "stories"
+      ? [...(stories.value ?? [])].filter(
+          (item) => scope === "shown" || selectedEntriesById.has(item.pk),
+        )
+      : [];
+  const submittedIds = (tab === "stories" ? storySnapshot : postSnapshot).map((item) => item.pk);
+  const submittedSelections = submittedIds
+    .map((pk) => selectedEntriesById.get(pk))
+    .filter((entry) => entry !== undefined);
+  if (submittedIds.length === 0) return;
+
+  const conflictKeys = downloadConflictKeys(profile.username, tab, "snapshot");
+  const groupConflictKeys = downloadConflictKeys(profile.username, tab, "all");
+  await runWithDownloadConflicts(
+    conflictKeys,
+    groupConflictKeys,
+    async (reservationToken) => {
+      error.value = null;
+      try {
+        const id =
+          tab === "stories"
+            ? await downloadDirect(
+                profile.username,
+                "stories",
+                storySnapshot.map((item) => ({
+                  url: item.media_url,
+                  pk: item.pk,
+                  taken_at: item.taken_at,
+                })),
+              )
+            : await enqueueFetchedPostDownload(
+                profile.username,
+                tab,
+                scope,
+                postSnapshot,
+              );
+        jobs.transferConflictReservation(
+          reservationToken,
+          id,
+          `@${profile.username} ${tab} · ${scope} · ${submittedIds.length}`,
+          conflictKeys,
+        );
+        if (scope === "selected") {
+          explorer.clearSubmitted(tab, submittedSelections);
+        }
+      } catch (e) {
+        if (isCurrentProfileSession(session, profile.username, profile.pk)) {
+          error.value = String(e);
+        }
+      }
+    },
+  );
 }
 
 async function loadReels(cursor: string | null) {
@@ -308,41 +444,17 @@ async function downloadAvatar() {
 }
 
 async function loadStories() {
-  const username = preview.value?.profile.username;
-  if (!username || storiesLoading.value) return;
-  const seq = requests.stories.begin();
-  storiesLoading.value = true;
-  error.value = null;
+  const profile = preview.value?.profile;
+  if (!profile) return;
+  const { pk: userId, username } = profile;
+  const token = explorer.beginStoriesRequest(username);
+  if (token === null) return;
   try {
-    const items = await fetchStories(username);
-    if (!requests.stories.isCurrent(seq) || preview.value?.profile.username !== username) return;
-    stories.value = items;
+    const items = await fetchStories(userId);
+    explorer.commitStories(username, token, items);
   } catch (e) {
-    if (!requests.stories.isCurrent(seq) || preview.value?.profile.username !== username) return;
-    error.value = String(e);
-  } finally {
-    if (requests.stories.isCurrent(seq) && preview.value?.profile.username === username) {
-      storiesLoading.value = false;
-    }
+    explorer.failStories(username, token, String(e));
   }
-}
-
-async function downloadAllStories() {
-  if (!preview.value || !stories.value || stories.value.length === 0) return;
-  const username = preview.value.profile.username;
-  const items = stories.value.map((s) => ({
-    url: s.media_url,
-    pk: s.pk,
-    taken_at: s.taken_at,
-  }));
-  await runOnce(activeActions, actionKey("stories", username), async () => {
-    try {
-      const id = await downloadDirect(username, "stories", items);
-      jobs.addPlaceholder(id, `@${username} stories`);
-    } catch (e) {
-      if (preview.value?.profile.username === username) error.value = String(e);
-    }
-  });
 }
 
 function closeModal() {
@@ -351,22 +463,31 @@ function closeModal() {
 }
 
 onMounted(() => {
-  if (activeTab.value === "reels" && preview.value && !reelsLoaded.value) {
-    void loadReels(null);
-  } else if (
-    !preview.value &&
-    new URLSearchParams(window.location.search).get("demo") === "explore"
-  ) {
+  if (preview.value) {
+    if (
+      !preview.value.profile.is_private &&
+      stories.value === null &&
+      storiesError.value === null &&
+      !storiesLoading.value
+    ) {
+      void loadStories();
+    }
+    if (activeTab.value === "reels" && !reelsLoaded.value) {
+      void loadReels(null);
+    }
+    return;
+  }
+  if (new URLSearchParams(window.location.search).get("demo") === "explore") {
     query.value = "@natgeo";
     void loadProfile("natgeo");
   }
 });
 
 onUnmounted(() => {
+  profileSession = Symbol("explorer-profile-session");
   window.clearTimeout(debounce);
   requests.autocomplete.invalidate();
   requests.profile.invalidate();
-  requests.stories.invalidate();
   requests.reels.invalidate();
 });
 </script>
@@ -457,14 +578,6 @@ onUnmounted(() => {
             >
               ↓ Avatar
             </button>
-            <button
-              v-if="!preview.profile.is_private"
-              class="btn-primary"
-              :disabled="isActionBusy('posts', preview.profile.username)"
-              @click="downloadAll('posts')"
-            >
-              Download all posts
-            </button>
           </div>
         </div>
         <p v-if="preview.profile.is_private" class="mt-3 text-sm text-slate-500">
@@ -489,30 +602,19 @@ onUnmounted(() => {
           >
             {{ t.label }}
           </button>
-          <div class="ml-auto">
-            <button
-              v-if="activeTab === 'posts'"
-              class="btn-secondary"
-              :disabled="isActionBusy('posts', preview.profile.username)"
-              @click="downloadAll('posts')"
-            >Download all</button>
-            <button
-              v-else-if="activeTab === 'reels' && reels.length > 0"
-              class="btn-secondary"
-              :disabled="isActionBusy('reels', preview.profile.username)"
-              @click="downloadShownReels"
-            >
-              Download shown ({{ reels.length }})
-            </button>
-            <button
-              v-else-if="activeTab === 'stories' && stories && stories.length > 0"
-              class="btn-secondary"
-              :disabled="isActionBusy('stories', preview.profile.username)"
-              @click="downloadAllStories"
-            >
-              Download all stories
-            </button>
-          </div>
+          <DownloadScopeGroup
+            class="ml-auto"
+            :shown-count="shownCount"
+            :selected-count="selectedCount"
+            :busy="activeGroupBusy"
+            :all-title="allDownloadTitle"
+            :helper-text="snapshotHelperText"
+            :shown-disabled-reason="shownDisabledReason"
+            :selected-disabled-reason="selectedDisabledReason"
+            @download-all="downloadAll"
+            @download-shown="downloadSnapshot('shown')"
+            @download-selected="downloadSnapshot('selected')"
+          />
         </div>
 
         <!-- Posts / Reels grid -->
@@ -541,27 +643,44 @@ onUnmounted(() => {
             v-if="gridPosts.length > 0 && !(activeTab === 'reels' && reelsLoading && reels.length === 0)"
             class="grid grid-cols-2 gap-2 sm:grid-cols-3"
           >
-            <button
+            <div
               v-for="p in gridPosts"
               :key="p.pk"
-              type="button"
-              class="relative aspect-square cursor-pointer overflow-hidden rounded-lg bg-surface-2 transition hover:brightness-110"
-              @click="modalPost = p"
+              :data-media-id="p.pk"
+              class="relative aspect-square rounded-lg bg-surface-2"
+              :class="
+                selectedIdSet.has(p.pk)
+                  ? 'ring-2 ring-accent ring-offset-2 ring-offset-surface-0'
+                  : ''
+              "
             >
-              <img
-                v-if="thumbUrl(p)"
-                :src="thumbUrl(p)"
-                class="h-full w-full object-cover"
-                referrerpolicy="no-referrer"
-                loading="lazy"
-              />
-              <span v-else class="block h-full w-full bg-gradient-to-br from-surface-2 to-surface-3"></span>
-              <span
-                v-if="activeTab === 'reels' && hasVideo(p)"
-                class="absolute bottom-1.5 right-1.5 rounded-md bg-black/60 px-1.5 py-0.5 text-[10px] leading-none text-white"
-                >▶</span
+              <button
+                type="button"
+                data-action="preview"
+                class="absolute inset-0 cursor-pointer overflow-hidden rounded-lg transition hover:brightness-110"
+                :aria-label="`Preview ${activeTab === 'reels' ? 'reel' : 'post'} ${p.code}`"
+                @click="modalPost = p"
               >
-            </button>
+                <img
+                  v-if="thumbUrl(p)"
+                  :src="thumbUrl(p)"
+                  class="h-full w-full object-cover"
+                  referrerpolicy="no-referrer"
+                  loading="lazy"
+                />
+                <span v-else class="block h-full w-full bg-gradient-to-br from-surface-2 to-surface-3"></span>
+                <span
+                  v-if="activeTab === 'reels' && hasVideo(p)"
+                  class="absolute bottom-1.5 right-1.5 rounded-md bg-black/60 px-1.5 py-0.5 text-[10px] leading-none text-white"
+                  >▶</span
+                >
+              </button>
+              <MediaSelectionCheckbox
+                :selected="selectedIdSet.has(p.pk)"
+                :label="`Select ${activeTab === 'reels' ? 'reel' : 'post'} ${p.code}`"
+                @toggle="explorer.toggleSelected(activeTab, p.pk)"
+              />
+            </div>
           </div>
           <div
             v-else-if="activeTab === 'posts' || (activeTab === 'reels' && reelsLoaded && !reelsError)"
@@ -583,29 +702,64 @@ onUnmounted(() => {
 
         <!-- Stories -->
         <div v-else class="space-y-3">
-          <div v-if="stories === null" class="flex justify-center py-12">
-            <button class="btn-secondary" :disabled="storiesLoading" @click="loadStories">
-              {{ storiesLoading ? "Loading…" : "Load stories · costs 2 requests" }}
+          <div
+            v-if="storiesError"
+            class="card flex items-center justify-between gap-3 px-3 py-2 text-sm"
+          >
+            <span class="text-err">{{ storiesError }}</span>
+            <button
+              type="button"
+              class="btn-secondary shrink-0"
+              :disabled="storiesLoading"
+              @click="loadStories"
+            >
+              Retry stories
             </button>
           </div>
-          <div v-else-if="stories.length > 0" class="flex gap-3 overflow-x-auto py-1">
-            <button
+          <div
+            v-if="stories === null && !storiesError"
+            class="animate-pulse py-12 text-center text-sm text-slate-500"
+          >
+            Loading stories…
+          </div>
+          <div v-else-if="stories && stories.length > 0" class="flex gap-3 overflow-x-auto py-1">
+            <div
               v-for="s in stories"
               :key="s.pk"
-              type="button"
-              class="shrink-0 cursor-pointer rounded-full border-2 border-[var(--color-accent)] p-0.5"
-              @click="modalStory = s"
+              :data-story-id="s.pk"
+              class="relative shrink-0 rounded-full border-2 border-[var(--color-accent)] p-0.5"
+              :class="
+                selectedIdSet.has(s.pk)
+                  ? 'ring-2 ring-accent ring-offset-2 ring-offset-surface-0'
+                  : ''
+              "
             >
-              <img
-                v-if="s.thumb_url || s.media_url"
-                :src="s.thumb_url || s.media_url"
-                class="h-20 w-20 rounded-full object-cover"
-                referrerpolicy="no-referrer"
+              <button
+                type="button"
+                data-action="preview"
+                class="block cursor-pointer rounded-full transition hover:brightness-110"
+                :aria-label="`Preview story ${s.pk}`"
+                @click="modalStory = s"
+              >
+                <img
+                  v-if="s.thumb_url || s.media_url"
+                  :src="s.thumb_url || s.media_url"
+                  class="h-20 w-20 rounded-full object-cover"
+                  referrerpolicy="no-referrer"
+                />
+                <span v-else class="block h-20 w-20 rounded-full bg-gradient-to-br from-surface-2 to-surface-3"></span>
+              </button>
+              <MediaSelectionCheckbox
+                :selected="selectedIdSet.has(s.pk)"
+                :label="`Select story ${s.pk}`"
+                @toggle="explorer.toggleSelected('stories', s.pk)"
               />
-              <span v-else class="block h-20 w-20 rounded-full bg-gradient-to-br from-surface-2 to-surface-3"></span>
-            </button>
+            </div>
           </div>
-          <div v-else class="card flex items-center justify-center p-12 text-sm text-slate-500">
+          <div
+            v-else-if="stories"
+            class="card flex items-center justify-center p-12 text-sm text-slate-500"
+          >
             No active stories.
           </div>
         </div>

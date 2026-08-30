@@ -43,8 +43,8 @@ const showChrome = computed(() => route.path !== "/onboarding");
       >
         <RouterLink
           v-for="r in [
-            { path: '/download', label: 'Download' },
             { path: '/explore', label: 'Explore' },
+            { path: '/download', label: 'Download' },
             { path: '/library', label: 'Library' },
             { path: '/queue', label: 'Queue' },
             { path: '/settings', label: 'Settings' },

@@ -1,9 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use futures_util::FutureExt;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
@@ -14,11 +15,65 @@ use crate::cdn::{self, CdnError};
 use crate::config::Config;
 use crate::hiker::{map_post, map_profile, map_search_user};
 use crate::jobs::JobRegistry;
-use crate::models::{DirectItem, Post, Profile, ProfileOptions, SearchUser, StoryItem};
+use crate::models::{
+    DirectItem, FetchedPostCategory, FetchedPostScope, Post, Profile, ProfileOptions, SearchUser,
+    StoryItem,
+};
 use crate::targets::Target;
 use crate::AppState;
 
 const DOWNLOAD_ATTEMPTS: usize = 3;
+#[allow(dead_code)]
+const MAX_FETCHED_POSTS: usize = 500;
+#[allow(dead_code)]
+const MAX_RESOURCES_PER_POST: usize = 20;
+#[allow(dead_code)]
+const MAX_SHORTCODE_BYTES: usize = 256;
+
+#[allow(dead_code)]
+fn validate_fetched_posts(posts: Vec<Post>, allow_loopback: bool) -> Result<Vec<Post>, String> {
+    if posts.is_empty() {
+        return Err("Fetched post batch must not be empty".into());
+    }
+    if posts.len() > MAX_FETCHED_POSTS {
+        return Err("Fetched post batch exceeds maximum of 500 posts".into());
+    }
+
+    let mut seen = HashMap::new();
+    let mut validated = Vec::new();
+    for post in posts {
+        if post.pk.is_empty() || !post.pk.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("Fetched post PK must contain only ASCII digits".into());
+        }
+        if post.code.is_empty() {
+            return Err("Fetched post shortcode must not be empty".into());
+        }
+        if post.code.len() > MAX_SHORTCODE_BYTES {
+            return Err("Fetched post shortcode exceeds maximum of 256 bytes".into());
+        }
+        if post.resources.is_empty() || post.resources.len() > MAX_RESOURCES_PER_POST {
+            return Err("Fetched post must contain between 1 and 20 resources".into());
+        }
+        for resource in &post.resources {
+            cdn::validate_remote_url(&resource.url, allow_loopback)
+                .map_err(|_| "Fetched post contains an invalid media URL".to_string())?;
+        }
+
+        let canonical = serde_json::to_vec(&post).expect("serializing validated fetched post");
+        if let Some(existing) = seen.get(&post.pk) {
+            if existing != &canonical {
+                return Err(
+                    "Fetched post batch contains conflicting posts with the same PK".into(),
+                );
+            }
+        } else {
+            seen.insert(post.pk.clone(), canonical);
+            validated.push(post);
+        }
+    }
+
+    Ok(validated)
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
@@ -357,6 +412,108 @@ fn direct_job_key(label: &str, subfolder: &str, items: &[DirectItem]) -> String 
     )
 }
 
+impl FetchedPostCategory {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Posts => "posts",
+            Self::Reels => "reels",
+        }
+    }
+}
+
+impl FetchedPostScope {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Shown => "shown",
+            Self::Selected => "selected",
+        }
+    }
+}
+
+fn normalize_fetched_username(username: &str) -> Result<String, String> {
+    let trimmed = username.trim();
+    let candidate = trimmed.strip_prefix('@').unwrap_or(trimmed);
+    if candidate.is_empty() {
+        return Err("Instagram username must not be empty".into());
+    }
+    if candidate.len() > 30
+        || matches!(candidate, "." | "..")
+        || !candidate
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_'))
+    {
+        return Err(
+            "Instagram username must use 1 to 30 ASCII letters, digits, periods, or underscores"
+                .into(),
+        );
+    }
+    Ok(candidate.to_ascii_lowercase())
+}
+
+fn fetched_post_job_key(
+    username: &str,
+    category: FetchedPostCategory,
+    scope: FetchedPostScope,
+    posts: &[Post],
+) -> String {
+    let mut post_pks: Vec<&str> = posts.iter().map(|post| post.pk.as_str()).collect();
+    post_pks.sort_unstable();
+    let post_key = serde_json::to_string(&post_pks).expect("serializing string identifiers");
+    format!(
+        "fetched:{}:{}:{}:{}",
+        username.to_ascii_lowercase(),
+        category.as_str(),
+        scope.as_str(),
+        post_key
+    )
+}
+
+fn fetched_post_label(
+    username: &str,
+    category: FetchedPostCategory,
+    scope: FetchedPostScope,
+    count: usize,
+) -> String {
+    format!(
+        "@{username} {} · {} {count}",
+        category.as_str(),
+        scope.as_str()
+    )
+}
+
+fn fetched_posts_dir(destination_root: &Path, username: &str) -> PathBuf {
+    destination_root.join(username).join("posts")
+}
+
+struct InFlightGuard {
+    registry: Arc<std::sync::Mutex<HashSet<String>>>,
+    key: String,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.key);
+    }
+}
+
+struct FetchedJobRegistryGuard {
+    registry: Arc<JobRegistry>,
+    job_id: String,
+}
+
+impl Drop for FetchedJobRegistryGuard {
+    fn drop(&mut self) {
+        self.registry.finish(&self.job_id);
+    }
+}
+
+fn fetched_worker_panic_error() -> &'static str {
+    "Fetched media download failed unexpectedly"
+}
+
 fn is_fatal_api_error(e: &crate::hiker::HikerError) -> bool {
     matches!(
         e.code(),
@@ -383,7 +540,16 @@ async fn download_one(
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "file".into());
-    let progress = |bytes| em.progress(file_no, 0, *bytes_so_far + bytes, &name);
+    let mut attempt_high_water = 0u64;
+    let progress = |bytes| {
+        attempt_high_water = attempt_high_water.max(bytes);
+        em.progress(
+            file_no,
+            0,
+            (*bytes_so_far).saturating_add(attempt_high_water),
+            &name,
+        );
+    };
     #[cfg(test)]
     let outcome = if allow_loopback {
         cdn::stream_to_file_retried_for_test(
@@ -425,14 +591,21 @@ async fn download_one(
         )
         .await
     };
-    let outcome = outcome.map_err(JobFail::from)?;
-    *bytes_so_far += outcome.bytes;
-    Ok(DownloadedFile {
-        kind: media_file_kind_from_path(&outcome.path),
-        path: outcome.path,
-        bytes: outcome.bytes,
-        ordinal,
-    })
+    match outcome {
+        Ok(outcome) => {
+            *bytes_so_far = (*bytes_so_far).saturating_add(attempt_high_water.max(outcome.bytes));
+            Ok(DownloadedFile {
+                kind: media_file_kind_from_path(&outcome.path),
+                path: outcome.path,
+                bytes: outcome.bytes,
+                ordinal,
+            })
+        }
+        Err(error) => {
+            *bytes_so_far = (*bytes_so_far).saturating_add(attempt_high_water);
+            Err(JobFail::from(error))
+        }
+    }
 }
 
 fn media_file_kind_from_path(path: &Path) -> MediaFileKind {
@@ -843,19 +1016,12 @@ pub async fn fetch_reels(
 }
 
 /// Active stories of a profile for the Explorer grid (billed 2 requests).
-#[tauri::command]
-pub async fn fetch_stories(
-    username: String,
-    state: State<'_, AppState>,
+async fn fetch_story_items(
+    client: &crate::hiker::HikerClient,
+    user_id: &str,
 ) -> Result<Vec<StoryItem>, String> {
-    let client = client(&state).await?;
-    let user = client
-        .user_by_username(&username)
-        .await
-        .map_err(|e| e.to_string())?;
-    let profile = map_profile(&user).ok_or("Could not parse profile payload")?;
     let items = client
-        .user_stories(&profile.pk)
+        .user_stories(user_id)
         .await
         .map_err(|e| e.to_string())?;
     Ok(items
@@ -890,6 +1056,15 @@ pub async fn fetch_stories(
             })
         })
         .collect())
+}
+
+#[tauri::command]
+pub async fn fetch_stories(
+    user_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<StoryItem>, String> {
+    let client = client(&state).await?;
+    fetch_story_items(&client, &user_id).await
 }
 
 /// Download already-fetched resources (e.g. a single story) without
@@ -1674,6 +1849,16 @@ pub async fn download_post(
 struct CompletedPostDownload {
     outcome: JobOutcome,
     media: Option<DownloadedMedia>,
+    #[allow(dead_code)]
+    bytes_downloaded: u64,
+    #[allow(dead_code)]
+    has_successful_resource: bool,
+}
+
+struct PostDownloadAttempt {
+    completed: CompletedPostDownload,
+    resource_errors: Vec<String>,
+    last_error: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1688,7 +1873,38 @@ async fn run_single_post(
     cancel: Option<tokio::sync::watch::Receiver<bool>>,
     allow_loopback: bool,
 ) -> Result<CompletedPostDownload, JobFail> {
+    let attempt = run_single_post_attempt(
+        cdn_http,
+        catalog,
+        destination_root,
+        cfg,
+        em,
+        dir,
+        post,
+        cancel,
+        allow_loopback,
+    )
+    .await?;
+    if attempt.completed.media.is_none() {
+        finish_downloads(attempt.completed.outcome, attempt.last_error)?;
+    }
+    Ok(attempt.completed)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_single_post_attempt(
+    cdn_http: &reqwest::Client,
+    catalog: &Catalog,
+    destination_root: &Path,
+    cfg: &Config,
+    em: &dyn ProgressSink,
+    dir: &Path,
+    post: &Post,
+    cancel: Option<tokio::sync::watch::Receiver<bool>>,
+    allow_loopback: bool,
+) -> Result<PostDownloadAttempt, JobFail> {
     std::fs::create_dir_all(dir)?;
+    let is_cancelled = || cancel.as_ref().map(|rx| *rx.borrow()).unwrap_or(false);
     let base = taken_at_name(post.taken_at, &post.code);
     let item_metadata = post_catalog_metadata(post);
     let total = post.resources.len();
@@ -1697,9 +1913,10 @@ async fn run_single_post(
     let mut media_files_written = 0usize;
     let mut resource_errors = Vec::new();
     let mut last_error = None;
+    let mut has_successful_resource = false;
 
     for (idx, resource) in post.resources.iter().enumerate() {
-        if cancel.as_ref().map(|c| *c.borrow()).unwrap_or(false) {
+        if is_cancelled() {
             return Err(JobFail::Cancelled);
         }
         let dest_base = if total > 1 {
@@ -1708,15 +1925,29 @@ async fn run_single_post(
             dir.join(&base)
         };
         let ordinal = u32::try_from(idx).unwrap_or(u32::MAX);
-        if let Some(file) = recover_downloaded_file(
+        let recovered = recover_downloaded_file(
             catalog,
             destination_root,
             &item_metadata.remote_key,
             ordinal,
         )
-        .await
-        {
+        .await;
+        if is_cancelled() {
+            return Err(JobFail::Cancelled);
+        }
+        if let Some(file) = recovered {
+            bytes_total = bytes_total.saturating_add(file.bytes);
+            let file_name = file
+                .path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "file".into());
+            em.progress(idx + 1, total, bytes_total, &file_name);
+            if is_cancelled() {
+                return Err(JobFail::Cancelled);
+            }
             downloaded.push(file);
+            has_successful_resource = true;
             continue;
         }
         match download_one(
@@ -1736,6 +1967,7 @@ async fn run_single_post(
             Ok(file) => {
                 media_files_written += 1;
                 downloaded.push(file);
+                has_successful_resource = true;
             }
             Err(JobFail::Cancelled) => return Err(JobFail::Cancelled),
             Err(JobFail::Fatal(error)) => {
@@ -1743,6 +1975,12 @@ async fn run_single_post(
                 resource_errors.push(error);
             }
         }
+        if is_cancelled() {
+            return Err(JobFail::Cancelled);
+        }
+    }
+    if is_cancelled() {
+        return Err(JobFail::Cancelled);
     }
     let sidecar_ordinal = u32::try_from(total).unwrap_or(u32::MAX);
     let mut sidecar_written = false;
@@ -1767,11 +2005,20 @@ async fn run_single_post(
             sidecar_written = true;
         }
     }
+    if is_cancelled() {
+        return Err(JobFail::Cancelled);
+    }
 
     if media_files_written == 0 && !sidecar_written && resource_errors.is_empty() {
-        return Ok(CompletedPostDownload {
-            outcome: JobOutcome::default(),
-            media: None,
+        return Ok(PostDownloadAttempt {
+            completed: CompletedPostDownload {
+                outcome: JobOutcome::default(),
+                media: None,
+                bytes_downloaded: bytes_total,
+                has_successful_resource,
+            },
+            resource_errors,
+            last_error,
         });
     }
 
@@ -1782,23 +2029,213 @@ async fn run_single_post(
         let media = DownloadedMedia {
             item: item_metadata,
             files: downloaded,
-            resource_errors,
+            resource_errors: resource_errors.clone(),
         };
-        if (media_files_written > 0 || sidecar_written)
-            && catalog_downloaded_media(catalog, destination_root, &media)
+        if media_files_written > 0 || sidecar_written {
+            if is_cancelled() {
+                return Err(JobFail::Cancelled);
+            }
+            if catalog_downloaded_media(catalog, destination_root, &media)
                 .await
                 .is_err()
-        {
-            outcome.catalog_warnings += 1;
+            {
+                outcome.catalog_warnings += 1;
+            }
         }
         Some(media)
     };
-    let outcome = if media.is_some() {
-        outcome
-    } else {
-        finish_downloads(outcome, last_error)?
+    Ok(PostDownloadAttempt {
+        completed: CompletedPostDownload {
+            outcome,
+            media,
+            bytes_downloaded: bytes_total,
+            has_successful_resource,
+        },
+        resource_errors,
+        last_error,
+    })
+}
+
+#[allow(dead_code)]
+struct BatchProgress<'a> {
+    inner: &'a dyn ProgressSink,
+    file_offset: usize,
+    total_files: usize,
+    bytes_offset: u64,
+    reported_bytes: &'a std::sync::Mutex<u64>,
+}
+
+impl ProgressSink for BatchProgress<'_> {
+    fn progress(&self, current_file: usize, _total_files: usize, bytes_done: u64, file_name: &str) {
+        let candidate = self.bytes_offset.saturating_add(bytes_done);
+        let bytes_done = {
+            let mut reported_bytes = self.reported_bytes.lock().unwrap();
+            *reported_bytes = (*reported_bytes).max(candidate);
+            *reported_bytes
+        };
+        self.inner.progress(
+            self.file_offset.saturating_add(current_file),
+            self.total_files,
+            bytes_done,
+            file_name,
+        );
+    }
+}
+
+/// Download one exact, already-fetched Posts/Reels snapshot without an API refetch.
+#[tauri::command]
+pub(crate) async fn enqueue_fetched_post_download(
+    username: String,
+    category: FetchedPostCategory,
+    scope: FetchedPostScope,
+    posts: Vec<Post>,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let username = normalize_fetched_username(&username)?;
+    let posts = validate_fetched_posts(posts, false)?;
+    let key = fetched_post_job_key(&username, category, scope, &posts);
+    let in_flight = Arc::clone(&state.in_flight);
+    {
+        let mut registry = in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !registry.insert(key.clone()) {
+            return Err(format!(
+                "A download for @{username} {} · {} is already running",
+                category.as_str(),
+                scope.as_str()
+            ));
+        }
+    }
+    let in_flight_guard = InFlightGuard {
+        registry: in_flight,
+        key,
     };
-    Ok(CompletedPostDownload { outcome, media })
+
+    let cfg = state.cfg.read().await.clone();
+    let cdn_http = state.cdn_http.clone();
+    let catalog = state.catalog.clone();
+    let jobs = Arc::clone(&state.jobs);
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let cancel_rx = jobs.register(&job_id);
+    let job_registry_guard = FetchedJobRegistryGuard {
+        registry: jobs,
+        job_id: job_id.clone(),
+    };
+    let em = JobEvents::new(
+        &app,
+        job_id.clone(),
+        fetched_post_label(&username, category, scope, posts.len()),
+    );
+
+    tauri::async_runtime::spawn(async move {
+        let _in_flight_guard = in_flight_guard;
+        let _job_registry_guard = job_registry_guard;
+        let worker_result = std::panic::AssertUnwindSafe(async {
+            let destination_root = PathBuf::from(&cfg.dest_dir);
+            let dir = fetched_posts_dir(&destination_root, &username);
+            let result = run_fetched_posts_job(
+                &cdn_http,
+                &catalog,
+                &destination_root,
+                &cfg,
+                &em,
+                &dir,
+                &posts,
+                Some(cancel_rx),
+                false,
+            )
+            .await;
+            (result, dir)
+        })
+        .catch_unwind()
+        .await;
+        match worker_result {
+            Ok((Ok(completed), dir)) => {
+                em.done(completed.outcome, completed.resource_errors.len(), &dir);
+            }
+            Ok((Err(JobFail::Cancelled), _)) => em.cancelled(),
+            Ok((Err(JobFail::Fatal(error)), _)) => em.failed(error),
+            Err(_) => em.failed(fetched_worker_panic_error().to_owned()),
+        }
+    });
+
+    Ok(job_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_fetched_posts_job(
+    cdn_http: &reqwest::Client,
+    catalog: &Catalog,
+    destination_root: &Path,
+    cfg: &Config,
+    em: &dyn ProgressSink,
+    dir: &Path,
+    posts: &[Post],
+    cancel: Option<tokio::sync::watch::Receiver<bool>>,
+    allow_loopback: bool,
+) -> Result<CompletedJob, JobFail> {
+    std::fs::create_dir_all(dir)?;
+    let total_files = posts.iter().map(|post| post.resources.len()).sum();
+    let mut file_offset = 0usize;
+    let mut bytes_offset = 0u64;
+    let reported_bytes = std::sync::Mutex::new(0u64);
+    let mut outcome = JobOutcome::default();
+    let mut resource_errors = Vec::new();
+    let mut last_error = None;
+    let mut has_successful_resource = false;
+
+    for post in posts {
+        if cancel.as_ref().map(|rx| *rx.borrow()).unwrap_or(false) {
+            return Err(JobFail::Cancelled);
+        }
+        let progress = BatchProgress {
+            inner: em,
+            file_offset,
+            total_files,
+            bytes_offset,
+            reported_bytes: &reported_bytes,
+        };
+        match run_single_post_attempt(
+            cdn_http,
+            catalog,
+            destination_root,
+            cfg,
+            &progress,
+            dir,
+            post,
+            cancel.as_ref().cloned(),
+            allow_loopback,
+        )
+        .await
+        {
+            Ok(attempt) => {
+                let completed = attempt.completed;
+                outcome.files_written += completed.outcome.files_written;
+                outcome.catalog_warnings += completed.outcome.catalog_warnings;
+                bytes_offset = bytes_offset.saturating_add(completed.bytes_downloaded);
+                has_successful_resource |= completed.has_successful_resource;
+                resource_errors.extend(attempt.resource_errors);
+                if let Some(error) = attempt.last_error {
+                    last_error = Some(error);
+                }
+            }
+            Err(JobFail::Cancelled) => return Err(JobFail::Cancelled),
+            Err(JobFail::Fatal(error)) => {
+                last_error = Some(error.clone());
+                resource_errors.push(error);
+            }
+        }
+        file_offset = file_offset.saturating_add(post.resources.len());
+    }
+
+    finish_completed_job(
+        outcome,
+        last_error,
+        resource_errors,
+        has_successful_resource,
+    )
 }
 
 #[tauri::command]
@@ -1812,7 +2249,43 @@ mod download_catalog_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{MediaKind, MediaResource};
+    use crate::models::{FetchedPostCategory, FetchedPostScope, MediaKind, MediaResource};
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn fetch_story_items_uses_profile_id_without_username_lookup() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v2/user/stories"))
+            .and(query_param("user_id", "42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "reel": {
+                    "items": [{
+                        "pk": "100",
+                        "taken_at": 1_700_000_000,
+                        "image_versions2": {
+                            "candidates": [{
+                                "url": "https://cdninstagram.com/story.jpg",
+                                "width": 1080
+                            }]
+                        }
+                    }]
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = crate::hiker::HikerClient::with_base_url("token".into(), server.uri());
+
+        let items = fetch_story_items(&client, "42").await.unwrap();
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].pk, "100");
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url.path(), "/v2/user/stories");
+    }
 
     fn direct_item(pk: &str) -> DirectItem {
         DirectItem {
@@ -1842,6 +2315,402 @@ mod tests {
                 .collect(),
             thumbnail_url: None,
         }
+    }
+
+    fn fetched_post(pk: &str, code: &str, url: &str) -> Post {
+        Post {
+            pk: pk.into(),
+            code: code.into(),
+            taken_at: Some(1_700_000_000),
+            caption: Some("A complete fetched post".into()),
+            like_count: Some(42),
+            comment_count: Some(7),
+            owner_username: Some("owner".into()),
+            owner_pk: Some("9001".into()),
+            resources: vec![MediaResource {
+                url: url.into(),
+                kind: MediaKind::Video,
+            }],
+            thumbnail_url: Some("https://cdninstagram.com/thumb.jpg".into()),
+        }
+    }
+
+    #[test]
+    fn fetched_post_job_key_is_case_and_order_independent() {
+        let first = vec![
+            fetched_post("200", "SECOND", "https://cdninstagram.com/second.mp4"),
+            fetched_post("100", "FIRST", "https://cdninstagram.com/first.mp4"),
+        ];
+        let second = vec![first[1].clone(), first[0].clone()];
+
+        assert_eq!(
+            fetched_post_job_key(
+                "Nike",
+                FetchedPostCategory::Posts,
+                FetchedPostScope::Shown,
+                &first,
+            ),
+            fetched_post_job_key(
+                "nike",
+                FetchedPostCategory::Posts,
+                FetchedPostScope::Shown,
+                &second,
+            )
+        );
+    }
+
+    #[test]
+    fn fetched_post_job_key_distinguishes_category_and_scope() {
+        let posts = vec![fetched_post(
+            "100",
+            "FIRST",
+            "https://cdninstagram.com/first.mp4",
+        )];
+        let shown_posts = fetched_post_job_key(
+            "nike",
+            FetchedPostCategory::Posts,
+            FetchedPostScope::Shown,
+            &posts,
+        );
+
+        assert_ne!(
+            shown_posts,
+            fetched_post_job_key(
+                "nike",
+                FetchedPostCategory::Reels,
+                FetchedPostScope::Shown,
+                &posts,
+            )
+        );
+        assert_ne!(
+            shown_posts,
+            fetched_post_job_key(
+                "nike",
+                FetchedPostCategory::Posts,
+                FetchedPostScope::Selected,
+                &posts,
+            )
+        );
+    }
+
+    #[test]
+    fn fetched_username_label_and_destination_use_one_safe_normalized_value() {
+        let username = normalize_fetched_username(" @Nike.Name_1 ").unwrap();
+
+        assert_eq!(username, "nike.name_1");
+        assert_eq!(
+            fetched_post_label(
+                &username,
+                FetchedPostCategory::Reels,
+                FetchedPostScope::Selected,
+                2,
+            ),
+            "@nike.name_1 reels · selected 2"
+        );
+        assert_eq!(
+            fetched_posts_dir(Path::new("/downloads"), &username),
+            PathBuf::from("/downloads/nike.name_1/posts")
+        );
+    }
+
+    #[test]
+    fn fetched_username_rejects_noncanonical_or_filesystem_special_values() {
+        for username in [
+            "",
+            " @ ",
+            "@@nike",
+            "nike name",
+            "nike/name",
+            "nike?name",
+            "níke",
+            "1234567890123456789012345678901",
+            ".",
+            "..",
+        ] {
+            assert!(
+                normalize_fetched_username(username).is_err(),
+                "accepted invalid username {username:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fetched_username_rejects_formerly_colliding_lossy_segments() {
+        assert!(normalize_fetched_username("a/b").is_err());
+        assert!(normalize_fetched_username("a?b").is_err());
+    }
+
+    #[test]
+    fn in_flight_guard_removes_its_key_on_drop() {
+        let registry = Arc::new(std::sync::Mutex::new(HashSet::from(["batch".to_owned()])));
+
+        {
+            let _guard = InFlightGuard {
+                registry: Arc::clone(&registry),
+                key: "batch".to_owned(),
+            };
+            assert!(registry.lock().unwrap().contains("batch"));
+        }
+
+        assert!(!registry.lock().unwrap().contains("batch"));
+    }
+
+    #[test]
+    fn fetched_job_registry_guard_finishes_on_drop() {
+        let jobs = Arc::new(JobRegistry::new());
+        let _cancel = jobs.register("job");
+
+        {
+            let _guard = FetchedJobRegistryGuard {
+                registry: Arc::clone(&jobs),
+                job_id: "job".to_owned(),
+            };
+            assert!(jobs.cancel("job"));
+        }
+
+        assert!(!jobs.cancel("job"));
+    }
+
+    #[test]
+    fn fetched_job_guards_clean_up_during_unwind() {
+        let jobs = Arc::new(JobRegistry::new());
+        let _cancel = jobs.register("job");
+        let in_flight = Arc::new(std::sync::Mutex::new(HashSet::from(["batch".to_owned()])));
+        let result = std::panic::catch_unwind({
+            let jobs = Arc::clone(&jobs);
+            let in_flight = Arc::clone(&in_flight);
+            move || {
+                let _job_guard = FetchedJobRegistryGuard {
+                    registry: jobs,
+                    job_id: "job".to_owned(),
+                };
+                let _in_flight_guard = InFlightGuard {
+                    registry: in_flight,
+                    key: "batch".to_owned(),
+                };
+                panic!("sensitive panic payload");
+            }
+        });
+
+        assert!(result.is_err());
+        assert!(!jobs.cancel("job"));
+        assert!(!in_flight.lock().unwrap().contains("batch"));
+    }
+
+    #[test]
+    fn fetched_worker_panic_error_is_stable_and_sanitized() {
+        let error = fetched_worker_panic_error();
+
+        assert_eq!(error, "Fetched media download failed unexpectedly");
+        assert!(!error.contains("sensitive panic payload"));
+    }
+
+    #[test]
+    fn fetched_post_enqueue_command_is_exposed_to_the_tauri_handler() {
+        let _command = enqueue_fetched_post_download;
+    }
+
+    #[test]
+    fn fetched_batch_validation_deserializes_the_closed_contract() {
+        let post: Post = serde_json::from_value(serde_json::json!({
+            "pk": "100",
+            "code": "SHORTCODE",
+            "taken_at": 1_700_000_000,
+            "caption": "caption",
+            "like_count": 42,
+            "comment_count": 7,
+            "owner_username": "owner",
+            "owner_pk": "9001",
+            "resources": [{
+                "url": "https://cdninstagram.com/video.mp4",
+                "kind": "video"
+            }],
+            "thumbnail_url": "https://cdninstagram.com/thumb.jpg"
+        }))
+        .unwrap();
+        assert_eq!(post.pk, "100");
+        assert_eq!(post.resources[0].kind, MediaKind::Video);
+
+        assert_eq!(
+            serde_json::from_str::<FetchedPostCategory>(r#""posts""#).unwrap(),
+            FetchedPostCategory::Posts
+        );
+        assert_eq!(
+            serde_json::from_str::<FetchedPostCategory>(r#""reels""#).unwrap(),
+            FetchedPostCategory::Reels
+        );
+        assert_eq!(
+            serde_json::from_str::<FetchedPostScope>(r#""shown""#).unwrap(),
+            FetchedPostScope::Shown
+        );
+        assert_eq!(
+            serde_json::from_str::<FetchedPostScope>(r#""selected""#).unwrap(),
+            FetchedPostScope::Selected
+        );
+        assert!(serde_json::from_str::<FetchedPostCategory>(r#""stories""#).is_err());
+        assert!(serde_json::from_str::<FetchedPostCategory>(r#""clips""#).is_err());
+        assert!(serde_json::from_str::<FetchedPostScope>(r#""all""#).is_err());
+        assert!(serde_json::from_str::<FetchedPostScope>(r#""everything""#).is_err());
+    }
+
+    #[test]
+    fn fetched_batch_validation_deduplicates_identical_posts_in_first_seen_order() {
+        let first = fetched_post("100", "FIRST", "https://cdninstagram.com/first.mp4");
+        let duplicate = first.clone();
+        let second = fetched_post("200", "SECOND", "https://fbcdn.net/second.mp4");
+
+        let validated = validate_fetched_posts(vec![first, duplicate, second], false).unwrap();
+
+        assert_eq!(
+            validated
+                .iter()
+                .map(|post| (post.pk.as_str(), post.code.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("100", "FIRST"), ("200", "SECOND")]
+        );
+    }
+
+    #[test]
+    fn fetched_batch_validation_rejects_conflicting_duplicate_download_fields() {
+        let first = fetched_post("100", "FIRST", "https://cdninstagram.com/first.mp4");
+        let mut conflicting_url = first.clone();
+        conflicting_url.resources[0].url = "https://cdninstagram.com/other.mp4".into();
+        let mut conflicting_shortcode = first.clone();
+        conflicting_shortcode.code = "OTHER".into();
+
+        for duplicate in [conflicting_url, conflicting_shortcode] {
+            assert_eq!(
+                validate_fetched_posts(vec![first.clone(), duplicate], false).unwrap_err(),
+                "Fetched post batch contains conflicting posts with the same PK"
+            );
+        }
+    }
+
+    #[test]
+    fn fetched_batch_validation_rejects_conflicting_duplicate_metadata() {
+        let first = fetched_post("100", "FIRST", "https://cdninstagram.com/first.mp4");
+        let mut duplicate = first.clone();
+        duplicate.caption = Some("different metadata".into());
+
+        assert_eq!(
+            validate_fetched_posts(vec![first, duplicate], false).unwrap_err(),
+            "Fetched post batch contains conflicting posts with the same PK"
+        );
+    }
+
+    #[test]
+    fn fetched_batch_validation_rejects_empty_and_oversized_batches() {
+        assert_eq!(MAX_FETCHED_POSTS, 500);
+        assert_eq!(
+            validate_fetched_posts(Vec::new(), false).unwrap_err(),
+            "Fetched post batch must not be empty"
+        );
+
+        let maximum = vec![
+            fetched_post("100", "SHORTCODE", "https://cdninstagram.com/video.mp4");
+            MAX_FETCHED_POSTS
+        ];
+        assert_eq!(
+            validate_fetched_posts(maximum.clone(), false)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let mut oversized = maximum;
+        oversized.push(fetched_post(
+            "200",
+            "SECOND",
+            "https://cdninstagram.com/second.mp4",
+        ));
+        assert_eq!(
+            validate_fetched_posts(oversized, false).unwrap_err(),
+            "Fetched post batch exceeds maximum of 500 posts"
+        );
+    }
+
+    #[test]
+    fn fetched_batch_validation_rejects_invalid_post_identifiers() {
+        for pk in ["", "../escape", "123a", "١٢٣"] {
+            let post = fetched_post(pk, "SHORTCODE", "https://cdninstagram.com/video.mp4");
+            assert_eq!(
+                validate_fetched_posts(vec![post], false).unwrap_err(),
+                "Fetched post PK must contain only ASCII digits"
+            );
+        }
+    }
+
+    #[test]
+    fn fetched_batch_validation_enforces_shortcode_byte_bounds() {
+        assert_eq!(MAX_SHORTCODE_BYTES, 256);
+
+        let empty = fetched_post("100", "", "https://cdninstagram.com/video.mp4");
+        assert_eq!(
+            validate_fetched_posts(vec![empty], false).unwrap_err(),
+            "Fetched post shortcode must not be empty"
+        );
+
+        let maximum = fetched_post(
+            "100",
+            &"a".repeat(MAX_SHORTCODE_BYTES),
+            "https://cdninstagram.com/video.mp4",
+        );
+        assert!(validate_fetched_posts(vec![maximum], false).is_ok());
+
+        let oversized = fetched_post(
+            "100",
+            &"a".repeat(MAX_SHORTCODE_BYTES + 1),
+            "https://cdninstagram.com/video.mp4",
+        );
+        assert_eq!(
+            validate_fetched_posts(vec![oversized], false).unwrap_err(),
+            "Fetched post shortcode exceeds maximum of 256 bytes"
+        );
+    }
+
+    #[test]
+    fn fetched_batch_validation_enforces_resource_count_bounds() {
+        assert_eq!(MAX_RESOURCES_PER_POST, 20);
+
+        let mut empty = fetched_post("100", "SHORTCODE", "https://cdninstagram.com/video.mp4");
+        empty.resources.clear();
+        assert_eq!(
+            validate_fetched_posts(vec![empty], false).unwrap_err(),
+            "Fetched post must contain between 1 and 20 resources"
+        );
+
+        let mut maximum = fetched_post("100", "SHORTCODE", "https://cdninstagram.com/video.mp4");
+        maximum.resources = vec![maximum.resources[0].clone(); MAX_RESOURCES_PER_POST];
+        assert!(validate_fetched_posts(vec![maximum.clone()], false).is_ok());
+
+        maximum.resources.push(MediaResource {
+            url: "https://cdninstagram.com/extra.mp4".into(),
+            kind: MediaKind::Video,
+        });
+        assert_eq!(
+            validate_fetched_posts(vec![maximum], false).unwrap_err(),
+            "Fetched post must contain between 1 and 20 resources"
+        );
+    }
+
+    #[test]
+    fn fetched_batch_validation_rejects_unsafe_urls_without_leaking_details() {
+        let unsafe_post = fetched_post("100", "SHORTCODE", "http://127.0.0.1/private");
+        assert_eq!(
+            validate_fetched_posts(vec![unsafe_post], false).unwrap_err(),
+            "Fetched post contains an invalid media URL"
+        );
+    }
+
+    #[test]
+    fn fetched_batch_validation_validates_duplicates_before_deduplication() {
+        let valid = fetched_post("100", "FIRST", "https://cdninstagram.com/first.mp4");
+        let unsafe_duplicate = fetched_post("100", "DUPLICATE", "http://127.0.0.1/private");
+
+        assert_eq!(
+            validate_fetched_posts(vec![valid, unsafe_duplicate], false).unwrap_err(),
+            "Fetched post contains an invalid media URL"
+        );
     }
 
     #[test]

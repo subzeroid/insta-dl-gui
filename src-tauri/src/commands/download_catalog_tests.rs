@@ -2,7 +2,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{mpsc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -20,6 +20,56 @@ const JPEG: [u8; 8] = [0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4];
 const MP4: [u8; 16] = [
     0, 0, 0, 16, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm', 0, 0, 0, 0,
 ];
+
+#[derive(Default)]
+struct RecordingProgress {
+    updates: Mutex<Vec<(usize, usize, u64)>>,
+}
+
+impl RecordingProgress {
+    fn updates(&self) -> Vec<(usize, usize, u64)> {
+        self.updates.lock().unwrap().clone()
+    }
+}
+
+impl ProgressSink for RecordingProgress {
+    fn progress(&self, current_file: usize, total_files: usize, bytes_done: u64, _file_name: &str) {
+        self.updates
+            .lock()
+            .unwrap()
+            .push((current_file, total_files, bytes_done));
+    }
+}
+
+struct CancelOnTerminalProgress {
+    cancel: tokio::sync::watch::Sender<bool>,
+    updates: Mutex<Vec<(usize, usize, u64)>>,
+}
+
+impl CancelOnTerminalProgress {
+    fn new(cancel: tokio::sync::watch::Sender<bool>) -> Self {
+        Self {
+            cancel,
+            updates: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn updates(&self) -> Vec<(usize, usize, u64)> {
+        self.updates.lock().unwrap().clone()
+    }
+}
+
+impl ProgressSink for CancelOnTerminalProgress {
+    fn progress(&self, current_file: usize, total_files: usize, bytes_done: u64, _file_name: &str) {
+        self.updates
+            .lock()
+            .unwrap()
+            .push((current_file, total_files, bytes_done));
+        if current_file == total_files {
+            self.cancel.send(true).unwrap();
+        }
+    }
+}
 
 struct TestResult {
     outcome: JobOutcome,
@@ -89,6 +139,52 @@ impl Fixture {
             resource_errors,
             relative_paths,
         }
+    }
+
+    async fn run_fetched_posts(
+        &self,
+        posts: &[Post],
+        sidecar: bool,
+        progress: &dyn ProgressSink,
+        cancel: Option<tokio::sync::watch::Receiver<bool>>,
+    ) -> Result<CompletedJob, JobFail> {
+        let cfg = Config {
+            token: None,
+            dest_dir: self.root.to_string_lossy().into_owned(),
+            sidecar,
+        };
+        run_fetched_posts_job(
+            &self.http,
+            &self.catalog,
+            &self.root,
+            &cfg,
+            progress,
+            &self.root.join("nike/posts"),
+            posts,
+            cancel,
+            true,
+        )
+        .await
+    }
+
+    fn all_items(&self) -> Vec<LibraryItemDetail> {
+        self.catalog
+            .query_library(&LibraryQuery {
+                search: None,
+                kinds: Vec::new(),
+                source_id: None,
+                availability: Some(FileAvailability::Available),
+                taken_after: None,
+                taken_before: None,
+                sort: LibrarySort::ImportedAtDesc,
+                cursor: None,
+                limit: 60,
+            })
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|item| self.catalog.get_library_item(item.id).unwrap().unwrap())
+            .collect()
     }
 
     fn only_item(&self) -> LibraryItemDetail {
@@ -440,6 +536,430 @@ async fn mount_media(
         .await;
 }
 
+#[tokio::test]
+async fn fetched_batch_preserves_carousels_catalog_sidecars_and_global_progress() {
+    let server = MockServer::start().await;
+    mount_media(&server, "/carousel-photo", "image/jpeg", &JPEG).await;
+    mount_media(&server, "/carousel-video", "video/mp4", &MP4).await;
+    mount_media(&server, "/single-photo", "image/jpeg", &JPEG).await;
+    let fixture = Fixture::new();
+    let mut carousel = post(
+        "batch-1",
+        "BATCH-CAROUSEL",
+        vec![
+            resource(&server, "/carousel-photo", MediaKind::Photo),
+            resource(&server, "/carousel-video", MediaKind::Video),
+        ],
+    );
+    carousel.owner_username = Some("nike".into());
+    carousel.owner_pk = Some("123".into());
+    let mut single = post(
+        "batch-2",
+        "BATCH-SINGLE",
+        vec![resource(&server, "/single-photo", MediaKind::Photo)],
+    );
+    single.owner_username = Some("nike".into());
+    single.owner_pk = Some("123".into());
+    let progress = RecordingProgress::default();
+
+    let completed = fixture
+        .run_fetched_posts(&[carousel, single], true, &progress, None)
+        .await
+        .unwrap_or_else(|failure| match failure {
+            JobFail::Cancelled => panic!("fetched batch was unexpectedly cancelled"),
+            JobFail::Fatal(error) => panic!("fetched batch failed: {error}"),
+        });
+
+    assert_eq!(completed.outcome.files_written, 3);
+    assert_eq!(completed.outcome.catalog_warnings, 0);
+    assert!(completed.resource_errors.is_empty());
+    let items = fixture.all_items();
+    assert_eq!(items.len(), 2, "expected one catalog item per post");
+    for item in items {
+        assert_eq!(item.owner_username.as_deref(), Some("nike"));
+        assert_eq!(item.owner_pk.as_deref(), Some("123"));
+        let sidecars = item
+            .files
+            .iter()
+            .filter(|file| file.kind == MediaFileKind::Metadata)
+            .collect::<Vec<_>>();
+        assert_eq!(sidecars.len(), 1, "expected one sidecar per post");
+        assert!(absolute(&fixture.root, &sidecars[0].relative_path).is_file());
+    }
+    let updates = progress.updates();
+    assert!(!updates.is_empty());
+    assert!(updates.iter().all(|(_, total, _)| *total == 3));
+    assert!(updates
+        .windows(2)
+        .all(|pair| { pair[0].0 <= pair[1].0 && pair[0].2 <= pair[1].2 }));
+    assert_eq!(updates.last().map(|update| update.0), Some(3));
+    assert_eq!(updates.last().map(|update| update.2), Some(32));
+}
+
+#[tokio::test]
+async fn fetched_batch_recovered_success_and_later_failure_completes_with_error() {
+    let server = MockServer::start().await;
+    mount_media(&server, "/already-downloaded", "image/jpeg", &JPEG).await;
+    Mock::given(path("/forbidden"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+    let fixture = Fixture::new();
+    let recovered = post(
+        "batch-recovered",
+        "BATCH-RECOVERED",
+        vec![resource(&server, "/already-downloaded", MediaKind::Photo)],
+    );
+    let failing = post(
+        "batch-failing",
+        "BATCH-FAILING",
+        vec![resource(&server, "/forbidden", MediaKind::Photo)],
+    );
+    let seeded = fixture
+        .run_fetched_posts(std::slice::from_ref(&recovered), false, &NoopProgress, None)
+        .await
+        .unwrap_or_else(|failure| match failure {
+            JobFail::Cancelled => panic!("seed batch was unexpectedly cancelled"),
+            JobFail::Fatal(error) => panic!("seed batch failed: {error}"),
+        });
+    assert_eq!(seeded.outcome.files_written, 1);
+    let before = fixture.all_items();
+
+    let completed = fixture
+        .run_fetched_posts(&[recovered, failing], false, &NoopProgress, None)
+        .await
+        .unwrap_or_else(|failure| match failure {
+            JobFail::Cancelled => panic!("retry batch was unexpectedly cancelled"),
+            JobFail::Fatal(error) => panic!("retry batch failed: {error}"),
+        });
+
+    assert_eq!(completed.outcome.files_written, 0);
+    assert_eq!(completed.resource_errors.len(), 1);
+    assert!(completed.resource_errors[0].contains("HTTP 403"));
+    let after = fixture.all_items();
+    assert_eq!(after.len(), 1);
+    assert_files_stable_after_refresh(&before[0].files, &after[0].files);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/already-downloaded")
+            .count(),
+        1,
+        "the recovered resource must not be downloaded again"
+    );
+}
+
+#[tokio::test]
+async fn fetched_batch_already_cancelled_writes_no_media_or_catalog_items() {
+    let server = MockServer::start().await;
+    Mock::given(path("/must-not-download"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/jpeg")
+                .set_body_bytes(JPEG),
+        )
+        .expect(0)
+        .mount(&server)
+        .await;
+    let fixture = Fixture::new();
+    let item = post(
+        "batch-cancelled",
+        "BATCH-CANCELLED",
+        vec![resource(&server, "/must-not-download", MediaKind::Photo)],
+    );
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(true);
+
+    let result = fixture
+        .run_fetched_posts(&[item], true, &NoopProgress, Some(cancel_rx))
+        .await;
+
+    assert!(matches!(result, Err(JobFail::Cancelled)));
+    assert!(fixture.all_items().is_empty());
+    let destination = fixture.root.join("nike/posts");
+    assert!(
+        !destination.exists() || fs::read_dir(destination).unwrap().next().is_none(),
+        "cancelled batch must not write archive files"
+    );
+}
+
+#[tokio::test]
+async fn fetched_batch_retains_every_fatal_post_error_and_continues_to_later_posts() {
+    let server = MockServer::start().await;
+    Mock::given(path("/first-forbidden"))
+        .respond_with(ResponseTemplate::new(403))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(path("/second-missing"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&server)
+        .await;
+    mount_media(&server, "/later-success", "image/jpeg", &JPEG).await;
+    let fixture = Fixture::new();
+    let failed = post(
+        "batch-all-resource-failures",
+        "BATCH-ALL-RESOURCE-FAILURES",
+        vec![
+            resource(&server, "/first-forbidden", MediaKind::Photo),
+            resource(&server, "/second-missing", MediaKind::Video),
+        ],
+    );
+    let succeeded = post(
+        "batch-later-success",
+        "BATCH-LATER-SUCCESS",
+        vec![resource(&server, "/later-success", MediaKind::Photo)],
+    );
+
+    let completed = fixture
+        .run_fetched_posts(&[failed, succeeded], false, &NoopProgress, None)
+        .await
+        .unwrap_or_else(|failure| match failure {
+            JobFail::Cancelled => panic!("fetched batch was unexpectedly cancelled"),
+            JobFail::Fatal(error) => panic!("fetched batch failed: {error}"),
+        });
+
+    assert_eq!(completed.outcome.files_written, 1);
+    assert_eq!(completed.resource_errors.len(), 2);
+    assert!(completed
+        .resource_errors
+        .iter()
+        .any(|error| error.contains("HTTP 403")));
+    assert!(completed
+        .resource_errors
+        .iter()
+        .any(|error| error.contains("HTTP 404")));
+    assert_eq!(fixture.all_items().len(), 1);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/later-success")
+            .count(),
+        1,
+        "a fatal first post must not prevent a later download"
+    );
+}
+
+#[tokio::test]
+async fn fetched_batch_with_no_successful_resources_is_fatal_after_trying_every_post() {
+    let server = MockServer::start().await;
+    Mock::given(path("/failed-first-post"))
+        .respond_with(ResponseTemplate::new(403))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(path("/failed-second-post"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let fixture = Fixture::new();
+    let first = post(
+        "batch-failed-first",
+        "BATCH-FAILED-FIRST",
+        vec![resource(&server, "/failed-first-post", MediaKind::Photo)],
+    );
+    let second = post(
+        "batch-failed-second",
+        "BATCH-FAILED-SECOND",
+        vec![resource(&server, "/failed-second-post", MediaKind::Video)],
+    );
+
+    let result = fixture
+        .run_fetched_posts(&[first, second], false, &NoopProgress, None)
+        .await;
+
+    match result {
+        Err(JobFail::Fatal(error)) => assert!(error.contains("HTTP 404")),
+        Err(JobFail::Cancelled) => panic!("fetched batch was unexpectedly cancelled"),
+        Ok(_) => panic!("an all-failed fetched batch must be fatal"),
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2, "every post must be attempted");
+}
+
+#[tokio::test]
+async fn fetched_batch_final_recovered_resource_emits_terminal_monotonic_progress() {
+    let server = MockServer::start().await;
+    mount_media(&server, "/new-first", "image/jpeg", &JPEG).await;
+    mount_media(&server, "/recovered-final", "video/mp4", &MP4).await;
+    let fixture = Fixture::new();
+    let recovered = post(
+        "batch-recovered-final",
+        "BATCH-RECOVERED-FINAL",
+        vec![resource(&server, "/recovered-final", MediaKind::Video)],
+    );
+    let seeded = fixture
+        .run_fetched_posts(std::slice::from_ref(&recovered), false, &NoopProgress, None)
+        .await
+        .unwrap_or_else(|failure| match failure {
+            JobFail::Cancelled => panic!("seed batch was unexpectedly cancelled"),
+            JobFail::Fatal(error) => panic!("seed batch failed: {error}"),
+        });
+    assert_eq!(seeded.outcome.files_written, 1);
+    let new = post(
+        "batch-new-first",
+        "BATCH-NEW-FIRST",
+        vec![resource(&server, "/new-first", MediaKind::Photo)],
+    );
+    let progress = RecordingProgress::default();
+
+    let completed = fixture
+        .run_fetched_posts(&[new, recovered], false, &progress, None)
+        .await
+        .unwrap_or_else(|failure| match failure {
+            JobFail::Cancelled => panic!("fetched batch was unexpectedly cancelled"),
+            JobFail::Fatal(error) => panic!("fetched batch failed: {error}"),
+        });
+
+    assert_eq!(completed.outcome.files_written, 1);
+    assert!(completed.resource_errors.is_empty());
+    let updates = progress.updates();
+    assert!(updates.iter().all(|(_, total, _)| *total == 2));
+    assert!(updates
+        .windows(2)
+        .all(|pair| { pair[0].0 <= pair[1].0 && pair[0].2 <= pair[1].2 }));
+    assert_eq!(updates.last().copied(), Some((2, 2, 24)));
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/recovered-final")
+            .count(),
+        1,
+        "the terminal resource must be recovered instead of downloaded again"
+    );
+}
+
+#[tokio::test]
+async fn fetched_batch_terminal_recovered_progress_cancellation_skips_sidecar_and_catalog() {
+    let server = MockServer::start().await;
+    mount_media(&server, "/cancel-recovered", "video/mp4", &MP4).await;
+    let fixture = Fixture::new();
+    let recovered = post(
+        "batch-cancel-recovered",
+        "BATCH-CANCEL-RECOVERED",
+        vec![resource(&server, "/cancel-recovered", MediaKind::Video)],
+    );
+    let seeded = fixture
+        .run_fetched_posts(std::slice::from_ref(&recovered), false, &NoopProgress, None)
+        .await
+        .unwrap_or_else(|failure| match failure {
+            JobFail::Cancelled => panic!("seed batch was unexpectedly cancelled"),
+            JobFail::Fatal(error) => panic!("seed batch failed: {error}"),
+        });
+    assert_eq!(seeded.outcome.files_written, 1);
+    let before = fixture.only_item();
+    let media_path = absolute(&fixture.root, &before.files[0].relative_path);
+    assert!(!media_path.with_extension("json").exists());
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let progress = CancelOnTerminalProgress::new(cancel_tx);
+
+    let result = fixture
+        .run_fetched_posts(&[recovered], true, &progress, Some(cancel_rx))
+        .await;
+
+    assert!(matches!(result, Err(JobFail::Cancelled)));
+    assert_eq!(progress.updates().last().copied(), Some((1, 1, 16)));
+    assert!(!media_path.with_extension("json").exists());
+    assert_eq!(fixture.only_item(), before);
+}
+
+#[tokio::test]
+async fn fetched_batch_failed_stream_high_water_advances_before_next_resource() {
+    let (server, server_thread) = failed_stream_then_success_server();
+    let fixture = Fixture::new();
+    let item = post(
+        "batch-partial-stream",
+        "BATCH-PARTIAL-STREAM",
+        vec![
+            MediaResource {
+                url: format!("{server}/partial"),
+                kind: MediaKind::Photo,
+            },
+            MediaResource {
+                url: format!("{server}/success"),
+                kind: MediaKind::Photo,
+            },
+        ],
+    );
+    let progress = RecordingProgress::default();
+
+    let completed = fixture
+        .run_fetched_posts(&[item], false, &progress, None)
+        .await
+        .unwrap_or_else(|failure| match failure {
+            JobFail::Cancelled => panic!("fetched batch was unexpectedly cancelled"),
+            JobFail::Fatal(error) => panic!("fetched batch failed: {error}"),
+        });
+    server_thread.join().unwrap();
+
+    assert_eq!(completed.outcome.files_written, 1);
+    assert_eq!(completed.resource_errors.len(), 1);
+    let updates = progress.updates();
+    let failed_high_water = updates
+        .iter()
+        .filter(|(current, _, _)| *current == 1)
+        .map(|(_, _, bytes)| *bytes)
+        .max()
+        .expect("failed stream must report partial bytes");
+    let terminal = updates
+        .last()
+        .copied()
+        .expect("successful resource progress");
+    assert_eq!((terminal.0, terminal.1), (2, 2));
+    assert!(
+        terminal.2 > failed_high_water,
+        "next resource bytes must advance beyond the failed high-water"
+    );
+    assert!(updates
+        .windows(2)
+        .all(|pair| { pair[0].0 <= pair[1].0 && pair[0].2 <= pair[1].2 }));
+}
+
+#[tokio::test]
+async fn standalone_post_all_failed_after_attempt_refactor_is_concrete_fatal() {
+    let server = MockServer::start().await;
+    Mock::given(path("/standalone-forbidden"))
+        .respond_with(ResponseTemplate::new(403))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let fixture = Fixture::new();
+    let cfg = Config {
+        token: None,
+        dest_dir: fixture.root.to_string_lossy().into_owned(),
+        sidecar: false,
+    };
+    let item = post(
+        "standalone-failed",
+        "STANDALONE-FAILED",
+        vec![resource(&server, "/standalone-forbidden", MediaKind::Photo)],
+    );
+
+    let result = run_single_post(
+        &fixture.http,
+        &fixture.catalog,
+        &fixture.root,
+        &cfg,
+        &NoopProgress,
+        &fixture.root.join("nested/profile"),
+        &item,
+        None,
+        true,
+    )
+    .await;
+
+    match result {
+        Err(JobFail::Fatal(error)) => assert!(error.contains("HTTP 403")),
+        Err(JobFail::Cancelled) => panic!("standalone post was unexpectedly cancelled"),
+        Ok(_) => panic!("an all-failed standalone post must be fatal"),
+    }
+    assert!(fixture.all_items().is_empty());
+}
+
 fn absolute(root: &Path, relative: &str) -> PathBuf {
     root.join(relative)
 }
@@ -510,6 +1030,42 @@ fn collision_server() -> (
         slow_handler.join().unwrap();
     });
     (format!("http://{address}"), started_rx, release_tx, handle)
+}
+
+fn failed_stream_then_success_server() -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        let mut partial_body = vec![0_u8; 640];
+        partial_body[..JPEG.len()].copy_from_slice(&JPEG);
+        for _ in 0..DOWNLOAD_ATTEMPTS {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let read = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..read]).contains("GET /partial "));
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: 1280\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            stream.write_all(&partial_body).unwrap();
+            stream.flush().unwrap();
+        }
+
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 1024];
+        let read = stream.read(&mut request).unwrap();
+        assert!(String::from_utf8_lossy(&request[..read]).contains("GET /success "));
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            JPEG.len()
+        )
+        .unwrap();
+        stream.write_all(&JPEG).unwrap();
+        stream.flush().unwrap();
+    });
+    (format!("http://{address}"), handle)
 }
 
 #[tokio::test]

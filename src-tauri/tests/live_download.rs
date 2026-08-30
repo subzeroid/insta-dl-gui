@@ -88,7 +88,17 @@ async fn balance_and_single_post_download() {
     let mut last_error = None;
     for resource in &post.resources {
         let base = dest_dir.join(format!("{}_smoke", post.code));
-        match cdn::stream_to_file(&http, &resource.url, &base, post.taken_at, |_| {}, None).await {
+        match cdn::stream_to_file_retried(
+            &http,
+            &resource.url,
+            &base,
+            post.taken_at,
+            |_| {},
+            None,
+            3,
+        )
+        .await
+        {
             Ok(outcome) => {
                 println!("saved {} ({} bytes)", outcome.path.display(), outcome.bytes);
                 assert!(outcome.path.exists());

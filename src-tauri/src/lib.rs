@@ -240,6 +240,7 @@ pub fn run() {
             commands::fetch_profile,
             commands::fetch_reels,
             commands::enqueue_profile_download,
+            commands::enqueue_fetched_post_download,
             commands::cancel_job,
             commands::search_users,
             commands::fetch_stories,

@@ -76,3 +76,143 @@ describe("jobs warning state", () => {
     expect(JSON.stringify(job)).not.toContain("https://");
   });
 });
+
+describe("jobs conflict metadata", () => {
+  it("reserves pending conflicts atomically and releases them by token", () => {
+    const store = useJobsStore();
+    const first = Symbol("first enqueue");
+    const conflicting = Symbol("conflicting enqueue");
+    const unrelated = Symbol("unrelated enqueue");
+
+    expect(store.reserveConflictKeys(first, ["folder:nike:posts", "folder:nike:posts"])).toBe(true);
+    expect(store.hasActiveConflict(["folder:nike:posts"])).toBe(true);
+    expect(store.reserveConflictKeys(conflicting, ["folder:nike:posts"])).toBe(false);
+    expect(store.reserveConflictKeys(unrelated, ["folder:nike:stories"])).toBe(true);
+
+    store.releaseConflictKeys(first);
+    expect(store.hasActiveConflict(["folder:nike:posts"])).toBe(false);
+    expect(store.hasActiveConflict(["folder:nike:stories"])).toBe(true);
+    store.releaseConflictKeys(unrelated);
+    expect(store.hasActiveConflict(["folder:nike:stories"])).toBe(false);
+  });
+
+  it("transfers a pending reservation into active job metadata without a gap", () => {
+    const store = useJobsStore();
+    const token = Symbol("accepted enqueue");
+    expect(store.reserveConflictKeys(token, ["folder:nike:posts"])).toBe(true);
+
+    store.transferConflictReservation(
+      token,
+      "accepted",
+      "Explore posts",
+      ["folder:nike:posts"],
+    );
+
+    expect(store.jobs.get("accepted")?.conflictKeys).toEqual(["folder:nike:posts"]);
+    expect(store.hasActiveConflict(["folder:nike:posts"])).toBe(true);
+    store.jobs.get("accepted")!.state = "failed";
+    expect(store.hasActiveConflict(["folder:nike:posts"])).toBe(false);
+  });
+
+  it("releases a reservation when transfer finds an early terminal backend event", async () => {
+    const store = useJobsStore();
+    await store.init();
+    const token = Symbol("early terminal enqueue");
+    expect(store.reserveConflictKeys(token, ["profile:nike", "folder:nike:posts"])).toBe(true);
+    ipc.listener?.({
+      job_id: "early-reserved",
+      state: "done",
+      label: "Backend label",
+      count: 1,
+    });
+
+    store.transferConflictReservation(
+      token,
+      "early-reserved",
+      "Placeholder label",
+      ["profile:nike", "folder:nike:posts"],
+    );
+
+    expect(store.jobs.get("early-reserved")).toMatchObject({
+      state: "done",
+      label: "Placeholder label",
+      conflictKeys: ["profile:nike", "folder:nike:posts"],
+    });
+    expect(store.hasActiveConflict(["profile:nike", "folder:nike:posts"])).toBe(false);
+  });
+
+  it("reports active conflicts and releases them only on terminal progress", async () => {
+    const store = useJobsStore();
+    await store.init();
+    store.addPlaceholder("job-1", "Explore posts", [
+      "profile:nike",
+      "folder:nike:posts",
+      "folder:nike:posts",
+    ]);
+
+    expect(store.jobs.get("job-1")?.conflictKeys).toEqual([
+      "profile:nike",
+      "folder:nike:posts",
+    ]);
+    expect(store.hasActiveConflict(["folder:nike:posts"])).toBe(true);
+    expect(store.hasActiveConflict(["folder:nike:stories"])).toBe(false);
+
+    ipc.listener?.({
+      job_id: "job-1",
+      state: "done",
+      label: "Explore posts",
+      count: 1,
+    });
+
+    expect(store.hasActiveConflict(["profile:nike", "folder:nike:posts"])).toBe(false);
+    expect(store.jobs.get("job-1")?.conflictKeys).toEqual([
+      "profile:nike",
+      "folder:nike:posts",
+    ]);
+  });
+
+  it("attaches conflicts after an early terminal event without regressing job state", async () => {
+    const store = useJobsStore();
+    await store.init();
+    ipc.listener?.({
+      job_id: "early",
+      state: "done",
+      label: "Backend label",
+      count: 2,
+      dir: "/archive",
+    });
+
+    store.addPlaceholder("early", "Placeholder label", ["folder:nike:posts"]);
+
+    expect(store.jobs.get("early")).toMatchObject({
+      state: "done",
+      label: "Placeholder label",
+      resultCount: 2,
+      conflictKeys: ["folder:nike:posts"],
+    });
+    expect(store.hasActiveConflict(["folder:nike:posts"])).toBe(false);
+  });
+
+  it("matches either key in a dual-key active job and preserves metadata through updates", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const store = useJobsStore(pinia);
+    await store.init();
+    store.addPlaceholder("dual", "All posts", ["profile:nike", "folder:nike:posts"]);
+    ipc.listener?.({
+      job_id: "dual",
+      state: "downloading",
+      label: "All posts",
+      current_file: 1,
+      total_files: 3,
+    });
+
+    expect(store.hasActiveConflict(["profile:nike"])).toBe(true);
+    expect(store.hasActiveConflict(["folder:nike:posts"])).toBe(true);
+    expect(store.hasActiveConflict(["folder:adidas:posts"])).toBe(false);
+    expect(useJobsStore(pinia).jobs.get("dual")?.conflictKeys).toEqual([
+      "profile:nike",
+      "folder:nike:posts",
+    ]);
+  });
+});
