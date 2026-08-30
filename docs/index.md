@@ -31,8 +31,9 @@ Explore loads current Stories automatically for every public profile, which cost
 - **Incremental archives** — already-downloaded files are skipped on re-runs
 - **Original timestamps** — file mtime is set from `taken_at`, so Photos/Finder sort correctly
 - **JSON metadata sidecars** — caption, like/comment counts and owner saved next to every post
-- **Live queue** — per-job progress, byte counters and cancellation
-- **Explore first** — start on profile discovery, browse posts/reels/stories, select exact cards, and use one **Download · All · Shown · Selected** control
+- **Live Queue** — per-job progress, byte counters and cancellation; completed jobs open the exact saved-file list with previews and system file actions
+- **Explore first** — start on profile discovery, browse labeled photos/videos/carousels/stories, filter Posts by media type, select exact cards, and use one **Download · All · Shown · Selected** control
+- **Useful previews** — copy a Post or Reel description or its canonical Instagram link
 - **Exact Queue jobs** — each Shown or Selected snapshot becomes one job; snapshots support up to 500 items, with **All** as the complete-archive fallback
 - **Local media Library** — search, filter and inspect existing downloads without changing archive files
 - **Automatic recovery** — transient network and CDN server errors retry automatically, and partial jobs report only saved files

@@ -51,6 +51,8 @@ SMOKE_TOKEN=... cargo test --locked --test live_download   # ~6 real API calls, 
 
 UI can be developed without the backend: run `npx vite`, then open `http://localhost:1420/download?mock=1` or `http://localhost:1420/explore?mock=1&demo=explore`.
 
+The Explore demo supports the full browser-only download journey: select cards, submit Shown or Selected, watch deterministic progress in Queue, open the completed job, and exercise photo/video previews plus Open and Show in Finder actions without touching real files.
+
 ## Docs
 
 This site is MkDocs Material. With [`uv`](https://docs.astral.sh/uv/) installed, create a Python 3.12 environment with the same hash-locked dependencies as CI:

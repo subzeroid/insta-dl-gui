@@ -35,6 +35,8 @@ The app opens on **Explore** after setup. Type at least two characters of a user
 
 Current Stories load automatically after a public profile opens and cost 2 HikerAPI requests. A Stories failure does not block Posts or Reels; open **Stories** and use **Retry stories** when needed.
 
+Post and Reel cards are labeled as **Photo**, **Video** or **Carousel**. In **Posts**, use **All**, **Photos**, **Videos** or **Carousels** to filter the loaded grid without losing selections hidden by the current filter. A card whose response contains no downloadable media stays visible as **Unavailable**, but it is not selectable and does not count toward Shown or Selected.
+
 Each tab has the same **Download** control:
 
 | Action | What it downloads | API and Queue behavior |
@@ -44,9 +46,11 @@ Each tab has the same **Download** control:
 | **Shown N** | The exact items currently loaded in that tab | Fetches no additional pages and creates one Queue job |
 | **Selected N** | Only the cards whose checkboxes are selected | Fetches no additional pages and creates one Queue job |
 
+Use the information control beside **All / Shown / Selected** for an in-app explanation of the three scopes.
+
 Use **Load more** on Posts or Reels before **Shown** if you want more pages in that exact snapshot. Shown and Selected accept at most 500 items. At 501 or more, the action is disabled and nothing is silently truncated or split; use **All** for the complete archive instead.
 
-Click a card to preview it, or use its checkbox to add it to **Selected**. After Queue accepts a Selected snapshot, only the submitted selections are cleared; a failed enqueue keeps them selected, and a card reselected while the request is pending stays selected. Press **Escape** to close autocomplete or an open preview.
+Click a card to preview it, or use its checkbox to add it to **Selected**. A Post or Reel preview can copy the full description or canonical Instagram link. After Queue accepts a Selected snapshot, only the submitted selections are cleared; a failed enqueue keeps them selected, and a card reselected while the request is pending stays selected. Press **Escape** to close autocomplete or an open preview.
 
 ## Where files end up
 
@@ -86,7 +90,7 @@ Downloads completed by the app are cataloged automatically. The initial scan is 
 - The captured-date range uses local calendar dates.
 - Sort by **Publication date** or **Import date**.
 
-Photo and video previews load directly from the local archive. On macOS, allow the single folder-access request when Library first loads previews. If access is denied, previews stay as placeholders until you enable **insta-dl-gui** under **System Settings → Privacy & Security → Files and Folders** and press **Retry previews**. See [troubleshooting](troubleshooting.md#macos-keeps-asking-for-access-to-downloads-in-library).
+Photo and video previews load directly from the local archive. On macOS, allow the single folder-access request when Library first loads previews. If access is denied, previews stay as placeholders until you enable **insta-dl-gui** under **System Settings → Privacy & Security → Files and Folders** and press **Retry previews**. See [troubleshooting](troubleshooting.md#macos-keeps-asking-for-access-to-downloads-in-library-or-queue).
 
 Open an item to inspect its metadata and files. **Open file** launches an available file with the system default app; **Show in folder** reveals it in the system file manager. These actions are disabled for missing files.
 
@@ -115,5 +119,7 @@ Re-running the same profile skips everything already on disk — file stems are 
 The footer keeps download activity visible from Download, Explore, Library and Settings. It shows the active job count, current file and downloaded bytes; click anywhere on it to open **Queue**.
 
 The **Queue** screen lists all jobs with per-file progress and byte counters. Failed jobs show the reason (private profile, quota exhausted, deleted post). Cancelled and finished jobs can be cleared.
+
+Click a completed job to inspect the exact, ordered media files newly saved by that download. Queue distinguishes requested Instagram items from saved files, so selecting four posts can correctly produce five files when one is a carousel. Each row shows a photo or video preview, safe basename and size, with **Open** and **Show in Finder** actions when the file is available. Large results start with 50 files and load the next 50 on demand. JSON sidecars and files skipped because they already existed are not included in this result list.
 
 If a batch saves some files before a later item fails, it finishes with the exact number saved. Re-run the same target after fixing the cause; existing files are skipped.

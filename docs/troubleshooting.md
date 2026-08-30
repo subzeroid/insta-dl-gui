@@ -34,11 +34,11 @@ xattr -cr /Applications/insta-dl-gui.app
 
 Both only affect the first launch; after that the app opens normally.
 
-## macOS keeps asking for access to Downloads in Library
+## macOS keeps asking for access to Downloads in Library or Queue
 
-Starting with version 0.3.1, the app asks once per configured download folder during an app session. Choose **Allow** to load local photo and video previews. The app only reads files inside the Library root; it does not move, edit or delete them.
+Library asks once per configured download folder during an app session. Completed Queue details perform one preview-access check for the result instead of asking once per file. Choose **Allow** to load local photo and video previews. The app only reads cataloged media inside the configured download folder; it does not move, edit or delete them.
 
-If you chose **Don't Allow**, the Library keeps placeholders instead of opening more system dialogs. Open **System Settings → Privacy & Security → Files and Folders**, enable access to Downloads for **insta-dl-gui**, return to Library and press **Retry previews**.
+If you chose **Don't Allow**, Library and Queue keep placeholders instead of opening a dialog for every file. Open **System Settings → Privacy & Security → Files and Folders**, enable access to Downloads for **insta-dl-gui**, then return to Library and press **Retry previews** or reopen the completed Queue job.
 
 Changing the download folder causes one new access check for that folder. Installing a new release without Apple Developer ID signing may also make macOS ask again.
 
