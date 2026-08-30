@@ -1,28 +1,26 @@
 <script setup lang="ts">
 import { computed } from "vue";
 
-import type { PostDisplayKind } from "../lib/postDisplay";
+import type { PostDisplayType } from "../lib/postDisplay";
 
-const props = withDefaults(
-  defineProps<{
-    kind: PostDisplayKind;
-    count?: number;
-  }>(),
-  { count: 0 },
+const props = defineProps<PostDisplayType>();
+
+const validCarousel = computed(
+  () => props.kind === "carousel" && Number.isInteger(props.count) && props.count > 0,
 );
 
 const label = computed(() => {
   if (props.kind === "photo") return "PHOTO";
   if (props.kind === "video") return "VIDEO";
-  if (props.kind === "carousel") return `CAROUSEL · ${props.count}`;
+  if (validCarousel.value) return `CAROUSEL · ${props.count}`;
   return "POST";
 });
 
 const colorClass = computed(() => {
-  if (props.kind === "photo") return "bg-sky-500/80";
-  if (props.kind === "video") return "bg-rose-500/80";
-  if (props.kind === "carousel") return "bg-amber-500/80";
-  return "bg-slate-700/80";
+  if (props.kind === "photo") return "bg-sky-700";
+  if (props.kind === "video") return "bg-rose-700";
+  if (validCarousel.value) return "bg-amber-700";
+  return "bg-slate-700";
 });
 </script>
 
