@@ -64,6 +64,33 @@ function videoPost(pk: string, thumbnail_url: string) {
   };
 }
 
+function photoPost(pk: string, thumbnail_url: string) {
+  return {
+    pk,
+    code: pk.toUpperCase(),
+    caption: pk,
+    resources: [{ url: `${thumbnail_url}.jpg`, kind: "photo" as const }],
+    thumbnail_url,
+  };
+}
+
+function carouselPost(pk: string, thumbnail_url: string) {
+  return {
+    pk,
+    code: pk.toUpperCase(),
+    caption: pk,
+    resources: [
+      { url: `${thumbnail_url}-one.jpg`, kind: "photo" as const },
+      { url: `${thumbnail_url}-two.mp4`, kind: "video" as const },
+    ],
+    thumbnail_url,
+  };
+}
+
+function unknownPost(pk: string, thumbnail_url: string) {
+  return { pk, code: pk.toUpperCase(), caption: pk, resources: [], thumbnail_url };
+}
+
 function story(pk: string, media_url: string) {
   return { pk, kind: "photo" as const, media_url };
 }
@@ -132,6 +159,124 @@ afterEach(() => {
 });
 
 describe("ExplorerView async wiring", () => {
+  it("filters loaded Posts for the grid and Shown download while preserving hidden selected posts", async () => {
+    const photo = photoPost("photo", "https://cdninstagram.com/photo");
+    const video = videoPost("video", "https://cdninstagram.com/video");
+    const carousel = carouselPost("carousel", "https://cdninstagram.com/carousel");
+    const unknown = unknownPost("unknown", "https://cdninstagram.com/unknown");
+    ipc.enqueueFetchedPostDownload
+      .mockResolvedValueOnce("job-shown-videos")
+      .mockResolvedValueOnce("job-selected-filtered");
+    const wrapper = render();
+    await loadProfile(wrapper, {
+      ...preview,
+      recent_posts: [photo, video, carousel, unknown],
+    });
+
+    expect(wrapper.findAll("[data-media-id]").map((item) => item.attributes("data-media-id"))).toEqual([
+      "photo",
+      "video",
+      "carousel",
+      "unknown",
+    ]);
+    expect(button(wrapper, "Shown 4").exists()).toBe(true);
+
+    await wrapper.get('[data-post-filter="videos"]').trigger("click");
+    expect(wrapper.get('[data-post-filter="videos"]').attributes("aria-pressed")).toBe("true");
+    expect(wrapper.get('[data-post-filter="videos"]').attributes("aria-current")).toBe("true");
+    expect(wrapper.get('[data-post-filter="all"]').attributes("aria-pressed")).toBe("false");
+    expect(wrapper.findAll("[data-media-id]").map((item) => item.attributes("data-media-id"))).toEqual([
+      "video",
+    ]);
+    expect(button(wrapper, "Shown 1").exists()).toBe(true);
+    await button(wrapper, "Shown 1").trigger("click");
+    await flushPromises();
+    expect(ipc.enqueueFetchedPostDownload).toHaveBeenNthCalledWith(
+      1,
+      "nike",
+      "posts",
+      "shown",
+      [video],
+    );
+    finishJob("job-shown-videos");
+
+    await wrapper.get('[data-post-filter="photos"]').trigger("click");
+    await selection(wrapper, "Select post PHOTO").setValue(true);
+    await wrapper.get('[data-post-filter="videos"]').trigger("click");
+    await selection(wrapper, "Select post VIDEO").setValue(true);
+    expect(button(wrapper, "Selected 2").exists()).toBe(true);
+    await button(wrapper, "Selected 2").trigger("click");
+    await flushPromises();
+    expect(ipc.enqueueFetchedPostDownload).toHaveBeenNthCalledWith(
+      2,
+      "nike",
+      "posts",
+      "selected",
+      [photo, video],
+    );
+
+    await wrapper.get('[data-post-filter="carousels"]').trigger("click");
+    expect(wrapper.findAll("[data-media-id]").map((item) => item.attributes("data-media-id"))).toEqual([
+      "carousel",
+    ]);
+    await wrapper.get('[data-post-filter="photos"]').trigger("click");
+    expect(wrapper.findAll("[data-media-id]").map((item) => item.attributes("data-media-id"))).toEqual([
+      "photo",
+    ]);
+    await wrapper.get('[data-post-filter="all"]').trigger("click");
+    expect(wrapper.find("[data-media-id=\"unknown\"]").exists()).toBe(true);
+    finishJob("job-selected-filtered");
+    await flushPromises();
+  });
+
+  it("keeps loading more available for an empty Posts filter and hides the filter outside Posts", async () => {
+    const wrapper = render();
+    await loadProfile(wrapper, {
+      ...preview,
+      recent_posts: [videoPost("video", "https://cdninstagram.com/video")],
+      end_cursor: "next-page",
+    });
+
+    await wrapper.get('[data-post-filter="photos"]').trigger("click");
+    expect(wrapper.text()).toContain("No matching loaded posts.");
+    expect(button(wrapper, "Load more").exists()).toBe(true);
+
+    await button(wrapper, "Reels").trigger("click");
+    await flushPromises();
+    expect(wrapper.find("[data-post-filter]").exists()).toBe(false);
+    await button(wrapper, "Stories").trigger("click");
+    expect(wrapper.find("[data-post-filter]").exists()).toBe(false);
+  });
+
+  it("shows media badges and descriptive preview labels for Posts and Reels", async () => {
+    const photo = photoPost("photo", "https://cdninstagram.com/photo");
+    const video = videoPost("video", "https://cdninstagram.com/video");
+    const carousel = carouselPost("carousel", "https://cdninstagram.com/carousel");
+    const unknown = unknownPost("unknown", "https://cdninstagram.com/unknown");
+    const reel = carouselPost("reel", "https://cdninstagram.com/reel");
+    ipc.fetchReels.mockResolvedValue({ posts: [reel], end_cursor: null });
+    const wrapper = render();
+    await loadProfile(wrapper, { ...preview, recent_posts: [photo, video, carousel, unknown] });
+
+    expect(wrapper.get('[data-media-id="photo"] [role="img"]').text()).toBe("PHOTO");
+    expect(wrapper.get('[data-media-id="video"] [role="img"]').text()).toBe("VIDEO");
+    expect(wrapper.get('[data-media-id="carousel"] [role="img"]').text()).toBe("CAROUSEL · 2");
+    expect(wrapper.get('[data-media-id="unknown"] [role="img"]').text()).toBe("POST");
+    expect(wrapper.get('[data-media-id="carousel"] [data-action="preview"]').attributes("aria-label")).toBe(
+      "Preview carousel with 2 resources CAROUSEL",
+    );
+    expect(wrapper.get('[data-media-id="unknown"] [data-action="preview"]').attributes("aria-label")).toBe(
+      "Preview post UNKNOWN",
+    );
+
+    await button(wrapper, "Reels").trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-media-id="reel"] [role="img"]').text()).toBe("CAROUSEL · 2");
+    expect(wrapper.get('[data-media-id="reel"] [data-action="preview"]').attributes("aria-label")).toBe(
+      "Preview carousel with 2 resources REEL",
+    );
+  });
+
   it("leaves active download rendering to the global application footer", async () => {
     const wrapper = render();
     useJobsStore().addPlaceholder("job-1", "@instagram stories");

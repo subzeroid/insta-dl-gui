@@ -15,12 +15,14 @@ import {
   type SearchUser,
   type StoryItem,
 } from "../lib/ipc";
-import { useExplorerStore, type ExploreTab } from "../stores/explorer";
+import { useExplorerStore, type ExploreTab, type PostFilter } from "../stores/explorer";
 import { useJobsStore } from "../stores/jobs";
 import { createExplorerRequestState, runOnce } from "../lib/asyncState";
 import DownloadScopeGroup from "../components/DownloadScopeGroup.vue";
 import MediaSelectionCheckbox from "../components/MediaSelectionCheckbox.vue";
+import MediaTypeBadge from "../components/MediaTypeBadge.vue";
 import PostModal from "../components/PostModal.vue";
+import { classifyPost } from "../lib/postDisplay";
 
 const jobs = useJobsStore();
 const explorer = useExplorerStore();
@@ -28,6 +30,7 @@ const {
   query,
   profilePreview: preview,
   activeTab,
+  postFilter,
   reels,
   reelsCursor,
   reelsLoaded,
@@ -63,11 +66,24 @@ const tabs = [
   { id: "stories", label: "Stories" },
 ] as const;
 
-function hasVideo(p: Post): boolean {
-  return p.resources.some((r) => r.kind === "video");
-}
+const postFilters: ReadonlyArray<{ id: PostFilter; label: string }> = [
+  { id: "all", label: "All" },
+  { id: "photos", label: "Photos" },
+  { id: "videos", label: "Videos" },
+  { id: "carousels", label: "Carousels" },
+];
 
-const gridPosts = computed(() => (activeTab.value === "reels" ? reels.value : (preview.value?.recent_posts ?? [])));
+const sourcePosts = computed(() => preview.value?.recent_posts ?? []);
+const gridPosts = computed(() => {
+  if (activeTab.value === "reels") return reels.value;
+  if (activeTab.value !== "posts" || postFilter.value === "all") return sourcePosts.value;
+  const kind = postFilter.value === "photos"
+    ? "photo"
+    : postFilter.value === "videos"
+      ? "video"
+      : "carousel";
+  return sourcePosts.value.filter((post) => classifyPost(post).kind === kind);
+});
 const shownCount = computed(() =>
   activeTab.value === "stories" ? (stories.value?.length ?? 0) : gridPosts.value.length,
 );
@@ -90,6 +106,12 @@ const allDownloadTitle = computed(() =>
     ? "Refreshes and downloads all current Stories; uses additional API requests."
     : `Fetch and download the complete ${activeTab.value === "posts" ? "Posts" : "Reels"} archive; uses API requests.`,
 );
+
+function previewMediaLabel(post: Post): string {
+  const display = classifyPost(post);
+  if (display.kind === "carousel") return `carousel with ${display.count} resources`;
+  return display.kind === "unknown" ? "post" : display.kind;
+}
 const activeGroupBusy = computed(() => {
   const username = preview.value?.profile.username;
   if (!username) return false;
@@ -341,7 +363,7 @@ async function downloadSnapshot(scope: "shown" | "selected") {
   const postSnapshot =
     tab === "stories"
       ? []
-      : [...gridPosts.value].filter(
+      : [...(scope === "shown" || tab === "reels" ? gridPosts.value : sourcePosts.value)].filter(
           (item) => scope === "shown" || selectedEntriesById.has(item.pk),
         );
   const storySnapshot =
@@ -617,6 +639,27 @@ onUnmounted(() => {
           />
         </div>
 
+        <div
+          v-if="activeTab === 'posts'"
+          role="group"
+          aria-label="Posts filter"
+          class="inline-flex overflow-hidden rounded-md border border-line bg-surface-1"
+        >
+          <button
+            v-for="filter in postFilters"
+            :key="filter.id"
+            type="button"
+            :data-post-filter="filter.id"
+            :aria-pressed="postFilter === filter.id"
+            :aria-current="postFilter === filter.id ? 'true' : undefined"
+            class="border-r border-line px-2.5 py-1 text-xs text-slate-300 transition-colors last:border-r-0"
+            :class="postFilter === filter.id ? 'bg-surface-3 text-slate-100' : 'hover:bg-surface-2'"
+            @click="postFilter = filter.id"
+          >
+            {{ filter.label }}
+          </button>
+        </div>
+
         <!-- Posts / Reels grid -->
         <div v-if="activeTab !== 'stories'" class="space-y-3">
           <div
@@ -658,7 +701,7 @@ onUnmounted(() => {
                 type="button"
                 data-action="preview"
                 class="absolute inset-0 cursor-pointer overflow-hidden rounded-lg transition hover:brightness-110"
-                :aria-label="`Preview ${activeTab === 'reels' ? 'reel' : 'post'} ${p.code}`"
+                :aria-label="`Preview ${previewMediaLabel(p)} ${p.code}`"
                 @click="modalPost = p"
               >
                 <img
@@ -669,12 +712,11 @@ onUnmounted(() => {
                   loading="lazy"
                 />
                 <span v-else class="block h-full w-full bg-gradient-to-br from-surface-2 to-surface-3"></span>
-                <span
-                  v-if="activeTab === 'reels' && hasVideo(p)"
-                  class="absolute bottom-1.5 right-1.5 rounded-md bg-black/60 px-1.5 py-0.5 text-[10px] leading-none text-white"
-                  >▶</span
-                >
               </button>
+              <MediaTypeBadge
+                v-bind="classifyPost(p)"
+                class="pointer-events-none absolute bottom-2 right-2 z-10"
+              />
               <MediaSelectionCheckbox
                 :selected="selectedIdSet.has(p.pk)"
                 :label="`Select ${activeTab === 'reels' ? 'reel' : 'post'} ${p.code}`"
@@ -686,7 +728,13 @@ onUnmounted(() => {
             v-else-if="activeTab === 'posts' || (activeTab === 'reels' && reelsLoaded && !reelsError)"
             class="card flex items-center justify-center p-12 text-sm text-slate-500"
           >
-            {{ activeTab === "reels" ? "No reels yet." : "No posts yet." }}
+            {{
+              activeTab === "reels"
+                ? "No reels yet."
+                : postFilter === "all"
+                  ? "No posts yet."
+                  : "No matching loaded posts."
+            }}
           </div>
           <div v-if="activeTab === 'posts' && preview.end_cursor" class="flex justify-center">
             <button class="btn-secondary" :disabled="loadingMore" @click="loadMore">

@@ -36,6 +36,24 @@ beforeEach(() => {
 });
 
 describe("Explore session state", () => {
+  it("persists a Posts filter without changing retained selections and resets it for a replacement profile", () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const first = useExplorerStore();
+
+    expect(first.postFilter).toBe("all");
+    first.toggleSelected("posts", "photo-1");
+    first.postFilter = "videos";
+
+    const remounted = useExplorerStore(pinia);
+    expect(remounted.postFilter).toBe("videos");
+    expect(first.isSelected("posts", "photo-1")).toBe(true);
+
+    first.beginProfileLoad();
+    expect(first.postFilter).toBe("all");
+    expect(first.isSelected("posts", "photo-1")).toBe(false);
+  });
+
   it("retains the current profile and tab in the same Pinia session", () => {
     const pinia = createPinia();
     setActivePinia(pinia);
