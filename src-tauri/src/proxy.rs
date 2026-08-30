@@ -12,6 +12,7 @@ pub fn normalize_proxy_url(value: Option<&str>) -> Result<Option<String>, String
     if !matches!(parsed.scheme(), "http" | "https" | "socks5" | "socks5h")
         || parsed.host_str().is_none()
         || parsed.port_or_known_default().is_none()
+        || parsed.port() == Some(0)
         || !matches!(parsed.path(), "" | "/")
         || parsed.query().is_some()
         || parsed.fragment().is_some()
@@ -27,8 +28,9 @@ pub fn normalize_proxy_url(value: Option<&str>) -> Result<Option<String>, String
 
 pub fn redact_proxy_url(value: &str) -> Option<String> {
     let mut parsed = Url::parse(value).ok()?;
-    if parsed.password().is_some() {
-        parsed.set_password(Some("***")).ok()?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        parsed.set_username("***").ok()?;
+        parsed.set_password(None).ok()?;
     }
     Some(parsed.to_string())
 }
