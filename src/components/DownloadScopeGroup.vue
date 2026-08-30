@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from "vue";
 
 const props = defineProps<{
   shownCount: number;
@@ -50,8 +50,24 @@ function onHelpKeydown(event: KeyboardEvent) {
   closeHelp(true);
 }
 
+function onDocumentKeydown(event: KeyboardEvent) {
+  if (helpOpen.value) onHelpKeydown(event);
+}
+
+watch(
+  helpOpen,
+  (isOpen) => {
+    if (isOpen) document.addEventListener("keydown", onDocumentKeydown);
+    else document.removeEventListener("keydown", onDocumentKeydown);
+  },
+  { flush: "sync" },
+);
+
 onMounted(() => document.addEventListener("pointerdown", onDocumentPointerDown));
-onBeforeUnmount(() => document.removeEventListener("pointerdown", onDocumentPointerDown));
+onBeforeUnmount(() => {
+  document.removeEventListener("pointerdown", onDocumentPointerDown);
+  document.removeEventListener("keydown", onDocumentKeydown);
+});
 </script>
 
 <template>

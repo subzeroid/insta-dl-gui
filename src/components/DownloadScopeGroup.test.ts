@@ -1,22 +1,33 @@
 /** @vitest-environment happy-dom */
 
 import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { nextTick } from "vue";
 
 import DownloadScopeGroup from "./DownloadScopeGroup.vue";
+
+const wrappers: Array<{ unmount: () => void }> = [];
+
+function track<T extends { unmount: () => void }>(wrapper: T): T {
+  wrappers.push(wrapper);
+  return wrapper;
+}
 
 function render(props: {
   shownCount: number;
   selectedCount: number;
   busy: boolean;
   allTitle?: string;
-  helperText?: string;
   shownDisabledReason?: string;
   selectedDisabledReason?: string;
 }) {
-  return mount(DownloadScopeGroup, { props });
+  return track(mount(DownloadScopeGroup, { props }));
 }
+
+afterEach(() => {
+  for (const wrapper of wrappers.splice(0)) wrapper.unmount();
+  document.body.replaceChildren();
+});
 
 describe("DownloadScopeGroup", () => {
   it("keeps all three download scopes stable when nothing is shown or selected", () => {
@@ -85,10 +96,10 @@ describe("DownloadScopeGroup", () => {
   });
 
   it("closes scope help on an outside click", async () => {
-    const wrapper = mount(DownloadScopeGroup, {
+    const wrapper = track(mount(DownloadScopeGroup, {
       attachTo: document.body,
       props: { shownCount: 12, selectedCount: 3, busy: false },
-    });
+    }));
     const help = wrapper.get('[data-action="scope-help"]');
 
     await help.trigger("click");
@@ -96,23 +107,24 @@ describe("DownloadScopeGroup", () => {
     await nextTick();
 
     expect(help.attributes("aria-expanded")).toBe("false");
-    wrapper.unmount();
   });
 
-  it("closes scope help with Escape and returns focus to its trigger", async () => {
-    const wrapper = mount(DownloadScopeGroup, {
+  it("closes scope help with Escape from elsewhere in the document and returns focus to its trigger", async () => {
+    const wrapper = track(mount(DownloadScopeGroup, {
       attachTo: document.body,
       props: { shownCount: 12, selectedCount: 3, busy: false },
-    });
+    }));
     const help = wrapper.get('[data-action="scope-help"]');
+    const outside = document.createElement("button");
+    document.body.append(outside);
 
     await help.trigger("click");
-    wrapper.get('[role="dialog"]').element.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    outside.focus();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await nextTick();
 
     expect(help.attributes("aria-expanded")).toBe("false");
     expect(document.activeElement).toBe(help.element);
-    wrapper.unmount();
   });
 
   it("keeps disabled snapshot reasons separate from the general help", async () => {
