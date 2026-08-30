@@ -1,5 +1,5 @@
 use insta_dl_gui_lib::config::Config;
-use insta_dl_gui_lib::proxy::{apply_proxy, normalize_proxy_url};
+use insta_dl_gui_lib::proxy::{apply_proxy, normalize_proxy_url, redact_proxy_url};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -178,6 +178,34 @@ fn proxy_hint_keeps_unauthenticated_connection_context_and_omits_malformed_value
         ..Config::default()
     };
     assert_eq!(malformed.proxy_hint(), None);
+}
+
+#[test]
+fn every_rejected_proxy_value_is_omitted_from_hints_and_debug_output() {
+    let cases = [
+        "https://proxy.example/secret-path",
+        "https://proxy.example/?token=raw-secret",
+        "https://proxy.example/#raw-secret",
+        "data:text/plain,raw-secret",
+        "https://alice:raw-secret@proxy.example/secret-path",
+    ];
+
+    for raw_proxy_url in cases {
+        assert!(normalize_proxy_url(Some(raw_proxy_url)).is_err());
+        assert_eq!(redact_proxy_url(raw_proxy_url), None);
+
+        let config = Config {
+            proxy_url: Some(raw_proxy_url.to_owned()),
+            ..Config::default()
+        };
+        assert_eq!(config.proxy_hint(), None);
+
+        let debug = format!("{config:?}");
+        assert!(!debug.contains(raw_proxy_url));
+        assert!(!debug.contains("raw-secret"));
+        assert!(!debug.contains("secret-path"));
+        assert!(!debug.contains("alice"));
+    }
 }
 
 #[test]

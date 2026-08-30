@@ -27,7 +27,8 @@ pub fn normalize_proxy_url(value: Option<&str>) -> Result<Option<String>, String
 }
 
 pub fn redact_proxy_url(value: &str) -> Option<String> {
-    let mut parsed = Url::parse(value).ok()?;
+    let normalized = normalize_proxy_url(Some(value)).ok().flatten()?;
+    let mut parsed = Url::parse(&normalized).ok()?;
     if !parsed.username().is_empty() || parsed.password().is_some() {
         parsed.set_username("***").ok()?;
         parsed.set_password(None).ok()?;
