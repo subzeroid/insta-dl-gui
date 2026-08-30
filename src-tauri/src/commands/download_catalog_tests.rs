@@ -112,6 +112,7 @@ impl Fixture {
             token: None,
             dest_dir: self.root.to_string_lossy().into_owned(),
             sidecar,
+            proxy_url: None,
         };
         let completed = run_single_post(
             &self.http,
@@ -156,6 +157,7 @@ impl Fixture {
             token: None,
             dest_dir: self.root.to_string_lossy().into_owned(),
             sidecar,
+            proxy_url: None,
         };
         run_fetched_posts_job(
             &self.http,
@@ -223,6 +225,7 @@ impl Fixture {
             token: None,
             dest_dir: self.root.to_string_lossy().into_owned(),
             sidecar: false,
+            proxy_url: None,
         };
         run_profile_job(
             &client,
@@ -996,6 +999,7 @@ async fn standalone_post_all_failed_after_attempt_refactor_is_concrete_fatal() {
         token: None,
         dest_dir: fixture.root.to_string_lossy().into_owned(),
         sidecar: false,
+        proxy_url: None,
     };
     let item = post(
         "standalone-failed",

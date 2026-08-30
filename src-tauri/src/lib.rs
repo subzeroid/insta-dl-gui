@@ -7,6 +7,7 @@ pub mod jobs;
 pub mod library_commands;
 pub mod library_protocol;
 pub mod models;
+pub mod proxy;
 pub mod scanner;
 pub mod targets;
 
