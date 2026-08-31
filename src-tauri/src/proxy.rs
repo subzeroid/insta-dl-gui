@@ -41,7 +41,7 @@ pub fn apply_proxy(
     proxy_url: Option<&str>,
 ) -> Result<ClientBuilder, String> {
     let Some(proxy_url) = normalize_proxy_url(proxy_url)? else {
-        return Ok(builder);
+        return Ok(builder.no_proxy());
     };
     let proxy = Proxy::all(proxy_url).map_err(|_| INVALID_PROXY.to_owned())?;
     Ok(builder.proxy(proxy))
