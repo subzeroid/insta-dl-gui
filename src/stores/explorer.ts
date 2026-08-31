@@ -5,6 +5,7 @@ import type { Post, ProfilePreview, StoryItem } from "../lib/ipc";
 import { mergeUniquePosts } from "../lib/mediaPages";
 
 export type ExploreTab = "posts" | "reels" | "stories";
+export type PostFilter = "all" | "photos" | "videos" | "carousels";
 export interface ExploreSelectionSnapshot {
   pk: string;
   revision: number;
@@ -14,6 +15,7 @@ export const useExplorerStore = defineStore("explorer", () => {
   const query = ref("");
   const profilePreview = ref<ProfilePreview | null>(null);
   const activeTab = ref<ExploreTab>("posts");
+  const postFilter = ref<PostFilter>("all");
   const reels = ref<Post[]>([]);
   const reelsCursor = ref<string | null>(null);
   const reelsLoaded = ref(false);
@@ -38,6 +40,7 @@ export const useExplorerStore = defineStore("explorer", () => {
   function beginProfileLoad() {
     profilePreview.value = null;
     activeTab.value = "posts";
+    postFilter.value = "all";
     reels.value = [];
     reelsCursor.value = null;
     reelsLoaded.value = false;
@@ -174,6 +177,7 @@ export const useExplorerStore = defineStore("explorer", () => {
     query,
     profilePreview,
     activeTab,
+    postFilter,
     reels,
     reelsCursor,
     reelsLoaded,

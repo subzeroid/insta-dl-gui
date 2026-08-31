@@ -527,6 +527,7 @@ mod tests {
             token: None,
             dest_dir: first_archive.path().to_string_lossy().into_owned(),
             sidecar: true,
+            proxy_url: None,
         };
 
         let first = register_configured_library_root(&catalog, &config).unwrap();

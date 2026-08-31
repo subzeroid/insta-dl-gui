@@ -9,18 +9,22 @@ import {
   fetchProfile,
   fetchReels,
   fetchStories,
+  remoteMediaUrl,
   resolveInput,
   searchUsers,
   type Post,
   type SearchUser,
   type StoryItem,
+  type FetchedPostCategory,
 } from "../lib/ipc";
-import { useExplorerStore, type ExploreTab } from "../stores/explorer";
+import { useExplorerStore, type ExploreTab, type PostFilter } from "../stores/explorer";
 import { useJobsStore } from "../stores/jobs";
 import { createExplorerRequestState, runOnce } from "../lib/asyncState";
 import DownloadScopeGroup from "../components/DownloadScopeGroup.vue";
 import MediaSelectionCheckbox from "../components/MediaSelectionCheckbox.vue";
+import MediaTypeBadge from "../components/MediaTypeBadge.vue";
 import PostModal from "../components/PostModal.vue";
+import { classifyPost } from "../lib/postDisplay";
 
 const jobs = useJobsStore();
 const explorer = useExplorerStore();
@@ -28,6 +32,7 @@ const {
   query,
   profilePreview: preview,
   activeTab,
+  postFilter,
   reels,
   reelsCursor,
   reelsLoaded,
@@ -51,6 +56,7 @@ const reelsRetryCursor = ref<string | null>(null);
 
 const modalPost = ref<Post | null>(null);
 const modalStory = ref<StoryItem | null>(null);
+const modalPostCategory = ref<FetchedPostCategory>("posts");
 
 const requests = createExplorerRequestState();
 const activeActions = reactive(new Set<string>());
@@ -63,18 +69,50 @@ const tabs = [
   { id: "stories", label: "Stories" },
 ] as const;
 
-function hasVideo(p: Post): boolean {
-  return p.resources.some((r) => r.kind === "video");
-}
+const postFilters: ReadonlyArray<{ id: PostFilter; label: string }> = [
+  { id: "all", label: "All" },
+  { id: "photos", label: "Photos" },
+  { id: "videos", label: "Videos" },
+  { id: "carousels", label: "Carousels" },
+];
 
-const gridPosts = computed(() => (activeTab.value === "reels" ? reels.value : (preview.value?.recent_posts ?? [])));
+const sourcePosts = computed(() => preview.value?.recent_posts ?? []);
+const gridPosts = computed(() => {
+  if (activeTab.value === "reels") return reels.value;
+  if (activeTab.value !== "posts" || postFilter.value === "all") return sourcePosts.value;
+  const kind = postFilter.value === "photos"
+    ? "photo"
+    : postFilter.value === "videos"
+      ? "video"
+      : "carousel";
+  return sourcePosts.value.filter((post) => classifyPost(post).kind === kind);
+});
+function isDownloadablePost(post: Post): boolean {
+  return (
+    Array.isArray(post.resources) &&
+    post.resources.length > 0 &&
+    post.resources.every((resource) => resource.kind === "photo" || resource.kind === "video")
+  );
+}
+const downloadableGridPosts = computed(() => gridPosts.value.filter(isDownloadablePost));
+const downloadablePostIds = computed(() => {
+  const posts = activeTab.value === "reels" ? reels.value : sourcePosts.value;
+  return new Set(posts.filter(isDownloadablePost).map((post) => post.pk));
+});
 const shownCount = computed(() =>
-  activeTab.value === "stories" ? (stories.value?.length ?? 0) : gridPosts.value.length,
+  activeTab.value === "stories"
+    ? (stories.value?.length ?? 0)
+    : downloadableGridPosts.value.length,
 );
-const selectedIdSet = computed(() => new Set(explorer.selected[activeTab.value]));
-const selectedCount = computed(() => explorer.selected[activeTab.value].length);
-const snapshotHelperText =
-  "Exact Shown and Selected snapshots are limited to 500 items. Use All for a complete archive.";
+const selectedIdSet = computed(() => {
+  const selectedIds = explorer.selected[activeTab.value];
+  return new Set(
+    activeTab.value === "stories"
+      ? selectedIds
+      : selectedIds.filter((pk) => downloadablePostIds.value.has(pk)),
+  );
+});
+const selectedCount = computed(() => selectedIdSet.value.size);
 const shownDisabledReason = computed(() =>
   shownCount.value > MAX_EXACT_SNAPSHOT_ITEMS
     ? `Shown has ${shownCount.value} items, above the 500-item exact snapshot limit.`
@@ -90,6 +128,15 @@ const allDownloadTitle = computed(() =>
     ? "Refreshes and downloads all current Stories; uses additional API requests."
     : `Fetch and download the complete ${activeTab.value === "posts" ? "Posts" : "Reels"} archive; uses API requests.`,
 );
+
+function previewMediaLabel(post: Post): string {
+  const display = classifyPost(post);
+  if (display.kind === "carousel") return `carousel with ${display.count} resources`;
+  return display.kind === "unknown" ? "post" : display.kind;
+}
+function togglePostSelection(post: Post) {
+  if (isDownloadablePost(post)) explorer.toggleSelected(activeTab.value, post.pk);
+}
 const activeGroupBusy = computed(() => {
   const username = preview.value?.profile.username;
   if (!username) return false;
@@ -332,16 +379,19 @@ async function downloadSnapshot(scope: "shown" | "selected") {
   if (tab === "stories" && storiesLoading.value) return;
   const session = profileSession;
   const selectedEntries = scope === "selected" ? explorer.selectionSnapshot(tab) : [];
-  const requestedCount = scope === "shown" ? shownCount.value : selectedEntries.length;
+  const requestedCount = scope === "shown" ? shownCount.value : selectedCount.value;
   if (requestedCount > MAX_EXACT_SNAPSHOT_ITEMS) {
     error.value = `${scope === "shown" ? "Shown" : "Selected"} snapshots are limited to 500 items. Use All for a complete archive.`;
     return;
   }
   const selectedEntriesById = new Map(selectedEntries.map((entry) => [entry.pk, entry]));
+  const postCandidates = scope === "shown"
+    ? downloadableGridPosts.value
+    : (tab === "reels" ? reels.value : sourcePosts.value).filter(isDownloadablePost);
   const postSnapshot =
     tab === "stories"
       ? []
-      : [...gridPosts.value].filter(
+      : [...postCandidates].filter(
           (item) => scope === "shown" || selectedEntriesById.has(item.pk),
         );
   const storySnapshot =
@@ -462,6 +512,11 @@ function closeModal() {
   modalStory.value = null;
 }
 
+function openPostModal(post: Post) {
+  modalPostCategory.value = activeTab.value === "reels" ? "reels" : "posts";
+  modalPost.value = post;
+}
+
 onMounted(() => {
   if (preview.value) {
     if (
@@ -529,7 +584,7 @@ onUnmounted(() => {
         >
           <img
             v-if="u.avatar_url"
-            :src="u.avatar_url"
+            :src="remoteMediaUrl(u.avatar_url)"
             class="h-6 w-6 shrink-0 rounded-full object-cover"
             referrerpolicy="no-referrer"
           />
@@ -553,7 +608,7 @@ onUnmounted(() => {
         <div class="flex items-center gap-4">
           <img
             v-if="preview.profile.avatar_url"
-            :src="preview.profile.avatar_url"
+            :src="remoteMediaUrl(preview.profile.avatar_url)"
             class="h-16 w-16 shrink-0 rounded-full border border-line object-cover"
             referrerpolicy="no-referrer"
           />
@@ -608,13 +663,33 @@ onUnmounted(() => {
             :selected-count="selectedCount"
             :busy="activeGroupBusy"
             :all-title="allDownloadTitle"
-            :helper-text="snapshotHelperText"
             :shown-disabled-reason="shownDisabledReason"
             :selected-disabled-reason="selectedDisabledReason"
             @download-all="downloadAll"
             @download-shown="downloadSnapshot('shown')"
             @download-selected="downloadSnapshot('selected')"
           />
+        </div>
+
+        <div
+          v-if="activeTab === 'posts'"
+          role="group"
+          aria-label="Posts filter"
+          class="inline-flex overflow-hidden rounded-md border border-line bg-surface-1"
+        >
+          <button
+            v-for="filter in postFilters"
+            :key="filter.id"
+            type="button"
+            :data-post-filter="filter.id"
+            :aria-pressed="postFilter === filter.id"
+            :aria-current="postFilter === filter.id ? 'true' : undefined"
+            class="border-r border-line px-2.5 py-1 text-xs text-slate-300 transition-colors last:border-r-0"
+            :class="postFilter === filter.id ? 'bg-surface-3 text-slate-100' : 'hover:bg-surface-2'"
+            @click="postFilter = filter.id"
+          >
+            {{ filter.label }}
+          </button>
         </div>
 
         <!-- Posts / Reels grid -->
@@ -658,35 +733,50 @@ onUnmounted(() => {
                 type="button"
                 data-action="preview"
                 class="absolute inset-0 cursor-pointer overflow-hidden rounded-lg transition hover:brightness-110"
-                :aria-label="`Preview ${activeTab === 'reels' ? 'reel' : 'post'} ${p.code}`"
-                @click="modalPost = p"
+                :aria-label="`Preview ${previewMediaLabel(p)} ${p.code}`"
+                @click="openPostModal(p)"
               >
                 <img
                   v-if="thumbUrl(p)"
-                  :src="thumbUrl(p)"
+                  :src="remoteMediaUrl(thumbUrl(p))"
                   class="h-full w-full object-cover"
                   referrerpolicy="no-referrer"
                   loading="lazy"
                 />
                 <span v-else class="block h-full w-full bg-gradient-to-br from-surface-2 to-surface-3"></span>
-                <span
-                  v-if="activeTab === 'reels' && hasVideo(p)"
-                  class="absolute bottom-1.5 right-1.5 rounded-md bg-black/60 px-1.5 py-0.5 text-[10px] leading-none text-white"
-                  >▶</span
-                >
               </button>
+              <MediaTypeBadge
+                v-bind="classifyPost(p)"
+                class="pointer-events-none absolute bottom-2 right-2 z-10"
+              />
               <MediaSelectionCheckbox
                 :selected="selectedIdSet.has(p.pk)"
                 :label="`Select ${activeTab === 'reels' ? 'reel' : 'post'} ${p.code}`"
-                @toggle="explorer.toggleSelected(activeTab, p.pk)"
+                :disabled="!isDownloadablePost(p)"
+                :disabled-reason="!isDownloadablePost(p) ? 'This post has no downloadable media.' : undefined"
+                @toggle="togglePostSelection(p)"
               />
+              <span
+                v-if="!isDownloadablePost(p)"
+                data-download-unavailable
+                class="pointer-events-none absolute bottom-2 left-2 z-10 rounded bg-slate-900 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-300"
+                title="This post has no downloadable media."
+              >
+                Unavailable
+              </span>
             </div>
           </div>
           <div
             v-else-if="activeTab === 'posts' || (activeTab === 'reels' && reelsLoaded && !reelsError)"
             class="card flex items-center justify-center p-12 text-sm text-slate-500"
           >
-            {{ activeTab === "reels" ? "No reels yet." : "No posts yet." }}
+            {{
+              activeTab === "reels"
+                ? "No reels yet."
+                : postFilter === "all"
+                  ? "No posts yet."
+                  : "No matching loaded posts."
+            }}
           </div>
           <div v-if="activeTab === 'posts' && preview.end_cursor" class="flex justify-center">
             <button class="btn-secondary" :disabled="loadingMore" @click="loadMore">
@@ -743,7 +833,7 @@ onUnmounted(() => {
               >
                 <img
                   v-if="s.thumb_url || s.media_url"
-                  :src="s.thumb_url || s.media_url"
+                  :src="remoteMediaUrl(s.thumb_url || s.media_url)"
                   class="h-20 w-20 rounded-full object-cover"
                   referrerpolicy="no-referrer"
                 />
@@ -777,6 +867,7 @@ onUnmounted(() => {
       v-if="modalPost || modalStory"
       :username="preview?.profile.username ?? ''"
       :post="modalPost"
+      :post-category="modalPostCategory"
       :story="modalStory"
       @close="closeModal"
     />

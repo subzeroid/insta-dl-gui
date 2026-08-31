@@ -1,9 +1,18 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+const MOCK_LIBRARY_MEDIA_URL_RESOLVER = Symbol.for(
+  "insta-dl-gui.mock-library-media-url-resolver",
+);
+const MOCK_REMOTE_MEDIA_URL_RESOLVER = Symbol.for(
+  "insta-dl-gui.mock-remote-media-url-resolver",
+);
+
 export interface ConfigState {
   has_token: boolean;
   token_hint: string | null;
+  has_proxy: boolean;
+  proxy_hint: string | null;
   dest_dir: string;
   sidecar: boolean;
   catalog_warning?: string;
@@ -128,6 +137,10 @@ export async function configState(): Promise<ConfigState> {
   return invoke("config_state");
 }
 
+export async function setProxy(proxyUrl: string | null): Promise<ConfigState> {
+  return invoke("set_proxy", { proxyUrl });
+}
+
 export async function validateToken(token: string): Promise<Balance> {
   return invoke("validate_token", { token });
 }
@@ -182,12 +195,55 @@ export async function onLibraryScanProgress(
 }
 
 export function libraryMediaUrl(fileId: number): string {
+  const resolver = (globalThis as unknown as Record<PropertyKey, unknown>)[
+    MOCK_LIBRARY_MEDIA_URL_RESOLVER
+  ];
+  if (typeof resolver === "function") {
+    const resolved = (resolver as (id: number) => unknown)(fileId);
+    if (typeof resolved === "string" && resolved.length > 0) return resolved;
+  }
   const mediaBase = convertFileSrc("media", "library").replace(/\/$/, "");
   return `${mediaBase}/${fileId}`;
 }
 
+export function remoteMediaUrl(url: string): string {
+  const resolver = (globalThis as unknown as Record<PropertyKey, unknown>)[
+    MOCK_REMOTE_MEDIA_URL_RESOLVER
+  ];
+  if (typeof resolver === "function") {
+    const resolved = (resolver as (value: string) => unknown)(url);
+    if (typeof resolved === "string" && resolved === url && resolved.length > 0) {
+      return resolved;
+    }
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return "";
+  }
+  if (parsed.protocol !== "https:") return "";
+
+  const bytes = new TextEncoder().encode(url);
+  if (bytes.length > 16 * 1024) return "";
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  const encoded = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  const mediaBase = convertFileSrc("media", "remote-media").replace(/\/$/, "");
+  return `${mediaBase}/${encoded}`;
+}
+
 export async function saveSettings(opts: { dest_dir?: string; sidecar?: boolean }): Promise<ConfigState> {
   return invoke("save_settings", { destDir: opts.dest_dir, sidecar: opts.sidecar });
+}
+
+export interface JobOutputFile {
+  file_id?: number;
+  basename: string;
+  kind: "photo" | "video";
+  byte_size: number;
+  ordinal: number;
 }
 
 export interface JobProgress {
@@ -203,6 +259,8 @@ export interface JobProgress {
   dir?: string;
   catalog_warnings?: number;
   resource_failures?: number;
+  requested_items?: number;
+  outputs?: JobOutputFile[];
 }
 
 export type Target =

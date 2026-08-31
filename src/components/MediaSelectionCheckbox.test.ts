@@ -46,6 +46,34 @@ describe("MediaSelectionCheckbox", () => {
     expect(wrapper.get("label").classes()).toContain("focus-within:ring-2");
   });
 
+  it("exposes an unavailable reason and never emits from a disabled checkbox", async () => {
+    const wrapper = mount(MediaSelectionCheckbox, {
+      props: {
+        selected: false,
+        label: "Select post UNKNOWN",
+        disabled: true,
+        disabledReason: "This post has no downloadable media.",
+      },
+    });
+    const input = wrapper.get('input[type="checkbox"]');
+    const descriptionId = input.attributes("aria-describedby");
+
+    expect(input.attributes("disabled")).toBeDefined();
+    expect(wrapper.get("label").attributes("title")).toBe(
+      "This post has no downloadable media.",
+    );
+    expect(wrapper.get("label").classes()).toContain("cursor-not-allowed");
+    expect(wrapper.get("label").classes()).toContain("opacity-60");
+    expect(descriptionId).toBeTruthy();
+    expect(wrapper.get(`#${descriptionId}`).text()).toBe(
+      "This post has no downloadable media.",
+    );
+
+    await input.trigger("change");
+
+    expect(wrapper.emitted("toggle")).toBeUndefined();
+  });
+
   it("lets a parent control one native selection toggle without opening the card", async () => {
     const ParentCard = defineComponent({
       components: { MediaSelectionCheckbox },

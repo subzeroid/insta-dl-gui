@@ -14,8 +14,8 @@ use std::time::Duration;
 use futures_util::StreamExt;
 
 pub const ALLOWED_HOST_SUFFIXES: [&str; 2] = ["cdninstagram.com", "fbcdn.net"];
-const MAX_REDIRECTS: usize = 5;
-const SNIFF_SIZE: usize = 512;
+pub(crate) const MAX_REDIRECTS: usize = 5;
+pub(crate) const SNIFF_SIZE: usize = 512;
 const DEFAULT_BYTE_BUDGET: u64 = 500 * 1024 * 1024;
 const MIN_FREE_DISK: u64 = 1024 * 1024 * 1024;
 
@@ -51,7 +51,7 @@ pub enum CdnError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Sniffed {
+pub(crate) enum Sniffed {
     Jpeg,
     Png,
     Webp,
@@ -59,7 +59,7 @@ enum Sniffed {
 }
 
 impl Sniffed {
-    fn detect(bytes: &[u8]) -> Option<Self> {
+    pub(crate) fn detect(bytes: &[u8]) -> Option<Self> {
         if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
             return Some(Self::Jpeg);
         }
@@ -76,7 +76,7 @@ impl Sniffed {
         None
     }
 
-    fn mime(self) -> &'static str {
+    pub(crate) fn mime(self) -> &'static str {
         match self {
             Self::Jpeg => "image/jpeg",
             Self::Png => "image/png",
@@ -95,7 +95,7 @@ impl Sniffed {
     }
 }
 
-fn normalize_ct(ct: &str) -> String {
+pub(crate) fn normalize_ct(ct: &str) -> String {
     ct.split(';')
         .next()
         .unwrap_or("")
@@ -105,7 +105,7 @@ fn normalize_ct(ct: &str) -> String {
 
 /// Content-Type → extension map used when the sniff is inconclusive for ext
 /// decisions but valid for cross-checking. jpeg/jpg treated as aliases.
-fn ct_compatible(declared: &str, sniffed: Sniffed) -> bool {
+pub(crate) fn ct_compatible(declared: &str, sniffed: Sniffed) -> bool {
     let d = normalize_ct(declared);
     if d.is_empty() || d == "application/octet-stream" || d == "binary/octet-stream" {
         return true; // no usable declaration to contradict the sniff

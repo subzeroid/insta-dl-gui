@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { reactive } from "vue";
-import { cancelJob, onJobProgress, type JobProgress } from "../lib/ipc";
+import { cancelJob, onJobProgress, type JobOutputFile, type JobProgress } from "../lib/ipc";
 
 export interface JobView {
   id: string;
@@ -15,6 +15,8 @@ export interface JobView {
   resultDir?: string;
   catalogWarnings: number;
   resourceFailures: number;
+  requestedItems?: number;
+  outputs?: JobOutputFile[];
   conflictKeys?: string[];
 }
 
@@ -40,6 +42,8 @@ export const useJobsStore = defineStore("jobs", () => {
         resultDir: undefined,
         catalogWarnings: 0,
         resourceFailures: 0,
+        requestedItems: undefined,
+        outputs: undefined,
         conflictKeys: [],
       });
     if (!existing) jobs.set(p.job_id, job);
@@ -55,6 +59,8 @@ export const useJobsStore = defineStore("jobs", () => {
       job.resultDir = p.dir;
       job.catalogWarnings = p.catalog_warnings ?? job.catalogWarnings;
       job.resourceFailures = p.resource_failures ?? job.resourceFailures;
+      job.requestedItems = p.requested_items;
+      job.outputs = p.outputs ? p.outputs.map((output) => ({ ...output })) : undefined;
     }
     if (p.state === "failed") {
       job.error = p.error;
@@ -89,6 +95,8 @@ export const useJobsStore = defineStore("jobs", () => {
         resultDir: undefined,
         catalogWarnings: 0,
         resourceFailures: 0,
+        requestedItems: undefined,
+        outputs: undefined,
         conflictKeys: normalizedKeys,
       }));
     }

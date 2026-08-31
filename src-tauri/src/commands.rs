@@ -76,6 +76,16 @@ fn validate_fetched_posts(posts: Vec<Post>, allow_loopback: bool) -> Result<Vec<
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct JobOutputFile {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_id: Option<i64>,
+    basename: String,
+    kind: MediaFileKind,
+    byte_size: u64,
+    ordinal: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case", tag = "state")]
 enum JobState {
     Downloading {
@@ -87,6 +97,10 @@ enum JobState {
     Done {
         count: usize,
         dir: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        outputs: Vec<JobOutputFile>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        requested_items: Option<usize>,
         #[serde(skip_serializing_if = "is_zero")]
         catalog_warnings: usize,
         #[serde(skip_serializing_if = "is_zero")]
@@ -140,7 +154,14 @@ impl JobEvents {
             .ok();
     }
 
-    fn done(&self, outcome: JobOutcome, resource_failures: usize, dir: &Path) {
+    fn done(
+        &self,
+        outcome: JobOutcome,
+        resource_failures: usize,
+        dir: &Path,
+        outputs: Vec<JobOutputFile>,
+        requested_items: Option<usize>,
+    ) {
         self.app
             .emit(
                 "job-progress",
@@ -150,6 +171,8 @@ impl JobEvents {
                     state: JobState::Done {
                         count: outcome.files_written,
                         dir: dir.to_string_lossy().into_owned(),
+                        outputs,
+                        requested_items,
                         catalog_warnings: outcome.catalog_warnings,
                         resource_failures,
                     },
@@ -316,6 +339,7 @@ struct DownloadedFile {
     bytes: u64,
     kind: MediaFileKind,
     ordinal: u32,
+    newly_written: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -333,6 +357,8 @@ struct JobOutcome {
 
 struct CompletedJob {
     outcome: JobOutcome,
+    outputs: Vec<JobOutputFile>,
+    requested_items: Option<usize>,
     resource_errors: Vec<String>,
 }
 
@@ -384,6 +410,8 @@ fn finish_completed_job(
     last_error: Option<String>,
     resource_errors: Vec<String>,
     has_successful_resource: bool,
+    outputs: Vec<JobOutputFile>,
+    requested_items: Option<usize>,
 ) -> Result<CompletedJob, JobFail> {
     let outcome = if has_successful_resource || outcome.files_written > 0 {
         outcome
@@ -392,6 +420,8 @@ fn finish_completed_job(
     };
     Ok(CompletedJob {
         outcome,
+        outputs,
+        requested_items,
         resource_errors,
     })
 }
@@ -599,6 +629,7 @@ async fn download_one(
                 path: outcome.path,
                 bytes: outcome.bytes,
                 ordinal,
+                newly_written: true,
             })
         }
         Err(error) => {
@@ -672,6 +703,7 @@ fn recover_downloaded_file_blocking(
         bytes: expected_bytes,
         kind: evidence.kind,
         ordinal,
+        newly_written: false,
     })
 }
 
@@ -745,7 +777,30 @@ fn downloaded_sidecar(path: PathBuf, ordinal: u32) -> Result<DownloadedFile, Str
         bytes,
         kind: MediaFileKind::Metadata,
         ordinal,
+        newly_written: true,
     })
+}
+
+fn job_output_file(file: &DownloadedFile, file_id: Option<i64>) -> Option<JobOutputFile> {
+    if !file.newly_written || !matches!(file.kind, MediaFileKind::Photo | MediaFileKind::Video) {
+        return None;
+    }
+    let basename = safe_segment(file.path.file_name()?.to_string_lossy().as_ref());
+    Some(JobOutputFile {
+        file_id,
+        basename,
+        kind: file.kind,
+        byte_size: file.bytes,
+        ordinal: file.ordinal,
+    })
+}
+
+fn uncataloged_job_outputs(media: &DownloadedMedia) -> Vec<JobOutputFile> {
+    media
+        .files
+        .iter()
+        .filter_map(|file| job_output_file(file, None))
+        .collect()
 }
 
 fn post_catalog_metadata(post: &Post) -> CatalogItemMetadata {
@@ -858,7 +913,7 @@ fn persist_downloaded_media(
     catalog: &Catalog,
     destination_root: &Path,
     media: &DownloadedMedia,
-) -> Result<(), String> {
+) -> Result<Vec<JobOutputFile>, String> {
     let root = catalog
         .register_root(destination_root, root_label(destination_root))
         .map_err(|error| error.to_string())?;
@@ -899,17 +954,25 @@ fn persist_downloaded_media(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    catalog
+    let result = catalog
         .upsert_media(&media.item.clone().into_catalog_input(files, observed_at))
         .map_err(|error| error.to_string())?;
-    Ok(())
+    if result.file_ids.len() != media.files.len() {
+        return Err("catalog returned an incomplete file manifest".into());
+    }
+    Ok(media
+        .files
+        .iter()
+        .zip(result.file_ids)
+        .filter_map(|(file, file_id)| job_output_file(file, Some(file_id)))
+        .collect())
 }
 
 async fn catalog_downloaded_media(
     catalog: &Catalog,
     destination_root: &Path,
     media: &DownloadedMedia,
-) -> Result<(), String> {
+) -> Result<Vec<JobOutputFile>, String> {
     let catalog = catalog.clone();
     let destination_root = destination_root.to_path_buf();
     let media = media.clone();
@@ -940,12 +1003,7 @@ pub async fn resolve_input(input: String) -> Result<Target, String> {
 }
 
 async fn client(state: &State<'_, AppState>) -> Result<Arc<crate::hiker::HikerClient>, String> {
-    state
-        .client
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| "No HikerAPI token configured".into())
+    state.hiker_client().await
 }
 
 /// Account autocomplete — same order the API returns (Instagram's own
@@ -1081,7 +1139,7 @@ pub async fn download_direct(
         return Err("Nothing to download".into());
     }
     let cfg = state.cfg.read().await.clone();
-    let cdn_http = state.cdn_http.clone();
+    let cdn_http = state.cdn_client().await;
     let catalog = state.catalog.clone();
     let jobs: Arc<JobRegistry> = state.jobs.clone();
     let in_flight = state.in_flight.clone();
@@ -1120,7 +1178,13 @@ pub async fn download_direct(
         )
         .await;
         match result {
-            Ok(completed) => em.done(completed.outcome, completed.resource_errors.len(), &dir),
+            Ok(completed) => em.done(
+                completed.outcome,
+                completed.resource_errors.len(),
+                &dir,
+                completed.outputs,
+                completed.requested_items,
+            ),
             Err(JobFail::Cancelled) => em.cancelled(),
             Err(JobFail::Fatal(e)) => em.failed(e),
         }
@@ -1152,6 +1216,7 @@ async fn run_direct_job(
     let mut resource_errors = Vec::new();
     let mut has_successful_resource = false;
     let mut bytes_total = 0u64;
+    let mut outputs = Vec::new();
 
     for item in items {
         if cancel.as_ref().map(|c| *c.borrow()).unwrap_or(false) {
@@ -1189,12 +1254,15 @@ async fn run_direct_job(
                         files: vec![file],
                         resource_errors: Vec::new(),
                     };
-                    if catalog_downloaded_media(catalog, destination_root, &media)
-                        .await
-                        .is_err()
-                    {
-                        catalog_warnings += 1;
+                    match catalog_downloaded_media(catalog, destination_root, &media).await {
+                        Ok(cataloged) => outputs.extend(cataloged),
+                        Err(_) => {
+                            catalog_warnings += 1;
+                            outputs.extend(uncataloged_job_outputs(&media));
+                        }
                     }
+                } else if let Some(output) = job_output_file(&file, None) {
+                    outputs.push(output);
                 }
             }
             Err(JobFail::Cancelled) => return Err(JobFail::Cancelled),
@@ -1212,6 +1280,8 @@ async fn run_direct_job(
         last_error,
         resource_errors,
         has_successful_resource,
+        outputs,
+        Some(items.len()),
     )
 }
 
@@ -1223,9 +1293,8 @@ pub async fn enqueue_profile_download(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let client = client(&state).await?;
+    let (client, cdn_http) = state.download_clients().await?;
     let cfg = state.cfg.read().await.clone();
-    let cdn_http = state.cdn_http.clone();
     let catalog = state.catalog.clone();
     let jobs: Arc<JobRegistry> = state.jobs.clone();
 
@@ -1305,7 +1374,13 @@ pub async fn enqueue_profile_download(
         )
         .await;
         match result {
-            Ok(completed) => em.done(completed.outcome, completed.resource_errors.len(), &dir),
+            Ok(completed) => em.done(
+                completed.outcome,
+                completed.resource_errors.len(),
+                &dir,
+                completed.outputs,
+                completed.requested_items,
+            ),
             Err(JobFail::Cancelled) => em.cancelled(),
             Err(JobFail::Fatal(e)) => em.failed(e),
         }
@@ -1340,6 +1415,7 @@ async fn run_profile_job(
     let mut all_resource_errors = Vec::new();
     let mut has_successful_resource = false;
     let mut bytes_total = 0u64;
+    let mut outputs = Vec::new();
     let is_cancelled = || cancel.as_ref().map(|c| *c.borrow()).unwrap_or(false);
 
     // Per-file failures are logged-and-skipped so one dead CDN link or a
@@ -1386,11 +1462,12 @@ async fn run_profile_job(
                             files: vec![file],
                             resource_errors: Vec::new(),
                         };
-                        if catalog_downloaded_media(catalog, destination_root, &media)
-                            .await
-                            .is_err()
-                        {
-                            catalog_warnings += 1;
+                        match catalog_downloaded_media(catalog, destination_root, &media).await {
+                            Ok(cataloged) => outputs.extend(cataloged),
+                            Err(_) => {
+                                catalog_warnings += 1;
+                                outputs.extend(uncataloged_job_outputs(&media));
+                            }
                         }
                     }
                     Err(JobFail::Cancelled) => return Err(JobFail::Cancelled),
@@ -1418,6 +1495,8 @@ async fn run_profile_job(
                 Some(error.to_string()),
                 all_resource_errors,
                 has_successful_resource,
+                outputs,
+                None,
             );
         }
         let mut cursor: Option<String> = None;
@@ -1445,6 +1524,8 @@ async fn run_profile_job(
                         Some(error.to_string()),
                         all_resource_errors,
                         has_successful_resource,
+                        outputs,
+                        None,
                     )
                 }
             };
@@ -1548,12 +1629,14 @@ async fn run_profile_job(
                         files: downloaded,
                         resource_errors,
                     };
-                    if (media_files_written > 0 || sidecar_written)
-                        && catalog_downloaded_media(catalog, destination_root, &media)
-                            .await
-                            .is_err()
-                    {
-                        catalog_warnings += 1;
+                    if media_files_written > 0 || sidecar_written {
+                        match catalog_downloaded_media(catalog, destination_root, &media).await {
+                            Ok(cataloged) => outputs.extend(cataloged),
+                            Err(_) => {
+                                catalog_warnings += 1;
+                                outputs.extend(uncataloged_job_outputs(&media));
+                            }
+                        }
                     }
                 }
             }
@@ -1581,6 +1664,8 @@ async fn run_profile_job(
                 Some(error.to_string()),
                 all_resource_errors,
                 has_successful_resource,
+                outputs,
+                None,
             );
         }
         for item in &stories_items {
@@ -1634,12 +1719,19 @@ async fn run_profile_job(
                         files: downloaded,
                         resource_errors,
                     };
-                    if catalog_downloaded_media(catalog, destination_root, &media)
-                        .await
-                        .is_err()
-                    {
-                        catalog_warnings += 1;
+                    match catalog_downloaded_media(catalog, destination_root, &media).await {
+                        Ok(cataloged) => outputs.extend(cataloged),
+                        Err(_) => {
+                            catalog_warnings += 1;
+                            outputs.extend(uncataloged_job_outputs(&media));
+                        }
                     }
+                } else {
+                    outputs.extend(
+                        downloaded
+                            .iter()
+                            .filter_map(|file| job_output_file(file, None)),
+                    );
                 }
             }
         }
@@ -1654,6 +1746,8 @@ async fn run_profile_job(
                 Some(error.to_string()),
                 all_resource_errors,
                 has_successful_resource,
+                outputs,
+                None,
             );
         }
         for tray in &highlights_tray {
@@ -1676,6 +1770,8 @@ async fn run_profile_job(
                     Some(error.to_string()),
                     all_resource_errors,
                     has_successful_resource,
+                    outputs,
+                    None,
                 );
             }
             let items = match client.highlight_items(hl_pk).await {
@@ -1686,6 +1782,8 @@ async fn run_profile_job(
                         Some(error.to_string()),
                         all_resource_errors,
                         has_successful_resource,
+                        outputs,
+                        None,
                     )
                 }
             };
@@ -1704,7 +1802,7 @@ async fn run_profile_job(
                     .iter()
                     .enumerate()
                 {
-                    try_file!(download_one(
+                    let file = try_file!(download_one(
                         cdn_http,
                         &resource.url,
                         &hl_dir.join(&base),
@@ -1716,6 +1814,9 @@ async fn run_profile_job(
                         cancel.as_ref().cloned(),
                         allow_loopback,
                     ));
+                    if let Some(output) = job_output_file(&file, None) {
+                        outputs.push(output);
+                    }
                     files_done += 1;
                     has_successful_resource = true;
                 }
@@ -1728,6 +1829,8 @@ async fn run_profile_job(
         last_error,
         all_resource_errors,
         has_successful_resource,
+        outputs,
+        None,
     )
 }
 
@@ -1761,9 +1864,8 @@ pub async fn download_post(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let client = client(&state).await?;
+    let (client, cdn_http) = state.download_clients().await?;
     let cfg = state.cfg.read().await.clone();
-    let cdn_http = state.cdn_http.clone();
     let catalog = state.catalog.clone();
     let jobs: Arc<JobRegistry> = state.jobs.clone();
 
@@ -1834,7 +1936,13 @@ pub async fn download_post(
                     .media
                     .as_ref()
                     .map_or(0, |media| media.resource_errors.len());
-                em.done(completed.outcome, resource_failures, &dir);
+                em.done(
+                    completed.outcome,
+                    resource_failures,
+                    &dir,
+                    completed.outputs,
+                    completed.requested_items,
+                );
             }
             Err(JobFail::Cancelled) => em.cancelled(),
             Err(JobFail::Fatal(e)) => em.failed(e),
@@ -1848,6 +1956,8 @@ pub async fn download_post(
 
 struct CompletedPostDownload {
     outcome: JobOutcome,
+    outputs: Vec<JobOutputFile>,
+    requested_items: Option<usize>,
     media: Option<DownloadedMedia>,
     #[allow(dead_code)]
     bytes_downloaded: u64,
@@ -2013,6 +2123,8 @@ async fn run_single_post_attempt(
         return Ok(PostDownloadAttempt {
             completed: CompletedPostDownload {
                 outcome: JobOutcome::default(),
+                outputs: Vec::new(),
+                requested_items: Some(1),
                 media: None,
                 bytes_downloaded: bytes_total,
                 has_successful_resource,
@@ -2031,22 +2143,31 @@ async fn run_single_post_attempt(
             files: downloaded,
             resource_errors: resource_errors.clone(),
         };
-        if media_files_written > 0 || sidecar_written {
+        let outputs = if media_files_written > 0 || sidecar_written {
             if is_cancelled() {
                 return Err(JobFail::Cancelled);
             }
-            if catalog_downloaded_media(catalog, destination_root, &media)
-                .await
-                .is_err()
-            {
-                outcome.catalog_warnings += 1;
+            match catalog_downloaded_media(catalog, destination_root, &media).await {
+                Ok(cataloged) => cataloged,
+                Err(_) => {
+                    outcome.catalog_warnings += 1;
+                    uncataloged_job_outputs(&media)
+                }
             }
-        }
-        Some(media)
+        } else {
+            Vec::new()
+        };
+        Some((media, outputs))
+    };
+    let (media, outputs) = match media {
+        Some((media, outputs)) => (Some(media), outputs),
+        None => (None, Vec::new()),
     };
     Ok(PostDownloadAttempt {
         completed: CompletedPostDownload {
             outcome,
+            outputs,
+            requested_items: Some(1),
             media,
             bytes_downloaded: bytes_total,
             has_successful_resource,
@@ -2114,7 +2235,7 @@ pub(crate) async fn enqueue_fetched_post_download(
     };
 
     let cfg = state.cfg.read().await.clone();
-    let cdn_http = state.cdn_http.clone();
+    let cdn_http = state.cdn_client().await;
     let catalog = state.catalog.clone();
     let jobs = Arc::clone(&state.jobs);
     let job_id = uuid::Uuid::new_v4().to_string();
@@ -2153,7 +2274,13 @@ pub(crate) async fn enqueue_fetched_post_download(
         .await;
         match worker_result {
             Ok((Ok(completed), dir)) => {
-                em.done(completed.outcome, completed.resource_errors.len(), &dir);
+                em.done(
+                    completed.outcome,
+                    completed.resource_errors.len(),
+                    &dir,
+                    completed.outputs,
+                    completed.requested_items,
+                );
             }
             Ok((Err(JobFail::Cancelled), _)) => em.cancelled(),
             Ok((Err(JobFail::Fatal(error)), _)) => em.failed(error),
@@ -2185,6 +2312,7 @@ async fn run_fetched_posts_job(
     let mut resource_errors = Vec::new();
     let mut last_error = None;
     let mut has_successful_resource = false;
+    let mut outputs = Vec::new();
 
     for post in posts {
         if cancel.as_ref().map(|rx| *rx.borrow()).unwrap_or(false) {
@@ -2216,6 +2344,7 @@ async fn run_fetched_posts_job(
                 outcome.catalog_warnings += completed.outcome.catalog_warnings;
                 bytes_offset = bytes_offset.saturating_add(completed.bytes_downloaded);
                 has_successful_resource |= completed.has_successful_resource;
+                outputs.extend(completed.outputs);
                 resource_errors.extend(attempt.resource_errors);
                 if let Some(error) = attempt.last_error {
                     last_error = Some(error);
@@ -2235,6 +2364,8 @@ async fn run_fetched_posts_job(
         last_error,
         resource_errors,
         has_successful_resource,
+        outputs,
+        Some(posts.len()),
     )
 }
 
@@ -2743,6 +2874,8 @@ mod tests {
             Some(errors[1].clone()),
             errors.clone(),
             true,
+            Vec::new(),
+            None,
         )
         .unwrap_or_else(|failure| match failure {
             JobFail::Cancelled => panic!("job was unexpectedly cancelled"),
@@ -2760,6 +2893,8 @@ mod tests {
             Some("HTTP 403 on missing ordinal".into()),
             vec!["HTTP 403 on missing ordinal".into()],
             true,
+            Vec::new(),
+            None,
         )
         .unwrap_or_else(|failure| match failure {
             JobFail::Cancelled => panic!("job was unexpectedly cancelled"),
@@ -2821,6 +2956,14 @@ mod tests {
             state: JobState::Done {
                 count: 2,
                 dir: "/configured/root".into(),
+                outputs: vec![JobOutputFile {
+                    file_id: Some(42),
+                    basename: "carousel_1.jpg".into(),
+                    kind: MediaFileKind::Photo,
+                    byte_size: 8,
+                    ordinal: 0,
+                }],
+                requested_items: Some(1),
                 catalog_warnings: 0,
                 resource_failures: 0,
             },
@@ -2829,8 +2972,39 @@ mod tests {
         assert_eq!(legacy["state"], "done");
         assert_eq!(legacy["count"], 2);
         assert_eq!(legacy["dir"], "/configured/root");
+        assert_eq!(legacy["requested_items"], 1);
+        assert_eq!(legacy["outputs"][0]["file_id"], 42);
+        assert_eq!(legacy["outputs"][0]["basename"], "carousel_1.jpg");
+        assert_eq!(legacy["outputs"][0]["kind"], "photo");
+        assert_eq!(legacy["outputs"][0]["byte_size"], 8);
+        assert_eq!(legacy["outputs"][0]["ordinal"], 0);
+        assert!(legacy["outputs"][0].get("path").is_none());
+        assert!(!legacy
+            .to_string()
+            .contains("/configured/root/carousel_1.jpg"));
         assert!(legacy.get("catalog_warnings").is_none());
         assert!(legacy.get("resource_failures").is_none());
+
+        let uncataloged = serde_json::to_value(JobProgress {
+            job_id: "job".into(),
+            label: "label".into(),
+            state: JobState::Done {
+                count: 1,
+                dir: "/configured/root".into(),
+                outputs: vec![JobOutputFile {
+                    file_id: None,
+                    basename: "uncataloged.jpg".into(),
+                    kind: MediaFileKind::Photo,
+                    byte_size: 8,
+                    ordinal: 0,
+                }],
+                requested_items: Some(1),
+                catalog_warnings: 1,
+                resource_failures: 0,
+            },
+        })
+        .unwrap();
+        assert!(uncataloged["outputs"][0].get("file_id").is_none());
 
         let warning = serde_json::to_value(JobProgress {
             job_id: "job".into(),
@@ -2838,6 +3012,8 @@ mod tests {
             state: JobState::Done {
                 count: 2,
                 dir: "/configured/root".into(),
+                outputs: Vec::new(),
+                requested_items: None,
                 catalog_warnings: 1,
                 resource_failures: 2,
             },
@@ -2845,6 +3021,8 @@ mod tests {
         .unwrap();
         assert_eq!(warning["catalog_warnings"], 1);
         assert_eq!(warning["resource_failures"], 2);
+        assert!(warning.get("outputs").is_none());
+        assert!(warning.get("requested_items").is_none());
         assert!(!warning.to_string().contains("secret-token"));
     }
 

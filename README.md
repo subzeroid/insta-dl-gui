@@ -20,10 +20,12 @@ Paste your HikerAPI token once, then download any public profile's content with 
 
 - **Single posts & reels** — paste an `instagram.com/p/…` or `/reel/…` link
 - **Full profiles** — posts, reels-only, active stories, highlights, and HD avatar, each selectable
-- **Explore first** — the app opens on profile discovery; browse posts, reels and stories, select exact cards, then use one **Download · All · Shown · Selected** control
+- **Explore first** — the app opens on profile discovery; browse labeled photos, videos, carousels and stories, filter Posts by media type, select exact cards, then use one **Download · All · Shown · Selected** control
+- **Useful previews** — open a Post or Reel to copy its description or canonical Instagram link
 - **No login, no ban risk** — HikerAPI token only; your Instagram account never touches the flow
-- **Live progress** — per-job byte counts, file counters and cancel support
+- **Live Queue** — per-job byte counts, file counters and cancel support; completed jobs open the exact saved-file list with previews and system file actions
 - **Resilient downloads** — transient network and CDN server failures retry automatically; partial jobs count only files actually saved
+- **Shared network proxy** — route both HikerAPI requests and Instagram CDN media through one HTTP, HTTPS, SOCKS5 or SOCKS5H proxy
 - **Incremental archives** — already-downloaded files are skipped on re-runs (like `--fast-update`)
 - **Original timestamps** — file mtime is set from `taken_at`, so Photos/Finder sort correctly
 - **JSON metadata sidecars** — caption, like/comment counts and owner saved next to every post (toggleable)
@@ -51,6 +53,8 @@ See [CHANGELOG.md](CHANGELOG.md) for release-by-release changes.
 3. Paste it into the app on first launch.
 
 One request ≈ one API call: fetching a post costs 1, stories 2, highlights 2 + 1 per highlight reel. Explore loads current Stories automatically for a public profile, which costs 2 requests. **All** fetches the complete category and can spend additional requests; **Shown** and **Selected** download the exact items already loaded without fetching more pages. Exact snapshots are limited to 500 items and enter Queue as one job; use **All** above that limit.
+
+If Instagram media is blocked on your connection, open **Settings** and configure one shared proxy for HikerAPI and CDN traffic. Authenticated proxy URLs are supported; see the [usage guide](docs/usage.md#configure-a-network-proxy) for supported schemes and switching behavior.
 
 ## Local media Library
 

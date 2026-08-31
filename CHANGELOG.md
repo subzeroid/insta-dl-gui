@@ -2,6 +2,27 @@
 
 All notable changes to insta-dl-gui are documented in this file.
 
+## 0.5.0 - 2026-08-30
+
+### Added
+
+- Settings can route both HikerAPI and Instagram CDN traffic through one HTTP, HTTPS, SOCKS5, or SOCKS5H proxy, including authenticated proxy URLs, without restarting the app.
+- Explore now labels every loaded post as a photo, video, carousel, or unavailable post and can filter Posts by media type without losing selections hidden by the current filter.
+- Post and Reel previews can copy the description and canonical Instagram link with native clipboard feedback.
+- Completed Queue jobs can open an exact, ordered list of the media files created by that download, including previews, file sizes, and safe Open and Show in Finder actions.
+
+### Changed
+
+- Download scope guidance now lives behind an accessible information control beside **All / Shown / Selected**.
+- Queue distinguishes requested Instagram items from saved media files, so carousel expansion is explicit, and progressively renders large result sets in 50-file pages.
+- The browser demo now exercises the full downloading-to-completed journey with deterministic media previews and file actions.
+
+### Fixed
+
+- Resource-less Posts and Reels remain visible for context but no longer enter exact Shown or Selected counts and payloads.
+- Completed download events expose only safe basenames and catalog file IDs, exclude metadata sidecars and pre-existing files, and retain exact output order without leaking filesystem paths.
+- Queue preview access is requested once per completed result instead of once per file, avoiding repeated macOS folder permission prompts.
+
 ## 0.4.0 - 2026-08-30
 
 ### Added

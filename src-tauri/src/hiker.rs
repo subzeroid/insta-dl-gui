@@ -120,16 +120,29 @@ impl HikerClient {
     }
 
     pub fn with_base_url(token: String, base_url: String) -> Self {
-        let http = reqwest::Client::builder()
+        Self::with_base_url_and_proxy(token, base_url, None).expect("reqwest client")
+    }
+
+    pub fn with_proxy(token: String, proxy_url: Option<&str>) -> Result<Self, String> {
+        Self::with_base_url_and_proxy(token, BASE_URL.to_string(), proxy_url)
+    }
+
+    pub fn with_base_url_and_proxy(
+        token: String,
+        base_url: String,
+        proxy_url: Option<&str>,
+    ) -> Result<Self, String> {
+        let builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
-            .user_agent(concat!("insta-dl-gui/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("insta-dl-gui/", env!("CARGO_PKG_VERSION")));
+        let http = crate::proxy::apply_proxy(builder, proxy_url)?
             .build()
-            .expect("reqwest client");
-        Self {
+            .map_err(|_| "Could not configure the HikerAPI client".to_owned())?;
+        Ok(Self {
             http,
             token,
             base_url,
-        }
+        })
     }
 
     pub async fn get(

@@ -4,13 +4,15 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", default)]
 pub struct Config {
     pub token: Option<String>,
     pub dest_dir: String,
     #[serde(rename = "sidecar")]
     pub sidecar: bool,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
 }
 
 impl Default for Config {
@@ -19,7 +21,19 @@ impl Default for Config {
             token: None,
             dest_dir: default_dest_dir(),
             sidecar: true,
+            proxy_url: None,
         }
+    }
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("token", &self.token.as_ref().map(|_| "***"))
+            .field("dest_dir", &self.dest_dir)
+            .field("sidecar", &self.sidecar)
+            .field("proxy_url", &self.proxy_hint())
+            .finish()
     }
 }
 
@@ -70,6 +84,12 @@ impl Config {
         self.token
             .as_ref()
             .map(|t| format!("***{}", &t[t.len().saturating_sub(4)..]))
+    }
+
+    pub fn proxy_hint(&self) -> Option<String> {
+        self.proxy_url
+            .as_deref()
+            .and_then(crate::proxy::redact_proxy_url)
     }
 }
 
