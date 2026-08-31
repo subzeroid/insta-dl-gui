@@ -19,6 +19,8 @@ import {
   queryLibrary,
   requestLibraryPreviewAccess,
   revealLibraryFile,
+  configState,
+  setProxy,
   startLibraryScan,
   type LibraryCard,
   type LibraryPage,
@@ -45,6 +47,32 @@ afterEach(() => {
 });
 
 describe("profile pagination mock", () => {
+  it("persists a safely redacted proxy through the IPC facade", async () => {
+    installTauriMock();
+
+    await expect(configState()).resolves.toMatchObject({ has_proxy: false, proxy_hint: null });
+
+    const applied = await setProxy("  socks5h://alice:secret@proxy.example:1080  ");
+    expect(applied).toMatchObject({
+      has_proxy: true,
+      proxy_hint: "socks5h://***@proxy.example:1080/",
+    });
+    expect(JSON.stringify(applied)).not.toContain("alice");
+    expect(JSON.stringify(applied)).not.toContain("secret");
+    await expect(configState()).resolves.toMatchObject({
+      has_proxy: true,
+      proxy_hint: "socks5h://***@proxy.example:1080/",
+    });
+
+    await expect(setProxy("http://proxy.example:80")).resolves.toMatchObject({
+      has_proxy: true,
+      proxy_hint: "http://proxy.example:80/",
+    });
+
+    await expect(setProxy(null)).resolves.toMatchObject({ has_proxy: false, proxy_hint: null });
+    await expect(configState()).resolves.toMatchObject({ has_proxy: false, proxy_hint: null });
+  });
+
   it("handles the official clipboard manager write command", async () => {
     installTauriMock();
 

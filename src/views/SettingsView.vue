@@ -13,9 +13,10 @@ const tokenBusy = ref(false);
 const tokenError = ref<string | null>(null);
 const tokenSuccess = ref<string | null>(null);
 const replacementProxy = ref("");
-const proxyBusy = ref(false);
 const proxyError = ref<string | null>(null);
 const proxySuccess = ref<string | null>(null);
+const PROXY_VALIDATION_ERROR = "Proxy URL must use a supported scheme.";
+const PROXY_SAVE_ERROR = "Proxy settings could not be saved. The previous proxy is still active.";
 
 onMounted(() => {
   sidecar.value = app.sidecar;
@@ -72,8 +73,7 @@ async function replaceToken() {
 
 async function applyProxy() {
   const proxyUrl = replacementProxy.value.trim();
-  if (!proxyUrl || proxyBusy.value) return;
-  proxyBusy.value = true;
+  if (!proxyUrl || app.proxySaving) return;
   proxyError.value = null;
   proxySuccess.value = null;
   try {
@@ -81,15 +81,14 @@ async function applyProxy() {
     replacementProxy.value = "";
     proxySuccess.value = "Proxy applied to HikerAPI and Instagram CDN";
   } catch (cause) {
-    proxyError.value = cause instanceof Error ? cause.message : String(cause);
-  } finally {
-    proxyBusy.value = false;
+    proxyError.value = cause instanceof Error && cause.message === PROXY_VALIDATION_ERROR
+      ? cause.message
+      : PROXY_SAVE_ERROR;
   }
 }
 
 async function clearProxy() {
-  if (proxyBusy.value) return;
-  proxyBusy.value = true;
+  if (app.proxySaving) return;
   proxyError.value = null;
   proxySuccess.value = null;
   try {
@@ -97,9 +96,7 @@ async function clearProxy() {
     replacementProxy.value = "";
     proxySuccess.value = "Proxy cleared";
   } catch {
-    proxyError.value = "Proxy settings could not be saved. The previous proxy is still active.";
-  } finally {
-    proxyBusy.value = false;
+    proxyError.value = PROXY_SAVE_ERROR;
   }
 }
 </script>
@@ -142,48 +139,58 @@ async function clearProxy() {
       </p>
     </form>
 
-    <form data-testid="proxy-form" class="card space-y-3 p-5" @submit.prevent="applyProxy">
+    <form
+      data-testid="proxy-form"
+      class="card space-y-3 p-5"
+      :aria-busy="app.proxySaving"
+      @submit.prevent="applyProxy"
+    >
       <div>
-        <div class="text-sm font-medium text-slate-300">Network proxy</div>
-        <p class="mt-1 text-xs text-slate-500">
+        <label for="network-proxy" class="text-sm font-medium text-slate-300">Network proxy</label>
+        <p id="proxy-explanation" class="mt-1 text-xs text-slate-500">
           Routes both HikerAPI and Instagram CDN requests.
         </p>
-        <p class="mt-1 text-xs text-slate-500">
+        <p id="proxy-current" class="mt-1 text-xs text-slate-500">
           Current:
           <span data-testid="proxy-hint" class="font-mono text-slate-400">
             {{ app.proxyHint || "Direct connection" }}
           </span>
         </p>
       </div>
-      <p class="text-xs text-slate-500">Supports HTTP, HTTPS, SOCKS5, SOCKS5H including credentials.</p>
+      <p id="proxy-support" class="text-xs text-slate-500">
+        Supports HTTP, HTTPS, SOCKS5, SOCKS5H including credentials.
+      </p>
       <div class="flex flex-wrap gap-2">
         <input
           v-model="replacementProxy"
+          id="network-proxy"
           name="network-proxy"
           class="input min-w-0 flex-1 font-mono text-xs"
           type="password"
           placeholder="http://proxy.example:8080"
           autocomplete="off"
           spellcheck="false"
-          :disabled="proxyBusy"
+          :readonly="app.proxySaving"
+          :aria-disabled="app.proxySaving"
+          aria-describedby="proxy-explanation proxy-current proxy-support"
         />
         <button
           data-testid="apply-proxy"
           class="btn-primary shrink-0"
           type="submit"
-          :disabled="proxyBusy || !replacementProxy.trim()"
+          :disabled="app.proxySaving || !replacementProxy.trim()"
         >
-          {{ proxyBusy ? "Saving…" : "Apply proxy" }}
+          {{ app.proxySaving ? "Saving…" : "Apply proxy" }}
         </button>
         <button
           v-if="app.hasProxy"
           data-testid="clear-proxy"
           class="btn-secondary shrink-0"
           type="button"
-          :disabled="proxyBusy"
+          :disabled="app.proxySaving"
           @click="clearProxy"
         >
-          Clear
+          Clear proxy
         </button>
       </div>
       <p v-if="proxyError" data-testid="proxy-error" class="text-xs text-err" role="alert">

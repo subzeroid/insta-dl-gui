@@ -38,11 +38,10 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-async function renderSettings() {
-  const pinia = createPinia();
+async function renderSettings(pinia = createPinia()) {
   setActivePinia(pinia);
   const app = useAppStore();
-  await app.init();
+  if (!app.ready) await app.init();
   const host = document.createElement("div");
   document.body.append(host);
   const wrapper = mount(SettingsView, {
@@ -111,14 +110,19 @@ describe("Settings Library registration warning", () => {
     expect(wrapper.get("[data-testid='replace-token']").attributes("disabled")).toBeDefined();
   });
 
-  it("shows the safe current proxy hint without exposing credentials", async () => {
+  it("labels the proxy input and shows only the safe stored hint", async () => {
     const { wrapper } = await renderSettings();
 
     expect(wrapper.get("[data-testid='proxy-hint']").text()).toBe(
       "socks5h://***@proxy.example:1080/",
     );
-    const input = wrapper.get<HTMLInputElement>("input[name='network-proxy']");
+    const label = wrapper.get<HTMLLabelElement>('label[for="network-proxy"]');
+    const input = wrapper.get<HTMLInputElement>("#network-proxy");
+    expect(label.text()).toBe("Network proxy");
     expect(input.attributes("type")).toBe("password");
+    expect(input.attributes("aria-describedby")).toBe(
+      "proxy-explanation proxy-current proxy-support",
+    );
     expect(input.element.value).toBe("");
     expect(wrapper.html()).not.toContain("alice");
     expect(wrapper.html()).not.toContain("secret");
@@ -134,7 +138,7 @@ describe("Settings Library registration warning", () => {
       sidecar: true,
     });
     const { app, wrapper } = await renderSettings();
-    const input = wrapper.get<HTMLInputElement>("input[name='network-proxy']");
+    const input = wrapper.get<HTMLInputElement>("#network-proxy");
     await input.setValue("  socks5h://alice:secret@proxy.example:1080  ");
 
     await wrapper.get("[data-testid='proxy-form']").trigger("submit");
@@ -178,7 +182,7 @@ describe("Settings Library registration warning", () => {
   it("keeps the configured proxy and entered replacement when applying fails", async () => {
     ipc.setProxy.mockRejectedValue(new Error("Proxy URL must use a supported scheme."));
     const { app, wrapper } = await renderSettings();
-    const input = wrapper.get<HTMLInputElement>("input[name='network-proxy']");
+    const input = wrapper.get<HTMLInputElement>("#network-proxy");
     await input.setValue("bad-proxy");
 
     await wrapper.get("[data-testid='proxy-form']").trigger("submit");
@@ -194,11 +198,11 @@ describe("Settings Library registration warning", () => {
     );
   });
 
-  it("prevents duplicate pending proxy applies and disables its controls", async () => {
+  it("prevents duplicate pending proxy applies while retaining focused input accessibly", async () => {
     const pending = deferred<never>();
     ipc.setProxy.mockReturnValueOnce(pending.promise);
     const { wrapper } = await renderSettings();
-    const input = wrapper.get<HTMLInputElement>("input[name='network-proxy']");
+    const input = wrapper.get<HTMLInputElement>("#network-proxy");
     input.element.focus();
     await input.setValue("http://proxy.example:8080");
 
@@ -206,7 +210,10 @@ describe("Settings Library registration warning", () => {
     await wrapper.get("[data-testid='proxy-form']").trigger("submit");
 
     expect(ipc.setProxy).toHaveBeenCalledOnce();
-    expect(input.attributes("disabled")).toBeDefined();
+    expect(input.attributes("disabled")).toBeUndefined();
+    expect(input.attributes("readonly")).toBeDefined();
+    expect(input.attributes("aria-disabled")).toBe("true");
+    expect(wrapper.get("[data-testid='proxy-form']").attributes("aria-busy")).toBe("true");
     expect(wrapper.get("[data-testid='apply-proxy']").attributes("disabled")).toBeDefined();
     expect(wrapper.get("[data-testid='clear-proxy']").attributes("disabled")).toBeDefined();
     expect(document.activeElement).toBe(input.element);
@@ -215,6 +222,169 @@ describe("Settings Library registration warning", () => {
     await flushPromises();
     expect(ipc.setProxy).toHaveBeenCalledOnce();
     expect(document.activeElement).toBe(input.element);
+    expect(input.attributes("readonly")).toBeUndefined();
+    expect(input.attributes("aria-disabled")).toBe("false");
+    expect(wrapper.get("[data-testid='proxy-form']").attributes("aria-busy")).toBe("false");
+  });
+
+  it("keeps a newer proxy when a delayed sidecar response arrives", async () => {
+    const proxyRequest = deferred<{
+      has_token: boolean;
+      token_hint: string | null;
+      has_proxy: boolean;
+      proxy_hint: string | null;
+      dest_dir: string;
+      sidecar: boolean;
+    }>();
+    const sidecarRequest = deferred<{
+      has_token: boolean;
+      token_hint: string | null;
+      has_proxy: boolean;
+      proxy_hint: string | null;
+      dest_dir: string;
+      sidecar: boolean;
+    }>();
+    ipc.setProxy.mockReturnValueOnce(proxyRequest.promise);
+    ipc.saveSettings.mockReturnValueOnce(sidecarRequest.promise);
+    const { app, wrapper } = await renderSettings();
+
+    await wrapper.get<HTMLInputElement>("#network-proxy").setValue("http://new-proxy.example:8080");
+    await wrapper.get("[data-testid='proxy-form']").trigger("submit");
+    await wrapper.get<HTMLInputElement>('input[type="checkbox"]').setValue(false);
+
+    proxyRequest.resolve({
+      has_token: true,
+      token_hint: "***old1",
+      has_proxy: true,
+      proxy_hint: "http://***@new-proxy.example:8080/",
+      dest_dir: "/archive/old",
+      sidecar: true,
+    });
+    await flushPromises();
+    sidecarRequest.resolve({
+      has_token: true,
+      token_hint: "***old1",
+      has_proxy: true,
+      proxy_hint: "socks5h://***@proxy.example:1080/",
+      dest_dir: "/archive/old",
+      sidecar: false,
+    });
+    await flushPromises();
+
+    expect(app.proxyHint).toBe("http://***@new-proxy.example:8080/");
+    expect(app.sidecar).toBe(false);
+  });
+
+  it("keeps a newer proxy when a delayed token config snapshot arrives", async () => {
+    const refreshedTokenState = deferred<{
+      has_token: boolean;
+      token_hint: string | null;
+      has_proxy: boolean;
+      proxy_hint: string | null;
+      dest_dir: string;
+      sidecar: boolean;
+    }>();
+    const proxyRequest = deferred<{
+      has_token: boolean;
+      token_hint: string | null;
+      has_proxy: boolean;
+      proxy_hint: string | null;
+      dest_dir: string;
+      sidecar: boolean;
+    }>();
+    ipc.validateToken.mockResolvedValue({ requests: 99, rate: null, amount: null, currency: null });
+    ipc.configState.mockImplementationOnce(async () => ({
+      has_token: true,
+      token_hint: "***old1",
+      has_proxy: true,
+      proxy_hint: "socks5h://***@proxy.example:1080/",
+      dest_dir: "/archive/old",
+      sidecar: true,
+    })).mockReturnValueOnce(refreshedTokenState.promise);
+    ipc.setProxy.mockReturnValueOnce(proxyRequest.promise);
+    const { app, wrapper } = await renderSettings();
+
+    await wrapper.get<HTMLInputElement>("input[name='hiker-token']").setValue("fresh-token");
+    await wrapper.get("[data-testid='token-form']").trigger("submit");
+    await flushPromises();
+    await wrapper.get<HTMLInputElement>("#network-proxy").setValue("http://new-proxy.example:8080");
+    await wrapper.get("[data-testid='proxy-form']").trigger("submit");
+
+    proxyRequest.resolve({
+      has_token: true,
+      token_hint: "***old1",
+      has_proxy: true,
+      proxy_hint: "http://***@new-proxy.example:8080/",
+      dest_dir: "/archive/old",
+      sidecar: true,
+    });
+    await flushPromises();
+    refreshedTokenState.resolve({
+      has_token: true,
+      token_hint: "***new9",
+      has_proxy: true,
+      proxy_hint: "socks5h://***@proxy.example:1080/",
+      dest_dir: "/archive/old",
+      sidecar: true,
+    });
+    await flushPromises();
+
+    expect(app.tokenHint).toBe("***new9");
+    expect(app.proxyHint).toBe("http://***@new-proxy.example:8080/");
+  });
+
+  it("keeps one proxy request pending across an unmount and remount", async () => {
+    const proxyRequest = deferred<{
+      has_token: boolean;
+      token_hint: string | null;
+      has_proxy: boolean;
+      proxy_hint: string | null;
+      dest_dir: string;
+      sidecar: boolean;
+    }>();
+    ipc.setProxy.mockReturnValueOnce(proxyRequest.promise);
+    const pinia = createPinia();
+    const first = await renderSettings(pinia);
+    await first.wrapper.get<HTMLInputElement>("#network-proxy").setValue("http://new-proxy.example:8080");
+    await first.wrapper.get("[data-testid='proxy-form']").trigger("submit");
+    first.wrapper.unmount();
+
+    const second = await renderSettings(pinia);
+    const input = second.wrapper.get<HTMLInputElement>("#network-proxy");
+    await second.wrapper.get("[data-testid='proxy-form']").trigger("submit");
+
+    expect(ipc.setProxy).toHaveBeenCalledOnce();
+    expect(input.attributes("readonly")).toBeDefined();
+    expect(input.attributes("aria-disabled")).toBe("true");
+    expect(second.wrapper.get("[data-testid='proxy-form']").attributes("aria-busy")).toBe("true");
+
+    proxyRequest.resolve({
+      has_token: true,
+      token_hint: "***old1",
+      has_proxy: true,
+      proxy_hint: "http://***@new-proxy.example:8080/",
+      dest_dir: "/archive/old",
+      sidecar: true,
+    });
+    await flushPromises();
+
+    expect(input.attributes("readonly")).toBeUndefined();
+    expect(input.attributes("aria-disabled")).toBe("false");
+    expect(second.app.proxyHint).toBe("http://***@new-proxy.example:8080/");
+  });
+
+  it("maps unexpected proxy apply errors to the fixed safe message", async () => {
+    ipc.setProxy.mockRejectedValue(new Error("failed /Users/private socks5h://alice:secret@proxy.example"));
+    const { wrapper } = await renderSettings();
+    await wrapper.get<HTMLInputElement>("#network-proxy").setValue("http://proxy.example:8080");
+
+    await wrapper.get("[data-testid='proxy-form']").trigger("submit");
+    await flushPromises();
+
+    const error = wrapper.get("[data-testid='proxy-error']").text();
+    expect(error).toBe("Proxy settings could not be saved. The previous proxy is still active.");
+    expect(error).not.toContain("/Users/private");
+    expect(error).not.toContain("alice:secret");
   });
 
   it("keeps the configured proxy after a failed clear without exposing sensitive details", async () => {

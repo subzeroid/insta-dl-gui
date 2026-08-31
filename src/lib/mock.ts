@@ -5,6 +5,7 @@
 
 import type {
   DirectItem,
+  ConfigState,
   JobOutputFile,
   JobProgress,
   LibraryCard,
@@ -45,6 +46,7 @@ const MAX_SHORTCODE_BYTES = 256;
 const ALLOWED_CDN_HOSTS = ["cdninstagram.com", "fbcdn.net"];
 const MOCK_PROFILE_PK_START = 9_000_000;
 const MOCK_REEL_PK_START = 9_100_000;
+const PROXY_VALIDATION_ERROR = "Proxy URL must use a supported scheme.";
 
 const AVATAR =
   "data:image/svg+xml," +
@@ -589,13 +591,6 @@ function reply(
   registeredMedia?: ReadonlyMap<number, string>,
 ): unknown {
   switch (cmd) {
-    case "config_state":
-      return {
-        has_token: true,
-        token_hint: "***9f3a",
-        dest_dir: "~/Downloads/insta-dl",
-        sidecar: true,
-      };
     case "get_balance":
     case "__balance":
       return { requests: 14_700_000, rate: 10, amount: 123.45, currency: "usd" };
@@ -722,8 +717,6 @@ function reply(
       return MOCK_STORIES.map((story) => ({ ...story }));
     case "validate_token":
       return reply("__balance", undefined, registeredMedia);
-    case "save_settings":
-      return reply("config_state", undefined, registeredMedia);
     // event plugin stubs
     case "plugin:event|listen":
       return 1;
@@ -762,6 +755,57 @@ export function installTauriMock(): void {
   let nextFileId = 10_101;
   let disposed = false;
   const registeredMedia = new Map<number, string>();
+  const config: ConfigState = {
+    has_token: true,
+    token_hint: "***9f3a",
+    has_proxy: false,
+    proxy_hint: null,
+    dest_dir: "~/Downloads/insta-dl",
+    sidecar: true,
+  };
+
+  function configState(): ConfigState {
+    return { ...config };
+  }
+
+  function setMockProxy(proxyUrl: unknown): ConfigState {
+    if (proxyUrl === null) {
+      config.has_proxy = false;
+      config.proxy_hint = null;
+      return configState();
+    }
+    if (typeof proxyUrl !== "string") throw new Error(PROXY_VALIDATION_ERROR);
+    const trimmedProxy = proxyUrl.trim();
+    let parsed: URL;
+    try {
+      parsed = new URL(trimmedProxy);
+    } catch {
+      throw new Error(PROXY_VALIDATION_ERROR);
+    }
+    const scheme = parsed.protocol.slice(0, -1).toLowerCase();
+    const authority = trimmedProxy.slice(trimmedProxy.indexOf("://") + 3).split(/[/?#]/, 1)[0];
+    const port = authority.match(/:(\d+)$/)?.[1];
+    if (
+      !["http", "https", "socks5", "socks5h"].includes(scheme) ||
+      !parsed.hostname ||
+      !port ||
+      (parsed.pathname !== "/" && parsed.pathname !== "") ||
+      parsed.search ||
+      parsed.hash
+    ) {
+      throw new Error(PROXY_VALIDATION_ERROR);
+    }
+    const userInfo = parsed.username || parsed.password ? "***@" : "";
+    config.has_proxy = true;
+    config.proxy_hint = `${scheme}://${userInfo}${parsed.hostname}:${port}/`;
+    return configState();
+  }
+
+  function saveMockSettings(args?: CmdArgs): ConfigState {
+    if (typeof args?.destDir === "string") config.dest_dir = args.destDir;
+    if (typeof args?.sidecar === "boolean") config.sidecar = args.sidecar;
+    return configState();
+  }
 
   for (const card of mockLibraryCards()) {
     for (const file of mockFiles(card)) {
@@ -911,6 +955,9 @@ export function installTauriMock(): void {
         return Promise.resolve(cancelDownload(String(args?.jobId ?? "")));
       }
       try {
+        if (cmd === "config_state") return Promise.resolve(configState());
+        if (cmd === "save_settings") return Promise.resolve(saveMockSettings(args));
+        if (cmd === "set_proxy") return Promise.resolve(setMockProxy(args?.proxyUrl));
         const response = Promise.resolve(reply(cmd, args, registeredMedia));
         if (cmd === "start_library_scan") {
           void response.then(() => {
