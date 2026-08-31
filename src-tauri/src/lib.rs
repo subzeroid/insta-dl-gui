@@ -28,6 +28,7 @@ use crate::network::NetworkClients;
 const TOKEN_VALIDATION_ATTEMPTS: usize = 3;
 const NETWORK_CHANGED_DURING_TOKEN_VALIDATION: &str =
     "Network settings changed while validating the token; try again";
+const TOKEN_REQUEST_SUPERSEDED: &str = "A newer token replacement request superseded this one";
 
 #[derive(Debug, Clone, Serialize)]
 struct ConfigState {
@@ -81,6 +82,14 @@ fn commit_validated_token(
 }
 
 fn network_from_loaded_config(config: &mut Config) -> NetworkClients {
+    match crate::proxy::normalize_proxy_url(config.proxy_url.as_deref()) {
+        Ok(proxy_url) => config.proxy_url = proxy_url,
+        Err(error) => {
+            eprintln!("{error}");
+            config.proxy_url = None;
+        }
+    }
+
     match NetworkClients::from_config(config) {
         Ok(network) => network,
         Err(error) => {
@@ -122,6 +131,24 @@ where
     }
 
     Err(NETWORK_CHANGED_DURING_TOKEN_VALIDATION.to_owned())
+}
+
+async fn begin_token_request(settings_update: &Mutex<u64>) -> u64 {
+    let mut generation = settings_update.lock().await;
+    *generation = generation.wrapping_add(1);
+    *generation
+}
+
+fn token_commit_is_current(
+    current_generation: u64,
+    request_generation: u64,
+    current_proxy: &Option<String>,
+    validated_proxy: &Option<String>,
+) -> Result<bool, String> {
+    if current_generation != request_generation {
+        return Err(TOKEN_REQUEST_SUPERSEDED.to_owned());
+    }
+    Ok(current_proxy == validated_proxy)
 }
 
 fn save_settings_with_catalog(
@@ -174,11 +201,91 @@ where
     .map_err(|_| "Settings could not be saved".to_owned())?
 }
 
+fn spawn_proxy_update<Persist>(
+    settings_update: Arc<Mutex<u64>>,
+    config: Arc<RwLock<Config>>,
+    network: Arc<RwLock<NetworkClients>>,
+    proxy_url: Option<String>,
+    persist: Persist,
+) -> tauri::async_runtime::JoinHandle<Result<ConfigState, String>>
+where
+    Persist: FnOnce(&Config) -> Result<(), String> + Send + 'static,
+{
+    tauri::async_runtime::spawn(async move {
+        let _update = settings_update.lock().await;
+        let (config_state, candidate_network) = tauri::async_runtime::spawn_blocking(move || {
+            let mut config = config.blocking_write();
+            change_proxy(&mut config, proxy_url, persist)
+        })
+        .await
+        .map_err(|_| "Proxy settings could not be saved".to_owned())??;
+
+        *network.write().await = candidate_network;
+        Ok(config_state)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_token_commit<Persist>(
+    settings_update: Arc<Mutex<u64>>,
+    request_generation: u64,
+    validated_proxy: Option<String>,
+    config: Arc<RwLock<Config>>,
+    network: Arc<RwLock<NetworkClients>>,
+    token: String,
+    probe: HikerClient,
+    balance: Balance,
+    persist: Persist,
+) -> tauri::async_runtime::JoinHandle<Result<Option<Balance>, String>>
+where
+    Persist: FnOnce(&Config) -> Result<(), String> + Send + 'static,
+{
+    tauri::async_runtime::spawn(async move {
+        let current_generation = settings_update.lock().await;
+        let current_proxy = config.read().await.proxy_url.clone();
+        if !token_commit_is_current(
+            *current_generation,
+            request_generation,
+            &current_proxy,
+            &validated_proxy,
+        )? {
+            return Ok(None);
+        }
+
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut config = config.blocking_write();
+            commit_validated_token(&mut config, token, persist)
+        })
+        .await
+        .map_err(|_| "Token could not be saved".to_owned())??;
+
+        network.write().await.hiker = Some(Arc::new(probe));
+        Ok(Some(balance))
+    })
+}
+
+fn spawn_save_settings_update<Persist>(
+    settings_update: Arc<Mutex<u64>>,
+    config: Arc<RwLock<Config>>,
+    catalog: Catalog,
+    dest_dir: Option<String>,
+    sidecar: Option<bool>,
+    persist: Persist,
+) -> tauri::async_runtime::JoinHandle<Result<ConfigState, String>>
+where
+    Persist: FnOnce(&Config) -> Result<(), String> + Send + 'static,
+{
+    tauri::async_runtime::spawn(async move {
+        let _update = settings_update.lock().await;
+        save_settings_on_blocking_thread(config, catalog, dest_dir, sidecar, persist).await
+    })
+}
+
 pub struct AppState {
     pub catalog: Catalog,
     cfg: Arc<RwLock<Config>>,
-    network: RwLock<NetworkClients>,
-    settings_update: Mutex<()>,
+    network: Arc<RwLock<NetworkClients>>,
+    settings_update: Arc<Mutex<u64>>,
     pub jobs: Arc<JobRegistry>,
     pub scans: Arc<ScanRegistry>,
     /// Targets currently being downloaded — backend-side dedup so the same
@@ -230,6 +337,7 @@ async fn validate_token(
 ) -> Result<Balance, String> {
     let token = token.trim().to_owned();
     let app_state = state.inner();
+    let request_generation = begin_token_request(&app_state.settings_update).await;
     validate_with_consistent_proxy(
         || {
             let config = Arc::clone(&app_state.cfg);
@@ -245,22 +353,23 @@ async fn validate_token(
         },
         |proxy_url, (balance, probe)| {
             let token = token.clone();
+            let settings_update = Arc::clone(&app_state.settings_update);
+            let config = Arc::clone(&app_state.cfg);
+            let network = Arc::clone(&app_state.network);
             async move {
-                let _update = app_state.settings_update.lock().await;
-                if app_state.cfg.read().await.proxy_url != proxy_url {
-                    return Ok(None);
-                }
-
-                let config = Arc::clone(&app_state.cfg);
-                tauri::async_runtime::spawn_blocking(move || {
-                    let mut config = config.blocking_write();
-                    commit_validated_token(&mut config, token, Config::save)
-                })
+                spawn_token_commit(
+                    settings_update,
+                    request_generation,
+                    proxy_url,
+                    config,
+                    network,
+                    token,
+                    probe,
+                    balance,
+                    Config::save,
+                )
                 .await
-                .map_err(|_| "Token could not be saved".to_owned())??;
-
-                app_state.network.write().await.hiker = Some(Arc::new(probe));
-                Ok(Some(balance))
+                .map_err(|_| "Token could not be saved".to_owned())?
             }
         },
     )
@@ -278,17 +387,15 @@ async fn set_proxy(
     proxy_url: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<ConfigState, String> {
-    let _update = state.settings_update.lock().await;
-    let config = Arc::clone(&state.cfg);
-    let (config_state, network) = tauri::async_runtime::spawn_blocking(move || {
-        let mut config = config.blocking_write();
-        change_proxy(&mut config, proxy_url, Config::save)
-    })
+    spawn_proxy_update(
+        Arc::clone(&state.settings_update),
+        Arc::clone(&state.cfg),
+        Arc::clone(&state.network),
+        proxy_url,
+        Config::save,
+    )
     .await
-    .map_err(|_| "Proxy settings could not be saved".to_owned())??;
-
-    *state.network.write().await = network;
-    Ok(config_state)
+    .map_err(|_| "Proxy settings could not be saved".to_owned())?
 }
 
 #[tauri::command]
@@ -297,15 +404,16 @@ async fn save_settings(
     sidecar: Option<bool>,
     state: tauri::State<'_, AppState>,
 ) -> Result<ConfigState, String> {
-    let _update = state.settings_update.lock().await;
-    save_settings_on_blocking_thread(
+    spawn_save_settings_update(
+        Arc::clone(&state.settings_update),
         Arc::clone(&state.cfg),
         state.catalog.clone(),
         dest_dir,
         sidecar,
-        |config| config.save(),
+        Config::save,
     )
     .await
+    .map_err(|_| "Settings could not be saved".to_owned())?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -362,8 +470,8 @@ pub fn run() {
             app.manage(AppState {
                 catalog,
                 cfg: Arc::new(RwLock::new(cfg)),
-                network: RwLock::new(network),
-                settings_update: Mutex::new(()),
+                network: Arc::new(RwLock::new(network)),
+                settings_update: Arc::new(Mutex::new(0)),
                 jobs: Arc::new(JobRegistry::new()),
                 scans: Arc::new(ScanRegistry::new()),
                 in_flight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -409,9 +517,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        change_proxy, commit_validated_token, network_from_loaded_config,
-        save_settings_on_blocking_thread, save_settings_with_catalog,
-        validate_with_consistent_proxy, Catalog, Config,
+        begin_token_request, change_proxy, commit_validated_token, network_from_loaded_config,
+        save_settings_on_blocking_thread, save_settings_with_catalog, spawn_proxy_update,
+        spawn_token_commit, token_commit_is_current, validate_with_consistent_proxy, Balance,
+        Catalog, Config, HikerClient,
     };
     use tokio::sync::RwLock;
 
@@ -715,6 +824,259 @@ mod tests {
         assert_eq!(*attempts.lock().unwrap(), 3);
     }
 
+    #[tokio::test]
+    async fn newer_token_request_commits_first_and_supersedes_slow_request() {
+        let settings_update = Arc::new(tokio::sync::Mutex::new(0_u64));
+        let runtime_token = Arc::new(std::sync::Mutex::new("old-token".to_owned()));
+        let a_validations = Arc::new(std::sync::Mutex::new(0_u16));
+        let (a_started_tx, a_started_rx) = tokio::sync::oneshot::channel();
+        let (release_a_tx, release_a_rx) = tokio::sync::oneshot::channel();
+        let a_started_tx = Arc::new(std::sync::Mutex::new(Some(a_started_tx)));
+        let release_a_rx = Arc::new(tokio::sync::Mutex::new(Some(release_a_rx)));
+
+        let a_generation = begin_token_request(&settings_update).await;
+        let a_gate = Arc::clone(&settings_update);
+        let a_runtime = Arc::clone(&runtime_token);
+        let a_validation_count = Arc::clone(&a_validations);
+        let slow_a = tokio::spawn(validate_with_consistent_proxy(
+            || std::future::ready(None),
+            move |_| {
+                let a_started_tx = Arc::clone(&a_started_tx);
+                let release_a_rx = Arc::clone(&release_a_rx);
+                *a_validation_count.lock().unwrap() += 1;
+                async move {
+                    a_started_tx
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .send(())
+                        .unwrap();
+                    release_a_rx.lock().await.take().unwrap().await.unwrap();
+                    Ok("token-a".to_owned())
+                }
+            },
+            move |_, candidate| {
+                let a_gate = Arc::clone(&a_gate);
+                let a_runtime = Arc::clone(&a_runtime);
+                async move {
+                    let current_generation = a_gate.lock().await;
+                    if !token_commit_is_current(*current_generation, a_generation, &None, &None)? {
+                        return Ok(None);
+                    }
+                    *a_runtime.lock().unwrap() = candidate;
+                    Ok(Some(()))
+                }
+            },
+        ));
+
+        a_started_rx.await.unwrap();
+
+        let b_generation = begin_token_request(&settings_update).await;
+        let b_gate = Arc::clone(&settings_update);
+        let b_runtime = Arc::clone(&runtime_token);
+        validate_with_consistent_proxy(
+            || std::future::ready(None),
+            |_| std::future::ready(Ok("token-b".to_owned())),
+            move |_, candidate| {
+                let b_gate = Arc::clone(&b_gate);
+                let b_runtime = Arc::clone(&b_runtime);
+                async move {
+                    let current_generation = b_gate.lock().await;
+                    assert_eq!(*current_generation, b_generation);
+                    *b_runtime.lock().unwrap() = candidate;
+                    Ok(Some(()))
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        release_a_tx.send(()).unwrap();
+        let a_error = slow_a.await.unwrap().unwrap_err();
+
+        assert_eq!(
+            a_error,
+            "A newer token replacement request superseded this one"
+        );
+        assert_eq!(*runtime_token.lock().unwrap(), "token-b");
+        assert_eq!(*a_validations.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn newer_failed_token_request_still_supersedes_slow_request() {
+        let settings_update = Arc::new(tokio::sync::Mutex::new(0_u64));
+        let runtime_token = Arc::new(std::sync::Mutex::new("old-token".to_owned()));
+        let (a_started_tx, a_started_rx) = tokio::sync::oneshot::channel();
+        let (release_a_tx, release_a_rx) = tokio::sync::oneshot::channel();
+        let a_started_tx = Arc::new(std::sync::Mutex::new(Some(a_started_tx)));
+        let release_a_rx = Arc::new(tokio::sync::Mutex::new(Some(release_a_rx)));
+
+        let a_generation = begin_token_request(&settings_update).await;
+        let a_gate = Arc::clone(&settings_update);
+        let a_runtime = Arc::clone(&runtime_token);
+        let slow_a = tokio::spawn(validate_with_consistent_proxy(
+            || std::future::ready(None),
+            move |_| {
+                let a_started_tx = Arc::clone(&a_started_tx);
+                let release_a_rx = Arc::clone(&release_a_rx);
+                async move {
+                    a_started_tx
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .send(())
+                        .unwrap();
+                    release_a_rx.lock().await.take().unwrap().await.unwrap();
+                    Ok("token-a".to_owned())
+                }
+            },
+            move |_, candidate| {
+                let a_gate = Arc::clone(&a_gate);
+                let a_runtime = Arc::clone(&a_runtime);
+                async move {
+                    let current_generation = a_gate.lock().await;
+                    if !token_commit_is_current(*current_generation, a_generation, &None, &None)? {
+                        return Ok(None);
+                    }
+                    *a_runtime.lock().unwrap() = candidate;
+                    Ok(Some(()))
+                }
+            },
+        ));
+
+        a_started_rx.await.unwrap();
+
+        let _b_generation = begin_token_request(&settings_update).await;
+        let b_error = validate_with_consistent_proxy(
+            || std::future::ready(None),
+            |_| std::future::ready(Err::<String, _>("validation failed".to_owned())),
+            |_, _| std::future::ready(Ok(Some(()))),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(b_error, "validation failed");
+
+        release_a_tx.send(()).unwrap();
+        let a_error = slow_a.await.unwrap().unwrap_err();
+
+        assert_eq!(
+            a_error,
+            "A newer token replacement request superseded this one"
+        );
+        assert_eq!(*runtime_token.lock().unwrap(), "old-token");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proxy_update_reconciles_config_and_network_after_waiter_is_aborted() {
+        let config = Arc::new(RwLock::new(Config {
+            token: Some("old-token".to_owned()),
+            ..Config::default()
+        }));
+        let network = Arc::new(RwLock::new(
+            crate::network::NetworkClients::from_config(&*config.read().await).unwrap(),
+        ));
+        let old_hiker = network.read().await.hiker.clone().unwrap();
+        let settings_update = Arc::new(tokio::sync::Mutex::new(0_u64));
+        let (persist_started_tx, persist_started_rx) = tokio::sync::oneshot::channel();
+        let (release_persist_tx, release_persist_rx) = std::sync::mpsc::channel();
+
+        let update = spawn_proxy_update(
+            Arc::clone(&settings_update),
+            Arc::clone(&config),
+            Arc::clone(&network),
+            Some("http://127.0.0.1:8080".to_owned()),
+            move |_| {
+                persist_started_tx.send(()).unwrap();
+                release_persist_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .map_err(|_| "persistence was not released".to_owned())?;
+                Ok(())
+            },
+        );
+        let waiter = tokio::spawn(update);
+
+        persist_started_rx.await.unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        release_persist_tx.send(()).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let proxy_committed =
+                    config.read().await.proxy_url.as_deref() == Some("http://127.0.0.1:8080/");
+                let new_hiker = network.read().await.hiker.clone().unwrap();
+                if proxy_committed && !Arc::ptr_eq(&old_hiker, &new_hiker) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owned proxy update should finish after waiter cancellation");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn token_commit_reconciles_config_and_network_after_waiter_is_aborted() {
+        let config = Arc::new(RwLock::new(Config {
+            token: Some("old-token".to_owned()),
+            ..Config::default()
+        }));
+        let network = Arc::new(RwLock::new(
+            crate::network::NetworkClients::from_config(&*config.read().await).unwrap(),
+        ));
+        let old_hiker = network.read().await.hiker.clone().unwrap();
+        let settings_update = Arc::new(tokio::sync::Mutex::new(0_u64));
+        let generation = begin_token_request(&settings_update).await;
+        let probe = HikerClient::with_proxy("new-token".to_owned(), None).unwrap();
+        let balance = Balance {
+            requests: 1,
+            rate: None,
+            amount: None,
+            currency: None,
+        };
+        let (persist_started_tx, persist_started_rx) = tokio::sync::oneshot::channel();
+        let (release_persist_tx, release_persist_rx) = std::sync::mpsc::channel();
+
+        let commit = spawn_token_commit(
+            Arc::clone(&settings_update),
+            generation,
+            None,
+            Arc::clone(&config),
+            Arc::clone(&network),
+            "new-token".to_owned(),
+            probe,
+            balance,
+            move |_| {
+                persist_started_tx.send(()).unwrap();
+                release_persist_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .map_err(|_| "persistence was not released".to_owned())?;
+                Ok(())
+            },
+        );
+        let waiter = tokio::spawn(commit);
+
+        persist_started_rx.await.unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        release_persist_tx.send(()).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let token_committed = config.read().await.token.as_deref() == Some("new-token");
+                let new_hiker = network.read().await.hiker.clone().unwrap();
+                if token_committed && !Arc::ptr_eq(&old_hiker, &new_hiker) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owned token commit should finish after waiter cancellation");
+    }
+
     #[test]
     fn invalid_loaded_proxy_is_cleared_in_memory_and_uses_direct_clients() {
         let mut config = Config {
@@ -727,6 +1089,34 @@ mod tests {
 
         assert_eq!(config.proxy_url, None);
         assert!(network.hiker.is_some());
+    }
+
+    #[test]
+    fn whitespace_only_loaded_proxy_is_cleared_in_memory() {
+        let mut config = Config {
+            proxy_url: Some("   \t  ".to_owned()),
+            ..Config::default()
+        };
+
+        let network = network_from_loaded_config(&mut config);
+        let state = super::ConfigState::from(&config);
+
+        assert_eq!(config.proxy_url, None);
+        assert!(!state.has_proxy);
+        assert_eq!(state.proxy_hint, None);
+        assert!(network.hiker.is_none());
+    }
+
+    #[test]
+    fn valid_loaded_proxy_is_normalized_in_memory_before_clients_are_built() {
+        let mut config = Config {
+            proxy_url: Some("  http://127.0.0.1:8080  ".to_owned()),
+            ..Config::default()
+        };
+
+        let _network = network_from_loaded_config(&mut config);
+
+        assert_eq!(config.proxy_url.as_deref(), Some("http://127.0.0.1:8080/"));
     }
 
     #[test]
