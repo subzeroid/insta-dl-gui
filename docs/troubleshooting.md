@@ -16,6 +16,14 @@ For a post link, the post may be deleted or belong to an inaccessible private ac
 
 A safety check: the app only downloads from official Instagram CDN hosts (`cdninstagram.com`, `fbcdn.net`). If you see this error on a normal post, the media URL likely expired between fetching and downloading — just retry; a fresh URL is minted per attempt.
 
+## The network proxy is unreachable or rejects authentication
+
+Open **Settings** and verify the proxy scheme, hostname, port and credentials. The app accepts HTTP, HTTPS, SOCKS5 and SOCKS5H proxy URLs, including credentials in the URL. Press **Apply proxy** again after correcting it; the saved proxy is used for new HikerAPI requests and Instagram CDN/media downloads without restarting the app.
+
+If the connection should work without a proxy, press **Clear proxy** and retry the operation. This restores explicit direct routing for new operations and ignores proxy environment variables. Downloads already in progress keep the proxy they started with, so cancel and restart an affected download if needed.
+
+Settings shows only a credential-redacted proxy hint, but the complete authenticated URL remains in the app's restrictive local config file. Never paste the raw proxy URL into an issue report; remove its username and password first.
+
 ## A download saved fewer files than expected
 
 Transient network errors and CDN server errors are retried automatically, up to three attempts per file. Permanent errors such as an expired URL, invalid media type, disk-space limit or cancellation are not retried. If at least one file was saved, the job finishes with the exact saved count; fix the reported cause if present and re-run to fetch the rest.

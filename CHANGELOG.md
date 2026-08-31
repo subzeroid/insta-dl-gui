@@ -6,6 +6,7 @@ All notable changes to insta-dl-gui are documented in this file.
 
 ### Added
 
+- Settings can route both HikerAPI and Instagram CDN traffic through one HTTP, HTTPS, SOCKS5, or SOCKS5H proxy, including authenticated proxy URLs, without restarting the app.
 - Explore now labels every loaded post as a photo, video, carousel, or unavailable post and can filter Posts by media type without losing selections hidden by the current filter.
 - Post and Reel previews can copy the description and canonical Instagram link with native clipboard feedback.
 - Completed Queue jobs can open an exact, ordered list of the media files created by that download, including previews, file sizes, and safe Open and Show in Finder actions.

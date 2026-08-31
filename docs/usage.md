@@ -114,6 +114,20 @@ Changing the download folder in **Settings** registers it as another Library roo
 
 Re-running the same profile skips everything already on disk — file stems are compared before each download. Only new content costs API requests. Use this to keep an archive in sync: run daily, pay only for new posts.
 
+## Configure a network proxy
+
+Use one shared proxy when HikerAPI or Instagram CDN media is unavailable on your connection:
+
+1. Open **Settings** and enter the proxy URL under **Network proxy**.
+2. Use an `http://`, `https://`, `socks5://` or `socks5h://` URL. Credentials can be included in the URL, for example `http://username:password@proxy.example:8080`.
+3. Press **Apply proxy**. New HikerAPI requests and Instagram CDN/media downloads use it immediately; no restart is needed.
+
+Downloads already in progress keep the network client and proxy they started with. New operations use the latest saved setting.
+
+Press **Clear proxy** to restore an explicit direct connection for new operations. Direct mode ignores proxy environment variables rather than inheriting them from the operating system.
+
+Settings displays only a credential-redacted hint, but the complete URL is stored in the app's restrictive local config file so authenticated proxies can reconnect after launch. Do not paste a raw authenticated proxy URL into an issue report; redact its username and password first.
+
 ## Queue
 
 The footer keeps download activity visible from Download, Explore, Library and Settings. It shows the active job count, current file and downloaded bytes; click anywhere on it to open **Queue**.
