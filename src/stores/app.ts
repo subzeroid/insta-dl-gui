@@ -6,6 +6,8 @@ export const useAppStore = defineStore("app", () => {
   const ready = ref(false);
   const hasToken = ref(false);
   const tokenHint = ref<string | null>(null);
+  const hasProxy = ref(false);
+  const proxyHint = ref<string | null>(null);
   const destDir = ref("");
   const sidecar = ref(true);
   const catalogWarning = ref<string | null>(null);
@@ -23,6 +25,8 @@ export const useAppStore = defineStore("app", () => {
   function applyState(s: ipc.ConfigState) {
     hasToken.value = s.has_token;
     tokenHint.value = s.token_hint;
+    hasProxy.value = s.has_proxy ?? false;
+    proxyHint.value = s.proxy_hint ?? null;
     destDir.value = s.dest_dir;
     sidecar.value = s.sidecar;
     catalogWarning.value = s.catalog_warning ?? null;
@@ -30,6 +34,10 @@ export const useAppStore = defineStore("app", () => {
 
   async function saveSettings(opts: { dest_dir?: string; sidecar?: boolean }) {
     applyState(await ipc.saveSettings(opts));
+  }
+
+  async function setProxy(proxyUrl: string | null) {
+    applyState(await ipc.setProxy(proxyUrl));
   }
 
   async function refreshBalance() {
@@ -51,12 +59,15 @@ export const useAppStore = defineStore("app", () => {
     ready,
     hasToken,
     tokenHint,
+    hasProxy,
+    proxyHint,
     destDir,
     sidecar,
     catalogWarning,
     balance,
     init,
     saveSettings,
+    setProxy,
     refreshBalance,
     replaceToken,
     onTokenSet,

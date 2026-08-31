@@ -8,6 +8,8 @@ const MOCK_LIBRARY_MEDIA_URL_RESOLVER = Symbol.for(
 export interface ConfigState {
   has_token: boolean;
   token_hint: string | null;
+  has_proxy: boolean;
+  proxy_hint: string | null;
   dest_dir: string;
   sidecar: boolean;
   catalog_warning?: string;
@@ -130,6 +132,10 @@ export type LibraryScanProgress =
 
 export async function configState(): Promise<ConfigState> {
   return invoke("config_state");
+}
+
+export async function setProxy(proxyUrl: string | null): Promise<ConfigState> {
+  return invoke("set_proxy", { proxyUrl });
 }
 
 export async function validateToken(token: string): Promise<Balance> {
