@@ -25,6 +25,10 @@ use crate::hiker::{Balance, HikerClient};
 use crate::jobs::{JobRegistry, ScanRegistry};
 use crate::network::NetworkClients;
 
+const TOKEN_VALIDATION_ATTEMPTS: usize = 3;
+const NETWORK_CHANGED_DURING_TOKEN_VALIDATION: &str =
+    "Network settings changed while validating the token; try again";
+
 #[derive(Debug, Clone, Serialize)]
 struct ConfigState {
     has_token: bool,
@@ -85,6 +89,39 @@ fn network_from_loaded_config(config: &mut Config) -> NetworkClients {
             NetworkClients::from_config(config).expect("direct network clients")
         }
     }
+}
+
+async fn validate_with_consistent_proxy<
+    Snapshot,
+    SnapshotFuture,
+    Validate,
+    ValidateFuture,
+    Commit,
+    CommitFuture,
+    Candidate,
+    Output,
+>(
+    mut snapshot_proxy: Snapshot,
+    mut validate: Validate,
+    mut commit_if_current: Commit,
+) -> Result<Output, String>
+where
+    Snapshot: FnMut() -> SnapshotFuture,
+    SnapshotFuture: std::future::Future<Output = Option<String>>,
+    Validate: FnMut(Option<String>) -> ValidateFuture,
+    ValidateFuture: std::future::Future<Output = Result<Candidate, String>>,
+    Commit: FnMut(Option<String>, Candidate) -> CommitFuture,
+    CommitFuture: std::future::Future<Output = Result<Option<Output>, String>>,
+{
+    for _ in 0..TOKEN_VALIDATION_ATTEMPTS {
+        let proxy_url = snapshot_proxy().await;
+        let candidate = validate(proxy_url.clone()).await?;
+        if let Some(output) = commit_if_current(proxy_url, candidate).await? {
+            return Ok(output);
+        }
+    }
+
+    Err(NETWORK_CHANGED_DURING_TOKEN_VALIDATION.to_owned())
 }
 
 fn save_settings_with_catalog(
@@ -191,22 +228,43 @@ async fn validate_token(
     token: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Balance, String> {
-    let _update = state.settings_update.lock().await;
     let token = token.trim().to_owned();
-    let proxy_url = state.cfg.read().await.proxy_url.clone();
-    let probe = HikerClient::with_proxy(token.clone(), proxy_url.as_deref())?;
-    let balance = probe.balance().await.map_err(err_string)?;
+    let app_state = state.inner();
+    validate_with_consistent_proxy(
+        || {
+            let config = Arc::clone(&app_state.cfg);
+            async move { config.read().await.proxy_url.clone() }
+        },
+        |proxy_url| {
+            let token = token.clone();
+            async move {
+                let probe = HikerClient::with_proxy(token, proxy_url.as_deref())?;
+                let balance = probe.balance().await.map_err(err_string)?;
+                Ok((balance, probe))
+            }
+        },
+        |proxy_url, (balance, probe)| {
+            let token = token.clone();
+            async move {
+                let _update = app_state.settings_update.lock().await;
+                if app_state.cfg.read().await.proxy_url != proxy_url {
+                    return Ok(None);
+                }
 
-    let config = Arc::clone(&state.cfg);
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut config = config.blocking_write();
-        commit_validated_token(&mut config, token, Config::save)
-    })
+                let config = Arc::clone(&app_state.cfg);
+                tauri::async_runtime::spawn_blocking(move || {
+                    let mut config = config.blocking_write();
+                    commit_validated_token(&mut config, token, Config::save)
+                })
+                .await
+                .map_err(|_| "Token could not be saved".to_owned())??;
+
+                app_state.network.write().await.hiker = Some(Arc::new(probe));
+                Ok(Some(balance))
+            }
+        },
+    )
     .await
-    .map_err(|_| "Token could not be saved".to_owned())??;
-
-    state.network.write().await.hiker = Some(Arc::new(probe));
-    Ok(balance)
 }
 
 #[tauri::command]
@@ -352,7 +410,8 @@ mod tests {
 
     use super::{
         change_proxy, commit_validated_token, network_from_loaded_config,
-        save_settings_on_blocking_thread, save_settings_with_catalog, Catalog, Config,
+        save_settings_on_blocking_thread, save_settings_with_catalog,
+        validate_with_consistent_proxy, Catalog, Config,
     };
     use tokio::sync::RwLock;
 
@@ -485,6 +544,175 @@ mod tests {
         assert_eq!(persisted.borrow().as_deref(), Some("new-token"));
         assert_eq!(config.token.as_deref(), Some("new-token"));
         assert!(state.has_token);
+    }
+
+    #[tokio::test]
+    async fn token_validation_does_not_hold_settings_gate_while_pending() {
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let started_tx = Arc::new(std::sync::Mutex::new(Some(started_tx)));
+        let release_rx = Arc::new(tokio::sync::Mutex::new(Some(release_rx)));
+        let validation_gate = Arc::clone(&gate);
+
+        let transaction = tokio::spawn(validate_with_consistent_proxy(
+            || std::future::ready(None),
+            move |_| {
+                let started_tx = Arc::clone(&started_tx);
+                let release_rx = Arc::clone(&release_rx);
+                async move {
+                    started_tx.lock().unwrap().take().unwrap().send(()).unwrap();
+                    release_rx.lock().await.take().unwrap().await.unwrap();
+                    Ok(())
+                }
+            },
+            move |_, candidate| {
+                let validation_gate = Arc::clone(&validation_gate);
+                async move {
+                    let _update = validation_gate.lock().await;
+                    Ok(Some(candidate))
+                }
+            },
+        ));
+
+        started_rx.await.unwrap();
+        let update = tokio::time::timeout(Duration::from_secs(1), gate.lock())
+            .await
+            .expect("settings gate should be available during validation");
+        drop(update);
+        release_tx.send(()).unwrap();
+
+        transaction.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn token_validation_retries_when_proxy_changes_before_commit() {
+        let old_proxy = Some("http://127.0.0.1:8080/".to_owned());
+        let new_proxy = Some("http://127.0.0.1:9090/".to_owned());
+        let current_proxy = Arc::new(std::sync::Mutex::new(old_proxy.clone()));
+        let validations = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let commits = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let snapshot_proxy = Arc::clone(&current_proxy);
+        let validation_proxy = Arc::clone(&current_proxy);
+        let recorded_validations = Arc::clone(&validations);
+        let replacement_proxy = new_proxy.clone();
+        let commit_proxy = Arc::clone(&current_proxy);
+        let recorded_commits = Arc::clone(&commits);
+        let result = validate_with_consistent_proxy(
+            move || {
+                let proxy = snapshot_proxy.lock().unwrap().clone();
+                std::future::ready(proxy)
+            },
+            move |proxy| {
+                recorded_validations.lock().unwrap().push(proxy.clone());
+                if proxy == old_proxy {
+                    *validation_proxy.lock().unwrap() = replacement_proxy.clone();
+                }
+                std::future::ready(Ok(proxy))
+            },
+            move |snapshot, candidate| {
+                let current = commit_proxy.lock().unwrap().clone();
+                let committed = if current == snapshot {
+                    recorded_commits.lock().unwrap().push(candidate.clone());
+                    Some(candidate)
+                } else {
+                    None
+                };
+                std::future::ready(Ok(committed))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, new_proxy);
+        assert_eq!(
+            *validations.lock().unwrap(),
+            vec![
+                Some("http://127.0.0.1:8080/".to_owned()),
+                Some("http://127.0.0.1:9090/".to_owned())
+            ]
+        );
+        assert_eq!(*commits.lock().unwrap(), vec![new_proxy]);
+    }
+
+    #[tokio::test]
+    async fn token_validation_with_unchanged_proxy_commits_once() {
+        let proxy = Some("http://127.0.0.1:8080/".to_owned());
+        let commits = Arc::new(std::sync::Mutex::new(0));
+        let recorded_commits = Arc::clone(&commits);
+
+        let result = validate_with_consistent_proxy(
+            || std::future::ready(proxy.clone()),
+            |snapshot| std::future::ready(Ok(snapshot)),
+            move |snapshot, candidate| {
+                *recorded_commits.lock().unwrap() += 1;
+                std::future::ready(Ok((snapshot == candidate).then_some(candidate)))
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, proxy);
+        assert_eq!(*commits.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn token_validation_proxy_churn_exhaustion_keeps_runtime_unchanged() {
+        #[derive(Clone)]
+        struct Runtime {
+            proxy: Option<String>,
+            token: String,
+            client: String,
+        }
+
+        let runtime = Arc::new(std::sync::Mutex::new(Runtime {
+            proxy: Some("http://127.0.0.1:8000/".to_owned()),
+            token: "old-token".to_owned(),
+            client: "old-client".to_owned(),
+        }));
+        let snapshot_runtime = Arc::clone(&runtime);
+        let validation_runtime = Arc::clone(&runtime);
+        let commit_runtime = Arc::clone(&runtime);
+        let attempts = Arc::new(std::sync::Mutex::new(0_u16));
+        let validation_attempts = Arc::clone(&attempts);
+
+        let error = validate_with_consistent_proxy(
+            move || {
+                let proxy = snapshot_runtime.lock().unwrap().proxy.clone();
+                std::future::ready(proxy)
+            },
+            move |_| {
+                let mut attempt = validation_attempts.lock().unwrap();
+                *attempt += 1;
+                validation_runtime.lock().unwrap().proxy =
+                    Some(format!("http://127.0.0.1:{}/", 8000 + *attempt));
+                std::future::ready(Ok("new-client".to_owned()))
+            },
+            move |snapshot, candidate| {
+                let mut runtime = commit_runtime.lock().unwrap();
+                let committed = if runtime.proxy == snapshot {
+                    runtime.token = "new-token".to_owned();
+                    runtime.client = candidate;
+                    Some(())
+                } else {
+                    None
+                };
+                std::future::ready(Ok(committed))
+            },
+        )
+        .await
+        .err()
+        .unwrap();
+
+        assert_eq!(
+            error,
+            "Network settings changed while validating the token; try again"
+        );
+        let runtime = runtime.lock().unwrap();
+        assert_eq!(runtime.token, "old-token");
+        assert_eq!(runtime.client, "old-client");
+        assert_eq!(*attempts.lock().unwrap(), 3);
     }
 
     #[test]
