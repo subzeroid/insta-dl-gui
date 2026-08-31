@@ -41,6 +41,25 @@ describe("DownloadScopeGroup", () => {
     expect(buttons[2].attributes("disabled")).toBeDefined();
   });
 
+  it("uses the primary treatment only for available download scopes", () => {
+    const partial = render({ shownCount: 0, selectedCount: 2, busy: false });
+    const partialButtons = partial.get('[role="group"]').findAll("button");
+
+    expect(partialButtons.map((button) => button.attributes("data-download-available"))).toEqual([
+      "true",
+      "false",
+      "true",
+    ]);
+    expect(partialButtons[0].classes()).toContain("download-scope-enabled");
+    expect(partialButtons[1].classes()).toContain("download-scope-disabled");
+    expect(partialButtons[2].classes()).toContain("download-scope-enabled");
+
+    const busy = render({ shownCount: 12, selectedCount: 3, busy: true });
+    const busyButtons = busy.get('[role="group"]').findAll("button");
+    expect(busyButtons.every((button) => button.attributes("data-download-available") === "false")).toBe(true);
+    expect(busyButtons.every((button) => button.classes().includes("download-scope-disabled"))).toBe(true);
+  });
+
   it("emits the clicked scope once", async () => {
     const wrapper = render({ shownCount: 12, selectedCount: 3, busy: false });
     const buttons = wrapper.findAll("button");

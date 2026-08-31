@@ -135,6 +135,11 @@ async function loadProfile(
 }
 
 function button(wrapper: ReturnType<typeof render>, label: string) {
+  const download = wrapper
+    .find("[role='group'][aria-label='Download']")
+    .findAll("button")
+    .find((item) => item.text() === label);
+  if (download) return download;
   const found = wrapper.findAll("button").find((item) => item.text() === label);
   if (!found) throw new Error(`Button not found: ${label}`);
   return found;
@@ -371,7 +376,7 @@ describe("ExplorerView async wiring", () => {
     });
 
     await wrapper.get('[data-post-filter="photos"]').trigger("click");
-    expect(wrapper.text()).toContain("No matching loaded posts.");
+    expect(wrapper.text()).toContain("No photos in 1 loaded post.");
     expect(button(wrapper, "Load more").exists()).toBe(true);
 
     await button(wrapper, "Reels").trigger("click");
@@ -385,14 +390,17 @@ describe("ExplorerView async wiring", () => {
     const cases = [
       {
         filter: "photos",
+        label: "photos",
         posts: [videoPost("video", "https://cdninstagram.com/video")],
       },
       {
         filter: "videos",
+        label: "videos",
         posts: [photoPost("photo", "https://cdninstagram.com/photo")],
       },
       {
         filter: "carousels",
+        label: "carousels",
         posts: [photoPost("photo", "https://cdninstagram.com/photo")],
       },
     ] as const;
@@ -407,7 +415,7 @@ describe("ExplorerView async wiring", () => {
 
       await wrapper.get(`[data-post-filter="${entry.filter}"]`).trigger("click");
       expect(wrapper.findAll("[data-media-id]")).toHaveLength(0);
-      expect(wrapper.text()).toContain("No matching loaded posts.");
+      expect(wrapper.text()).toContain(`No ${entry.label} in 1 loaded post.`);
       expect(wrapper.text()).not.toContain("No posts yet.");
       expect(button(wrapper, "Shown 0").attributes("disabled")).toBeDefined();
       expect(button(wrapper, "Load more").exists()).toBe(true);
@@ -572,6 +580,19 @@ describe("ExplorerView async wiring", () => {
     expect(wrapper.text()).not.toContain("Download all posts");
     expect(wrapper.text()).not.toContain("Download shown (");
     expect(wrapper.text()).not.toContain("Download all stories");
+  });
+
+  it("keeps tabs, the Posts filter, and download scopes in one toolbar", async () => {
+    const wrapper = render();
+    await loadProfile(wrapper, {
+      ...preview,
+      recent_posts: [photoPost("photo", "https://cdninstagram.com/photo")],
+    });
+
+    const toolbar = wrapper.get("[data-explorer-toolbar]");
+    expect(toolbar.find('[data-explore-tabs]').exists()).toBe(true);
+    expect(toolbar.find('[aria-label="Posts filter"]').exists()).toBe(true);
+    expect(toolbar.find('[aria-label="Download"]').exists()).toBe(true);
   });
 
   it("suppresses duplicate group actions, disables the group, and retries after failure", async () => {

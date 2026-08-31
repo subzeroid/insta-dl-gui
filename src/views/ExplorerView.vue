@@ -87,6 +87,12 @@ const gridPosts = computed(() => {
       : "carousel";
   return sourcePosts.value.filter((post) => classifyPost(post).kind === kind);
 });
+const postsEmptyMessage = computed(() => {
+  if (postFilter.value === "all") return "No posts yet.";
+  const filterLabel = postFilters.find((filter) => filter.id === postFilter.value)?.label.toLowerCase();
+  const loadedCount = sourcePosts.value.length;
+  return `No ${filterLabel ?? "matching posts"} in ${loadedCount} loaded ${loadedCount === 1 ? "post" : "posts"}.`;
+});
 function isDownloadablePost(post: Post): boolean {
   return (
     Array.isArray(post.resources) &&
@@ -641,24 +647,50 @@ onUnmounted(() => {
       </div>
 
       <template v-if="!preview.profile.is_private">
-        <!-- Tabs -->
-        <div class="flex items-center gap-1">
-          <button
-            v-for="t in tabs"
-            :key="t.id"
-            type="button"
-            class="rounded-lg px-3 py-1.5 text-sm transition-colors"
-            :class="
-              activeTab === t.id
-                ? 'bg-surface-3 text-slate-100'
-                : 'text-slate-400 hover:bg-surface-2 hover:text-slate-200'
-            "
-            @click="selectTab(t.id)"
+        <!-- Explore controls -->
+        <div data-explorer-toolbar class="flex flex-wrap items-center gap-x-2 gap-y-2">
+          <div data-explore-tabs class="flex shrink-0 items-center gap-1">
+            <button
+              v-for="t in tabs"
+              :key="t.id"
+              type="button"
+              class="rounded-lg px-2.5 py-1.5 text-sm transition-colors"
+              :class="
+                activeTab === t.id
+                  ? 'bg-surface-3 text-slate-100'
+                  : 'text-slate-400 hover:bg-surface-2 hover:text-slate-200'
+              "
+              @click="selectTab(t.id)"
+            >
+              {{ t.label }}
+            </button>
+          </div>
+          <div
+            v-if="activeTab === 'posts'"
+            role="group"
+            aria-label="Posts filter"
+            class="inline-flex shrink-0 overflow-hidden rounded-md border border-line bg-surface-1"
           >
-            {{ t.label }}
-          </button>
+            <button
+              v-for="filter in postFilters"
+              :key="filter.id"
+              type="button"
+              :data-post-filter="filter.id"
+              :aria-pressed="postFilter === filter.id"
+              :aria-current="postFilter === filter.id ? 'true' : undefined"
+              class="border-r border-line px-2 py-1 text-xs text-slate-400 transition-colors last:border-r-0"
+              :class="
+                postFilter === filter.id
+                  ? 'bg-accent/15 text-white ring-1 ring-inset ring-accent'
+                  : 'hover:bg-surface-2 hover:text-slate-200'
+              "
+              @click="postFilter = filter.id"
+            >
+              {{ filter.label }}
+            </button>
+          </div>
           <DownloadScopeGroup
-            class="ml-auto"
+            class="ml-auto shrink-0"
             :shown-count="shownCount"
             :selected-count="selectedCount"
             :busy="activeGroupBusy"
@@ -669,27 +701,6 @@ onUnmounted(() => {
             @download-shown="downloadSnapshot('shown')"
             @download-selected="downloadSnapshot('selected')"
           />
-        </div>
-
-        <div
-          v-if="activeTab === 'posts'"
-          role="group"
-          aria-label="Posts filter"
-          class="inline-flex overflow-hidden rounded-md border border-line bg-surface-1"
-        >
-          <button
-            v-for="filter in postFilters"
-            :key="filter.id"
-            type="button"
-            :data-post-filter="filter.id"
-            :aria-pressed="postFilter === filter.id"
-            :aria-current="postFilter === filter.id ? 'true' : undefined"
-            class="border-r border-line px-2.5 py-1 text-xs text-slate-300 transition-colors last:border-r-0"
-            :class="postFilter === filter.id ? 'bg-surface-3 text-slate-100' : 'hover:bg-surface-2'"
-            @click="postFilter = filter.id"
-          >
-            {{ filter.label }}
-          </button>
         </div>
 
         <!-- Posts / Reels grid -->
@@ -771,11 +782,7 @@ onUnmounted(() => {
             class="card flex items-center justify-center p-12 text-sm text-slate-500"
           >
             {{
-              activeTab === "reels"
-                ? "No reels yet."
-                : postFilter === "all"
-                  ? "No posts yet."
-                  : "No matching loaded posts."
+              activeTab === "reels" ? "No reels yet." : postsEmptyMessage
             }}
           </div>
           <div v-if="activeTab === 'posts' && preview.end_cursor" class="flex justify-center">
