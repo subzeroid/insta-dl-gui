@@ -7,6 +7,11 @@ const props = defineProps<{ job: JobView }>();
 const emit = defineEmits<{ inspect: [job: JobView, origin: HTMLElement] }>();
 const jobs = useJobsStore();
 
+const timestampFormatter = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "medium",
+});
+
 const active = computed(() => props.job.state === "downloading" || props.job.state === "fetching");
 const resultCount = computed(() => props.job.resultCount ?? 0);
 const catalogWarnings = computed(() => props.job.catalogWarnings ?? 0);
@@ -41,6 +46,14 @@ const statusText = computed(() => {
       return "failed";
   }
 });
+
+function formatTimestamp(timestamp: number) {
+  return timestampFormatter.format(timestamp);
+}
+
+function isoTimestamp(timestamp: number) {
+  return new Date(timestamp).toISOString();
+}
 
 function inspect(event: MouseEvent | KeyboardEvent) {
   if (!actionable.value) return;
@@ -97,6 +110,32 @@ function onKeydown(event: KeyboardEvent) {
         >
           Cancel
         </button>
+      </span>
+    </div>
+
+    <div
+      data-job-timing
+      class="mt-1.5 flex flex-wrap items-center gap-x-2 text-xs tabular-nums text-slate-500"
+    >
+      <span>
+        Started:
+        <time
+          v-if="job.startedAt !== undefined"
+          data-job-started-at
+          :datetime="isoTimestamp(job.startedAt)"
+        >{{ formatTimestamp(job.startedAt) }}</time>
+        <template v-else>—</template>
+      </span>
+      <span aria-hidden="true">·</span>
+      <span v-if="active">In progress</span>
+      <span v-else>
+        Finished:
+        <time
+          v-if="job.finishedAt !== undefined"
+          data-job-finished-at
+          :datetime="isoTimestamp(job.finishedAt)"
+        >{{ formatTimestamp(job.finishedAt) }}</time>
+        <template v-else>—</template>
       </span>
     </div>
 

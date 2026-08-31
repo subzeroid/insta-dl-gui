@@ -33,9 +33,12 @@ const {
   profilePreview: preview,
   activeTab,
   postFilter,
+  postsPage,
+  postsPageSize,
   reels,
   reelsCursor,
   reelsLoaded,
+  reelsPage,
   stories,
   storiesError,
   storiesLoading,
@@ -134,6 +137,21 @@ const allDownloadTitle = computed(() =>
     ? "Refreshes and downloads all current Stories; uses additional API requests."
     : `Fetch and download the complete ${activeTab.value === "posts" ? "Posts" : "Reels"} archive; uses API requests.`,
 );
+const postsTotalPages = computed(() => {
+  const totalItems = preview.value?.profile.media_count;
+  if (totalItems === undefined || postsPageSize.value <= 0) return null;
+  return Math.max(postsPage.value, Math.ceil(totalItems / postsPageSize.value));
+});
+const paginationStatus = computed(() => {
+  if (activeTab.value === "posts" && postsPage.value > 0) {
+    const total = postsTotalPages.value;
+    return total === null ? `Page ${postsPage.value}` : `Page ${postsPage.value} of ${total}`;
+  }
+  if (activeTab.value === "reels" && reelsPage.value > 0) {
+    return `Page ${reelsPage.value}`;
+  }
+  return null;
+});
 
 function previewMediaLabel(post: Post): string {
   const display = classifyPost(post);
@@ -792,13 +810,29 @@ onUnmounted(() => {
               activeTab === "reels" ? "No reels yet." : postsEmptyMessage
             }}
           </div>
-          <div v-if="activeTab === 'posts' && preview.end_cursor" class="flex justify-center">
-            <button class="btn-secondary" :disabled="loadingMore" @click="loadMore">
+          <div
+            v-if="paginationStatus"
+            class="flex flex-wrap items-center justify-center gap-3"
+          >
+            <span
+              data-pagination-status
+              class="text-xs tabular-nums text-slate-500"
+              aria-live="polite"
+            >{{ paginationStatus }}</span>
+            <button
+              v-if="activeTab === 'posts' && preview.end_cursor"
+              class="btn-secondary"
+              :disabled="loadingMore"
+              @click="loadMore"
+            >
               {{ loadingMore ? "Loading…" : "Load more" }}
             </button>
-          </div>
-          <div v-if="activeTab === 'reels' && reelsCursor" class="flex justify-center">
-            <button class="btn-secondary" :disabled="reelsLoading" @click="loadReels(reelsCursor)">
+            <button
+              v-else-if="activeTab === 'reels' && reelsCursor"
+              class="btn-secondary"
+              :disabled="reelsLoading"
+              @click="loadReels(reelsCursor)"
+            >
               {{ reelsLoading ? "Loading…" : "Load more" }}
             </button>
           </div>

@@ -160,7 +160,8 @@ function finishJob(jobId: string, state: "done" | "failed" | "cancelled" = "done
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  ipc.remoteMediaUrl.mockImplementation((url: string) => `remote-media:${url}`);
   ipc.fetchStories.mockResolvedValue([]);
 });
 
@@ -384,6 +385,59 @@ describe("ExplorerView async wiring", () => {
     expect(wrapper.find("[data-post-filter]").exists()).toBe(false);
     await button(wrapper, "Stories").trigger("click");
     expect(wrapper.find("[data-post-filter]").exists()).toBe(false);
+  });
+
+  it("shows the current Posts page and total pages calculated from the profile count", async () => {
+    const firstPage = Array.from({ length: 12 }, (_, index) =>
+      photoPost(`p${index}`, `https://cdninstagram.com/p${index}`),
+    );
+    const secondPage = Array.from({ length: 12 }, (_, index) =>
+      photoPost(`p${index + 12}`, `https://cdninstagram.com/p${index + 12}`),
+    );
+    const wrapper = render();
+    await loadProfile(wrapper, {
+      ...preview,
+      profile: { ...preview.profile, media_count: 25 },
+      recent_posts: firstPage,
+      end_cursor: "posts-page-2",
+    });
+
+    expect(wrapper.get("[data-pagination-status]").text()).toBe("Page 1 of 3");
+    ipc.fetchProfile.mockResolvedValueOnce({
+      ...preview,
+      profile: { ...preview.profile, media_count: 25 },
+      recent_posts: secondPage,
+      end_cursor: "posts-page-3",
+    });
+    await button(wrapper, "Load more").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get("[data-pagination-status]").text()).toBe("Page 2 of 3");
+  });
+
+  it("shows only the current Reels page because the clips API has no reels total", async () => {
+    ipc.fetchReels
+      .mockResolvedValueOnce({
+        posts: [videoPost("r1", "https://cdninstagram.com/r1")],
+        end_cursor: "reels-page-2",
+      })
+      .mockResolvedValueOnce({
+        posts: [videoPost("r2", "https://cdninstagram.com/r2")],
+        end_cursor: null,
+      });
+    const wrapper = render();
+    await loadProfile(wrapper, {
+      ...preview,
+      profile: { ...preview.profile, media_count: 25 },
+    });
+
+    await button(wrapper, "Reels").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-pagination-status]").text()).toBe("Page 1");
+
+    await button(wrapper, "Load more").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-pagination-status]").text()).toBe("Page 2");
   });
 
   it("uses a filter-specific empty state for every empty Posts media filter", async () => {

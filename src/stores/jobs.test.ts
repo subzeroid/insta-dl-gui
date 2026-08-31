@@ -1,5 +1,5 @@
 import { createPinia, setActivePinia } from "pinia";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { JobProgress } from "../lib/ipc";
 
@@ -23,6 +23,79 @@ beforeEach(() => {
     ipc.listener = listener;
     return () => {};
   });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("jobs timing metadata", () => {
+  it("captures the placeholder start and the first terminal event without rewriting either", async () => {
+    vi.useFakeTimers();
+    const startedAt = Date.parse("2026-09-01T09:10:11.000Z");
+    const finishedAt = Date.parse("2026-09-01T09:12:13.000Z");
+    const store = useJobsStore();
+
+    vi.setSystemTime(startedAt);
+    store.addPlaceholder("timed", "Timed download");
+    expect(store.jobs.get("timed")?.startedAt).toBe(startedAt);
+    expect(store.jobs.get("timed")?.finishedAt).toBeUndefined();
+
+    await store.init();
+    vi.setSystemTime(Date.parse("2026-09-01T09:11:12.000Z"));
+    ipc.listener?.({
+      job_id: "timed",
+      state: "downloading",
+      label: "Timed download",
+      current_file: 1,
+      total_files: 2,
+    });
+    expect(store.jobs.get("timed")?.startedAt).toBe(startedAt);
+    expect(store.jobs.get("timed")?.finishedAt).toBeUndefined();
+
+    vi.setSystemTime(finishedAt);
+    ipc.listener?.({
+      job_id: "timed",
+      state: "done",
+      label: "Timed download",
+      count: 2,
+    });
+    expect(store.jobs.get("timed")?.finishedAt).toBe(finishedAt);
+
+    vi.setSystemTime(Date.parse("2026-09-01T09:15:16.000Z"));
+    ipc.listener?.({
+      job_id: "timed",
+      state: "done",
+      label: "Timed download",
+      count: 2,
+    });
+    expect(store.jobs.get("timed")).toMatchObject({ startedAt, finishedAt });
+  });
+
+  it.each(["done", "failed", "cancelled"] as const)(
+    "timestamps an early %s event as both the observed start and finish",
+    async (state) => {
+      vi.useFakeTimers();
+      const observedAt = Date.parse("2026-09-01T10:20:30.000Z");
+      vi.setSystemTime(observedAt);
+      const store = useJobsStore();
+      await store.init();
+
+      const progress: JobProgress = {
+        job_id: `early-${state}`,
+        state,
+        label: "Early terminal event",
+        ...(state === "done" ? { count: 1 } : {}),
+        ...(state === "failed" ? { error: "network" } : {}),
+      };
+      ipc.listener?.(progress);
+
+      expect(store.jobs.get(`early-${state}`)).toMatchObject({
+        startedAt: observedAt,
+        finishedAt: observedAt,
+      });
+    },
+  );
 });
 
 describe("jobs warning state", () => {
