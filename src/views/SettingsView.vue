@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "../stores/app";
 import { formatBalance } from "../lib/ipc";
@@ -13,13 +13,19 @@ const tokenBusy = ref(false);
 const tokenError = ref<string | null>(null);
 const tokenSuccess = ref<string | null>(null);
 const replacementProxy = ref("");
+const proxyInput = ref<HTMLInputElement | null>(null);
 const proxyError = ref<string | null>(null);
 const proxySuccess = ref<string | null>(null);
-const PROXY_VALIDATION_ERROR = "Proxy URL must use a supported scheme.";
+const PROXY_VALIDATION_ERROR = "Enter a valid HTTP, HTTPS, SOCKS5, or SOCKS5H proxy URL";
 const PROXY_SAVE_ERROR = "Proxy settings could not be saved. The previous proxy is still active.";
+let proxyViewMounted = true;
 
 onMounted(() => {
   sidecar.value = app.sidecar;
+});
+
+onBeforeUnmount(() => {
+  proxyViewMounted = false;
 });
 
 async function changeSidecar(event: Event) {
@@ -81,9 +87,8 @@ async function applyProxy() {
     replacementProxy.value = "";
     proxySuccess.value = "Proxy applied to HikerAPI and Instagram CDN";
   } catch (cause) {
-    proxyError.value = cause instanceof Error && cause.message === PROXY_VALIDATION_ERROR
-      ? cause.message
-      : PROXY_SAVE_ERROR;
+    const message = cause instanceof Error ? cause.message : cause;
+    proxyError.value = message === PROXY_VALIDATION_ERROR ? message : PROXY_SAVE_ERROR;
   }
 }
 
@@ -95,6 +100,10 @@ async function clearProxy() {
     await app.setProxy(null);
     replacementProxy.value = "";
     proxySuccess.value = "Proxy cleared";
+    if (proxyViewMounted) {
+      await nextTick();
+      proxyInput.value?.focus();
+    }
   } catch {
     proxyError.value = PROXY_SAVE_ERROR;
   }
@@ -160,9 +169,10 @@ async function clearProxy() {
       <p id="proxy-support" class="text-xs text-slate-500">
         Supports HTTP, HTTPS, SOCKS5, SOCKS5H including credentials.
       </p>
-      <div class="flex flex-wrap gap-2">
+      <div data-testid="proxy-controls" class="flex flex-col gap-2 sm:flex-row">
         <input
           v-model="replacementProxy"
+          ref="proxyInput"
           id="network-proxy"
           name="network-proxy"
           class="input min-w-0 flex-1 font-mono text-xs"

@@ -46,7 +46,7 @@ const MAX_SHORTCODE_BYTES = 256;
 const ALLOWED_CDN_HOSTS = ["cdninstagram.com", "fbcdn.net"];
 const MOCK_PROFILE_PK_START = 9_000_000;
 const MOCK_REEL_PK_START = 9_100_000;
-const PROXY_VALIDATION_ERROR = "Proxy URL must use a supported scheme.";
+const PROXY_VALIDATION_ERROR = "Enter a valid HTTP, HTTPS, SOCKS5, or SOCKS5H proxy URL";
 
 const AVATAR =
   "data:image/svg+xml," +
@@ -769,7 +769,7 @@ export function installTauriMock(): void {
   }
 
   function setMockProxy(proxyUrl: unknown): ConfigState {
-    if (proxyUrl === null) {
+    if (proxyUrl === null || (typeof proxyUrl === "string" && !proxyUrl.trim())) {
       config.has_proxy = false;
       config.proxy_hint = null;
       return configState();
@@ -783,21 +783,20 @@ export function installTauriMock(): void {
       throw new Error(PROXY_VALIDATION_ERROR);
     }
     const scheme = parsed.protocol.slice(0, -1).toLowerCase();
-    const authority = trimmedProxy.slice(trimmedProxy.indexOf("://") + 3).split(/[/?#]/, 1)[0];
-    const port = authority.match(/:(\d+)$/)?.[1];
     if (
       !["http", "https", "socks5", "socks5h"].includes(scheme) ||
       !parsed.hostname ||
-      !port ||
       (parsed.pathname !== "/" && parsed.pathname !== "") ||
       parsed.search ||
-      parsed.hash
+      parsed.hash ||
+      parsed.port === "0" ||
+      ((scheme === "socks5" || scheme === "socks5h") && !parsed.port)
     ) {
       throw new Error(PROXY_VALIDATION_ERROR);
     }
     const userInfo = parsed.username || parsed.password ? "***@" : "";
     config.has_proxy = true;
-    config.proxy_hint = `${scheme}://${userInfo}${parsed.hostname}:${port}/`;
+    config.proxy_hint = `${scheme}://${userInfo}${parsed.host}/`;
     return configState();
   }
 

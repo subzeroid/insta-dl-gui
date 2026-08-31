@@ -2,6 +2,7 @@
 
 import { createPinia, setActivePinia } from "pinia";
 import { flushPromises, mount } from "@vue/test-utils";
+import { nextTick } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const ipc = vi.hoisted(() => ({
@@ -123,6 +124,9 @@ describe("Settings Library registration warning", () => {
     expect(input.attributes("aria-describedby")).toBe(
       "proxy-explanation proxy-current proxy-support",
     );
+    expect(wrapper.get("[data-testid='proxy-controls']").classes()).toEqual(
+      expect.arrayContaining(["flex-col", "sm:flex-row"]),
+    );
     expect(input.element.value).toBe("");
     expect(wrapper.html()).not.toContain("alice");
     expect(wrapper.html()).not.toContain("secret");
@@ -170,6 +174,7 @@ describe("Settings Library registration warning", () => {
 
     await wrapper.get("[data-testid='clear-proxy']").trigger("click");
     await flushPromises();
+    await nextTick();
 
     expect(ipc.setProxy).toHaveBeenCalledWith(null);
     expect(app.hasProxy).toBe(false);
@@ -177,10 +182,13 @@ describe("Settings Library registration warning", () => {
     expect(wrapper.get("[data-testid='proxy-hint']").text()).toBe("Direct connection");
     expect(wrapper.find("[data-testid='clear-proxy']").exists()).toBe(false);
     expect(wrapper.get("[data-testid='proxy-success']").text()).toBe("Proxy cleared");
+    expect(document.activeElement).toBe(wrapper.get<HTMLInputElement>("#network-proxy").element);
   });
 
   it("keeps the configured proxy and entered replacement when applying fails", async () => {
-    ipc.setProxy.mockRejectedValue(new Error("Proxy URL must use a supported scheme."));
+    ipc.setProxy.mockRejectedValue(
+      new Error("Enter a valid HTTP, HTTPS, SOCKS5, or SOCKS5H proxy URL"),
+    );
     const { app, wrapper } = await renderSettings();
     const input = wrapper.get<HTMLInputElement>("#network-proxy");
     await input.setValue("bad-proxy");
@@ -194,7 +202,20 @@ describe("Settings Library registration warning", () => {
     expect(app.proxyHint).toBe("socks5h://***@proxy.example:1080/");
     expect(input.element.value).toBe("bad-proxy");
     expect(wrapper.get("[data-testid='proxy-error']").text()).toBe(
-      "Proxy URL must use a supported scheme.",
+      "Enter a valid HTTP, HTTPS, SOCKS5, or SOCKS5H proxy URL",
+    );
+  });
+
+  it("shows the production validation error when Tauri rejects with a string", async () => {
+    ipc.setProxy.mockRejectedValue("Enter a valid HTTP, HTTPS, SOCKS5, or SOCKS5H proxy URL");
+    const { wrapper } = await renderSettings();
+    await wrapper.get<HTMLInputElement>("#network-proxy").setValue("bad-proxy");
+
+    await wrapper.get("[data-testid='proxy-form']").trigger("submit");
+    await flushPromises();
+
+    expect(wrapper.get("[data-testid='proxy-error']").text()).toBe(
+      "Enter a valid HTTP, HTTPS, SOCKS5, or SOCKS5H proxy URL",
     );
   });
 
@@ -218,7 +239,7 @@ describe("Settings Library registration warning", () => {
     expect(wrapper.get("[data-testid='clear-proxy']").attributes("disabled")).toBeDefined();
     expect(document.activeElement).toBe(input.element);
 
-    pending.reject(new Error("Proxy URL is invalid."));
+    pending.reject(new Error("Enter a valid HTTP, HTTPS, SOCKS5, or SOCKS5H proxy URL"));
     await flushPromises();
     expect(ipc.setProxy).toHaveBeenCalledOnce();
     expect(document.activeElement).toBe(input.element);
@@ -351,7 +372,7 @@ describe("Settings Library registration warning", () => {
 
     const second = await renderSettings(pinia);
     const input = second.wrapper.get<HTMLInputElement>("#network-proxy");
-    await second.wrapper.get("[data-testid='proxy-form']").trigger("submit");
+    await expect(second.app.setProxy("http://ignored-proxy.example:8080")).resolves.toBeUndefined();
 
     expect(ipc.setProxy).toHaveBeenCalledOnce();
     expect(input.attributes("readonly")).toBeDefined();
@@ -374,7 +395,7 @@ describe("Settings Library registration warning", () => {
   });
 
   it("maps unexpected proxy apply errors to the fixed safe message", async () => {
-    ipc.setProxy.mockRejectedValue(new Error("failed /Users/private socks5h://alice:secret@proxy.example"));
+    ipc.setProxy.mockRejectedValue("failed /Users/private socks5h://alice:secret@proxy.example");
     const { wrapper } = await renderSettings();
     await wrapper.get<HTMLInputElement>("#network-proxy").setValue("http://proxy.example:8080");
 

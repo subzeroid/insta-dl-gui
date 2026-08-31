@@ -47,29 +47,44 @@ afterEach(() => {
 });
 
 describe("profile pagination mock", () => {
-  it("persists a safely redacted proxy through the IPC facade", async () => {
+  it("mirrors backend proxy URL validation and redaction", async () => {
     installTauriMock();
 
     await expect(configState()).resolves.toMatchObject({ has_proxy: false, proxy_hint: null });
 
-    const applied = await setProxy("  socks5h://alice:secret@proxy.example:1080  ");
-    expect(applied).toMatchObject({
-      has_proxy: true,
-      proxy_hint: "socks5h://***@proxy.example:1080/",
-    });
-    expect(JSON.stringify(applied)).not.toContain("alice");
-    expect(JSON.stringify(applied)).not.toContain("secret");
-    await expect(configState()).resolves.toMatchObject({
-      has_proxy: true,
-      proxy_hint: "socks5h://***@proxy.example:1080/",
-    });
+    for (const [url, hint, secret] of [
+      ["  http://proxy.example  ", "http://proxy.example/", ""],
+      ["https://proxy.example", "https://proxy.example/", ""],
+      ["http://proxy.example:80", "http://proxy.example/", ""],
+      ["https://proxy.example:443", "https://proxy.example/", ""],
+      ["socks5h://alice:secret@proxy.example:1080", "socks5h://***@proxy.example:1080/", "secret"],
+      ["socks5://alice@proxy.example:1080", "socks5://***@proxy.example:1080/", "alice"],
+      ["socks5h://alice%40example:se%2Fcret@proxy.example:1080", "socks5h://***@proxy.example:1080/", "se%2Fcret"],
+      ["socks5://[::1]:1080", "socks5://[::1]:1080/", ""],
+    ]) {
+      const applied = await setProxy(url);
+      expect(applied).toMatchObject({ has_proxy: true, proxy_hint: hint });
+      if (secret) expect(JSON.stringify(applied)).not.toContain(secret);
+    }
 
-    await expect(setProxy("http://proxy.example:80")).resolves.toMatchObject({
-      has_proxy: true,
-      proxy_hint: "http://proxy.example:80/",
-    });
+    for (const url of [
+      "ftp://proxy.example:21",
+      "http://",
+      "http://proxy.example:0",
+      "https://proxy.example:0",
+      "socks5://proxy.example",
+      "socks5h://proxy.example:0",
+      "https://proxy.example/path",
+      "https://proxy.example/?query=yes",
+      "https://proxy.example/#fragment",
+    ]) {
+      await expect(setProxy(url)).rejects.toThrow(
+        "Enter a valid HTTP, HTTPS, SOCKS5, or SOCKS5H proxy URL",
+      );
+    }
 
     await expect(setProxy(null)).resolves.toMatchObject({ has_proxy: false, proxy_hint: null });
+    await expect(setProxy("   ")).resolves.toMatchObject({ has_proxy: false, proxy_hint: null });
     await expect(configState()).resolves.toMatchObject({ has_proxy: false, proxy_hint: null });
   });
 
