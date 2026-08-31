@@ -648,59 +648,66 @@ onUnmounted(() => {
 
       <template v-if="!preview.profile.is_private">
         <!-- Explore controls -->
-        <div data-explorer-toolbar class="flex flex-wrap items-center gap-x-2 gap-y-2">
-          <div data-explore-tabs class="flex shrink-0 items-center gap-1">
-            <button
-              v-for="t in tabs"
-              :key="t.id"
-              type="button"
-              class="rounded-lg px-2.5 py-1.5 text-sm transition-colors"
-              :class="
-                activeTab === t.id
-                  ? 'bg-surface-3 text-slate-100'
-                  : 'text-slate-400 hover:bg-surface-2 hover:text-slate-200'
-              "
-              @click="selectTab(t.id)"
-            >
-              {{ t.label }}
-            </button>
+        <div class="space-y-2">
+          <div data-explorer-toolbar class="flex flex-wrap items-center gap-x-2 gap-y-2">
+            <div data-explore-tabs class="flex shrink-0 items-center gap-1">
+              <button
+                v-for="t in tabs"
+                :key="t.id"
+                type="button"
+                class="rounded-lg px-2.5 py-1.5 text-sm transition-colors"
+                :class="
+                  activeTab === t.id
+                    ? 'bg-surface-3 text-slate-100'
+                    : 'text-slate-400 hover:bg-surface-2 hover:text-slate-200'
+                "
+                @click="selectTab(t.id)"
+              >
+                {{ t.label }}
+              </button>
+            </div>
+            <DownloadScopeGroup
+              class="ml-auto shrink-0"
+              :shown-count="shownCount"
+              :selected-count="selectedCount"
+              :busy="activeGroupBusy"
+              :all-title="allDownloadTitle"
+              :shown-disabled-reason="shownDisabledReason"
+              :selected-disabled-reason="selectedDisabledReason"
+              @download-all="downloadAll"
+              @download-shown="downloadSnapshot('shown')"
+              @download-selected="downloadSnapshot('selected')"
+            />
           </div>
           <div
             v-if="activeTab === 'posts'"
-            role="group"
-            aria-label="Posts filter"
-            class="inline-flex shrink-0 overflow-hidden rounded-md border border-line bg-surface-1"
+            data-post-filter-row
+            class="flex"
           >
-            <button
-              v-for="filter in postFilters"
-              :key="filter.id"
-              type="button"
-              :data-post-filter="filter.id"
-              :aria-pressed="postFilter === filter.id"
-              :aria-current="postFilter === filter.id ? 'true' : undefined"
-              class="border-r border-line px-2 py-1 text-xs text-slate-400 transition-colors last:border-r-0"
-              :class="
-                postFilter === filter.id
-                  ? 'bg-accent/15 text-white ring-1 ring-inset ring-accent'
-                  : 'hover:bg-surface-2 hover:text-slate-200'
-              "
-              @click="postFilter = filter.id"
+            <div
+              role="group"
+              aria-label="Posts filter"
+              class="inline-flex shrink-0 overflow-hidden rounded-md border border-line bg-surface-1"
             >
-              {{ filter.label }}
-            </button>
+              <button
+                v-for="filter in postFilters"
+                :key="filter.id"
+                type="button"
+                :data-post-filter="filter.id"
+                :aria-pressed="postFilter === filter.id"
+                :aria-current="postFilter === filter.id ? 'true' : undefined"
+                class="border-l border-line px-2 py-1 text-xs text-slate-400 transition-colors first:border-l-0"
+                :class="
+                  postFilter === filter.id
+                    ? 'bg-accent/15 text-white shadow-[inset_0_-2px_0_var(--color-accent)]'
+                    : 'hover:bg-surface-2 hover:text-slate-200'
+                "
+                @click="postFilter = filter.id"
+              >
+                {{ filter.label }}
+              </button>
+            </div>
           </div>
-          <DownloadScopeGroup
-            class="ml-auto shrink-0"
-            :shown-count="shownCount"
-            :selected-count="selectedCount"
-            :busy="activeGroupBusy"
-            :all-title="allDownloadTitle"
-            :shown-disabled-reason="shownDisabledReason"
-            :selected-disabled-reason="selectedDisabledReason"
-            @download-all="downloadAll"
-            @download-shown="downloadSnapshot('shown')"
-            @download-selected="downloadSnapshot('selected')"
-          />
         </div>
 
         <!-- Posts / Reels grid -->

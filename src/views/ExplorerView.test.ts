@@ -582,7 +582,7 @@ describe("ExplorerView async wiring", () => {
     expect(wrapper.text()).not.toContain("Download all stories");
   });
 
-  it("keeps tabs, the Posts filter, and download scopes in one toolbar", async () => {
+  it("keeps tabs and downloads on the first row with a clean Posts filter row below", async () => {
     const wrapper = render();
     await loadProfile(wrapper, {
       ...preview,
@@ -591,8 +591,16 @@ describe("ExplorerView async wiring", () => {
 
     const toolbar = wrapper.get("[data-explorer-toolbar]");
     expect(toolbar.find('[data-explore-tabs]').exists()).toBe(true);
-    expect(toolbar.find('[aria-label="Posts filter"]').exists()).toBe(true);
     expect(toolbar.find('[aria-label="Download"]').exists()).toBe(true);
+    expect(toolbar.find('[aria-label="Posts filter"]').exists()).toBe(false);
+
+    const filterRow = wrapper.get("[data-post-filter-row]");
+    const filters = filterRow.findAll("button");
+    expect(filterRow.find('[aria-label="Posts filter"]').exists()).toBe(true);
+    expect(filters).toHaveLength(4);
+    expect(filters.every((filter) => filter.classes().includes("border-l"))).toBe(true);
+    expect(filters[0].classes()).toContain("shadow-[inset_0_-2px_0_var(--color-accent)]");
+    expect(filters[0].classes()).not.toContain("ring-1");
   });
 
   it("suppresses duplicate group actions, disables the group, and retries after failure", async () => {
