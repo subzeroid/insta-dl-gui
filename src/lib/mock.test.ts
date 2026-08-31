@@ -18,6 +18,7 @@ import {
   openLibraryFile,
   queryLibrary,
   requestLibraryPreviewAccess,
+  remoteMediaUrl,
   revealLibraryFile,
   configState,
   setProxy,
@@ -47,6 +48,28 @@ afterEach(() => {
 });
 
 describe("profile pagination mock", () => {
+  it("permits only registered demo remote-media fixtures and revokes them on dispose", async () => {
+    installTauriMock();
+    const profile = (await invoke()("fetch_profile", {
+      username: "instagram",
+      endCursor: null,
+    })) as ProfilePreview;
+    const stories = await fetchStories("42");
+    const avatar = profile.profile.avatar_url ?? "";
+    const thumbnail = profile.recent_posts[0]?.thumbnail_url ?? "";
+    const storyThumbnail = stories[0]?.thumb_url ?? "";
+
+    expect(remoteMediaUrl(avatar)).toBe(avatar);
+    expect(remoteMediaUrl(thumbnail)).toBe(thumbnail);
+    expect(remoteMediaUrl(storyThumbnail)).toBe(storyThumbnail);
+    expect(remoteMediaUrl("data:image/svg+xml,%3Csvg%3Eunregistered%3C/svg%3E")).toBe("");
+
+    uninstallTauriMock();
+    expect(remoteMediaUrl(avatar)).toBe("");
+    expect(remoteMediaUrl(thumbnail)).toBe("");
+    expect(remoteMediaUrl(storyThumbnail)).toBe("");
+  });
+
   it("mirrors backend proxy URL validation and redaction", async () => {
     installTauriMock();
 

@@ -40,6 +40,9 @@ const MOCK_DISPOSER = Symbol("insta-dl-gui-tauri-mock-disposer");
 const MOCK_LIBRARY_MEDIA_URL_RESOLVER = Symbol.for(
   "insta-dl-gui.mock-library-media-url-resolver",
 );
+const MOCK_REMOTE_MEDIA_URL_RESOLVER = Symbol.for(
+  "insta-dl-gui.mock-remote-media-url-resolver",
+);
 const MAX_DOWNLOAD_ITEMS = 500;
 const MAX_RESOURCES_PER_POST = 20;
 const MAX_SHORTCODE_BYTES = 256;
@@ -81,6 +84,36 @@ function libraryPreview(label: string, start: string, end: string): string {
   );
 }
 
+function profilePreview(index: number): string {
+  const hue = Math.round((index * 137) % 360);
+  return (
+    "data:image/svg+xml," +
+    encodeURIComponent(
+      `<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'>
+         <defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'>
+           <stop offset='0' stop-color='hsl(${hue},60%,30%)'/>
+           <stop offset='1' stop-color='hsl(${(hue + 60) % 360},60%,18%)'/>
+         </linearGradient></defs>
+         <rect width='400' height='400' fill='url(#g)'/>
+         <circle cx='${80 + ((index * 97) % 240)}' cy='${100 + ((index * 61) % 200)}' r='56' fill='#ffffff' opacity='.14'/>
+       </svg>`,
+    )
+  );
+}
+
+function reelPreview(index: number): string {
+  const hue = Math.round((index * 137) % 360);
+  return (
+    "data:image/svg+xml," +
+    encodeURIComponent(
+      `<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'>
+         <rect width='400' height='400' fill='hsl(${hue},45%,24%)'/>
+         <text x='28' y='360' fill='white' font-family='system-ui' font-size='28'>REEL ${index + 1}</text>
+       </svg>`,
+    )
+  );
+}
+
 function mockMediaFixture(kind: DownloadMediaKind): string {
   return kind === "video"
     ? MOCK_VIDEO
@@ -111,6 +144,13 @@ const MOCK_STORIES = [
   },
 ];
 const MOCK_STORY_KINDS = new Map(MOCK_STORIES.map((story) => [story.pk, story.kind]));
+const MOCK_REMOTE_MEDIA_FIXTURES = new Set([
+  AVATAR,
+  MOCK_VIDEO,
+  ...MOCK_STORIES.map((story) => story.thumb_url),
+  ...Array.from({ length: 24 }, (_, index) => profilePreview(index)),
+  ...Array.from({ length: 22 }, (_, index) => reelPreview(index)),
+]);
 
 const LIBRARY_ROOT: LibraryRoot = {
   id: 1,
@@ -644,19 +684,7 @@ function reply(
         },
         recent_posts: Array.from({ length: 12 }, (_, i) => {
           const index = pageStart + i;
-          const hue = Math.round((index * 137) % 360);
-          const thumb =
-            "data:image/svg+xml," +
-            encodeURIComponent(
-              `<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'>
-                 <defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'>
-                   <stop offset='0' stop-color='hsl(${hue},60%,30%)'/>
-                   <stop offset='1' stop-color='hsl(${(hue + 60) % 360},60%,18%)'/>
-                 </linearGradient></defs>
-                 <rect width='400' height='400' fill='url(#g)'/>
-                 <circle cx='${80 + ((index * 97) % 240)}' cy='${100 + ((index * 61) % 200)}' r='56' fill='#ffffff' opacity='.14'/>
-               </svg>`,
-            );
+          const thumb = profilePreview(index);
           const isVideo = index % 3 === 0;
           return {
             pk: String(MOCK_PROFILE_PK_START + index),
@@ -680,15 +708,7 @@ function reply(
       return {
         posts: Array.from({ length: 11 }, (_, i) => {
           const index = pageStart + i;
-          const hue = Math.round((index * 137) % 360);
-          const thumbnail =
-            "data:image/svg+xml," +
-            encodeURIComponent(
-              `<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'>
-                 <rect width='400' height='400' fill='hsl(${hue},45%,24%)'/>
-                 <text x='28' y='360' fill='white' font-family='system-ui' font-size='28'>REEL ${index + 1}</text>
-               </svg>`,
-            );
+          const thumbnail = reelPreview(index);
           return {
             pk: String(MOCK_REEL_PK_START + index),
             code: `REEL${index}`,
@@ -737,6 +757,7 @@ export function uninstallTauriMock(): void {
   if (typeof dispose === "function") dispose();
   delete w[MOCK_DISPOSER];
   delete w[MOCK_LIBRARY_MEDIA_URL_RESOLVER];
+  delete w[MOCK_REMOTE_MEDIA_URL_RESOLVER];
   delete w.__TAURI_INTERNALS__;
   delete w.__TAURI_EVENT_PLUGIN_INTERNALS__;
 }
@@ -992,6 +1013,9 @@ export function installTauriMock(): void {
   w.__TAURI_EVENT_PLUGIN_INTERNALS__ = eventPluginInternals;
   const mediaUrlResolver = (fileId: number) => registeredMedia.get(fileId);
   w[MOCK_LIBRARY_MEDIA_URL_RESOLVER] = mediaUrlResolver;
+  const remoteMediaUrlResolver = (url: string) =>
+    MOCK_REMOTE_MEDIA_FIXTURES.has(url) ? url : undefined;
+  w[MOCK_REMOTE_MEDIA_URL_RESOLVER] = remoteMediaUrlResolver;
 
   const dispose = () => {
     if (disposed) return;
@@ -1009,6 +1033,9 @@ export function installTauriMock(): void {
     }
     if (w[MOCK_LIBRARY_MEDIA_URL_RESOLVER] === mediaUrlResolver) {
       delete w[MOCK_LIBRARY_MEDIA_URL_RESOLVER];
+    }
+    if (w[MOCK_REMOTE_MEDIA_URL_RESOLVER] === remoteMediaUrlResolver) {
+      delete w[MOCK_REMOTE_MEDIA_URL_RESOLVER];
     }
     if (w[MOCK_DISPOSER] === dispose) delete w[MOCK_DISPOSER];
   };

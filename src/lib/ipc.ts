@@ -4,6 +4,9 @@ import { listen } from "@tauri-apps/api/event";
 const MOCK_LIBRARY_MEDIA_URL_RESOLVER = Symbol.for(
   "insta-dl-gui.mock-library-media-url-resolver",
 );
+const MOCK_REMOTE_MEDIA_URL_RESOLVER = Symbol.for(
+  "insta-dl-gui.mock-remote-media-url-resolver",
+);
 
 export interface ConfigState {
   has_token: boolean;
@@ -204,20 +207,31 @@ export function libraryMediaUrl(fileId: number): string {
 }
 
 export function remoteMediaUrl(url: string): string {
+  const resolver = (globalThis as unknown as Record<PropertyKey, unknown>)[
+    MOCK_REMOTE_MEDIA_URL_RESOLVER
+  ];
+  if (typeof resolver === "function") {
+    const resolved = (resolver as (value: string) => unknown)(url);
+    if (typeof resolved === "string" && resolved === url && resolved.length > 0) {
+      return resolved;
+    }
+  }
+
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    return url;
+    return "";
   }
-  if (parsed.protocol !== "https:") return url;
+  if (parsed.protocol !== "https:") return "";
 
   const bytes = new TextEncoder().encode(url);
   if (bytes.length > 16 * 1024) return "";
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   const encoded = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-  return convertFileSrc(`media/${encoded}`, "remote-media");
+  const mediaBase = convertFileSrc("media", "remote-media").replace(/\/$/, "");
+  return `${mediaBase}/${encoded}`;
 }
 
 export async function saveSettings(opts: { dest_dir?: string; sidecar?: boolean }): Promise<ConfigState> {

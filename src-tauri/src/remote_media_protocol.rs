@@ -189,19 +189,19 @@ async fn handle_remote_media_protocol_with_fetcher<F: RemoteFetcher>(
     let Some(url) = parse_protocol_uri(request.uri()) else {
         return empty_body_for_head(plain_response(StatusCode::NOT_FOUND, b"not found"), is_head);
     };
-    let range = match collect_range(request.headers()) {
-        Ok(range) => range,
-        Err(()) => {
-            return empty_body_for_head(range_not_satisfiable(None), is_head);
-        }
-    };
 
     let result = if is_head {
         serve_head(fetcher, url).await
-    } else if let Some(range) = range {
-        serve_range(fetcher, url, range).await
     } else {
-        serve_full(fetcher, url).await
+        let range = match collect_range(request.headers()) {
+            Ok(range) => range,
+            Err(()) => return range_not_satisfiable(None),
+        };
+        if let Some(range) = range {
+            serve_range(fetcher, url, range).await
+        } else {
+            serve_full(fetcher, url).await
+        }
     };
     match result {
         Ok(response) => empty_body_for_head(response, is_head),
@@ -1127,6 +1127,44 @@ mod tests {
         assert_eq!(response.headers()[header::CONTENT_TYPE], "video/mp4");
         assert_eq!(response.headers()[header::CONTENT_LENGTH], "4096");
         assert_eq!(fetcher.requests()[0].range.as_deref(), Some("bytes=0-511"));
+    }
+
+    #[tokio::test]
+    async fn head_ignores_malformed_and_multiple_request_ranges() {
+        let range_cases: &[&[&str]] = &[&["items=0-1"], &["bytes=0-1", "bytes=2-3"]];
+
+        for range_values in range_cases {
+            let prefix = mp4_prefix();
+            let fetcher = ScriptedFetcher::with_responses(vec![upstream(
+                StatusCode::PARTIAL_CONTENT,
+                &[
+                    ("content-type", "video/mp4".into()),
+                    ("content-length", prefix.len().to_string()),
+                    (
+                        "content-range",
+                        format!("bytes 0-{}/4096", prefix.len() - 1),
+                    ),
+                ],
+                vec![prefix],
+            )]);
+            let mut req = request(Method::HEAD, "https://cdninstagram.com/video.mp4");
+            for range in *range_values {
+                req.headers_mut().append(
+                    header::RANGE,
+                    HeaderValue::from_str(range).expect("static test range is valid header text"),
+                );
+            }
+
+            let response =
+                handle_remote_media_protocol_with_fetcher(fetcher.clone(), "main", req).await;
+
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(response.body().is_empty());
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "video/mp4");
+            assert_eq!(response.headers()[header::CONTENT_LENGTH], "4096");
+            assert_eq!(fetcher.requests().len(), 1);
+            assert_eq!(fetcher.requests()[0].range.as_deref(), Some("bytes=0-511"));
+        }
     }
 
     #[tokio::test]

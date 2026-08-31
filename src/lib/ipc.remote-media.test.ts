@@ -1,7 +1,22 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const MOCK_REMOTE_MEDIA_URL_RESOLVER = Symbol.for(
+  "insta-dl-gui.mock-remote-media-url-resolver",
+);
+
+function tauriConvertFileSrc(
+  os: "unix" | "windows",
+): (path: string, protocol?: string) => string {
+  return (path, protocol = "asset") => {
+    const encoded = encodeURIComponent(path);
+    return os === "windows"
+      ? `http://${protocol}.localhost/${encoded}`
+      : `${protocol}://localhost/${encoded}`;
+  };
+}
 
 const core = vi.hoisted(() => ({
-  convertFileSrc: vi.fn((path: string, protocol = "asset") => `${protocol}://localhost/${path}`),
+  convertFileSrc: vi.fn<(path: string, protocol?: string) => string>(),
   invoke: vi.fn(),
 }));
 
@@ -17,7 +32,13 @@ function remoteMediaUrl(url: string): string {
 }
 
 beforeEach(() => {
-  core.convertFileSrc.mockClear();
+  core.convertFileSrc.mockReset().mockImplementation(tauriConvertFileSrc("unix"));
+});
+
+afterEach(() => {
+  delete (globalThis as unknown as Record<PropertyKey, unknown>)[
+    MOCK_REMOTE_MEDIA_URL_RESOLVER
+  ];
 });
 
 describe("remoteMediaUrl", () => {
@@ -29,24 +50,48 @@ describe("remoteMediaUrl", () => {
       "remote-media://localhost/media/aHR0cHM6Ly9zY29udGVudC5jZG5pbnN0YWdyYW0uY29tL9GE0L7RgtC-LmpwZz94PWhlbGxvIHdvcmxkJnNpZz1hL2IrPQ",
     );
     expect(core.convertFileSrc).toHaveBeenCalledWith(
-      "media/aHR0cHM6Ly9zY29udGVudC5jZG5pbnN0YWdyYW0uY29tL9GE0L7RgtC-LmpwZz94PWhlbGxvIHdvcmxkJnNpZz1hL2IrPQ",
+      "media",
       "remote-media",
     );
+    expect(remoteMediaUrl(upstream)).not.toContain("%2F");
   });
 
-  it.each(["", "data:image/svg+xml,%3Csvg%3E%3C/svg%3E", "http://127.0.0.1/mock.jpg"])(
-    "preserves the non-production preview URL %s",
+  it("builds the same literal media path delimiter for Tauri's Windows URL shape", () => {
+    core.convertFileSrc.mockImplementation(tauriConvertFileSrc("windows"));
+
+    const result = remoteMediaUrl("https://cdninstagram.com/media.jpg?sig=a/b");
+
+    expect(result).toMatch(/^http:\/\/remote-media\.localhost\/media\/[A-Za-z0-9_-]+$/);
+    expect(result).not.toContain("%2F");
+    expect(core.convertFileSrc).toHaveBeenCalledWith("media", "remote-media");
+  });
+
+  it.each([
+    "",
+    "not a URL",
+    "data:image/svg+xml,%3Csvg%3E%3C/svg%3E",
+    "data:video/mp4;base64,AAAA",
+    "http://127.0.0.1/mock.jpg",
+    "ftp://cdninstagram.com/media.jpg",
+    "javascript:alert(1)",
+    "blob:https://cdninstagram.com/id",
+  ])(
+    "fails closed for non-HTTPS production input %s",
     (url) => {
-      expect(remoteMediaUrl(url)).toBe(url);
+      expect(remoteMediaUrl(url)).toBe("");
       expect(core.convertFileSrc).not.toHaveBeenCalled();
     },
   );
 
-  it("does not turn malformed or non-HTTPS input into a custom protocol URL", () => {
-    expect(remoteMediaUrl("not a URL")).toBe("not a URL");
-    expect(remoteMediaUrl("ftp://cdninstagram.com/media.jpg")).toBe(
-      "ftp://cdninstagram.com/media.jpg",
-    );
+  it("permits only the exact media value approved by an explicit mock resolver", () => {
+    const fixture = "data:image/svg+xml,%3Csvg%3Eknown%3C/svg%3E";
+    const resolver = vi.fn((value: string) => (value === fixture ? value : undefined));
+    (globalThis as unknown as Record<PropertyKey, unknown>)[MOCK_REMOTE_MEDIA_URL_RESOLVER] =
+      resolver;
+
+    expect(remoteMediaUrl(fixture)).toBe(fixture);
+    expect(remoteMediaUrl("data:image/svg+xml,%3Csvg%3Eunknown%3C/svg%3E")).toBe("");
+    expect(resolver).toHaveBeenCalledTimes(2);
     expect(core.convertFileSrc).not.toHaveBeenCalled();
   });
 
