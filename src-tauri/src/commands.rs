@@ -1003,12 +1003,7 @@ pub async fn resolve_input(input: String) -> Result<Target, String> {
 }
 
 async fn client(state: &State<'_, AppState>) -> Result<Arc<crate::hiker::HikerClient>, String> {
-    state
-        .client
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| "No HikerAPI token configured".into())
+    state.hiker_client().await
 }
 
 /// Account autocomplete — same order the API returns (Instagram's own
@@ -1144,7 +1139,7 @@ pub async fn download_direct(
         return Err("Nothing to download".into());
     }
     let cfg = state.cfg.read().await.clone();
-    let cdn_http = state.cdn_http.clone();
+    let cdn_http = state.cdn_client().await;
     let catalog = state.catalog.clone();
     let jobs: Arc<JobRegistry> = state.jobs.clone();
     let in_flight = state.in_flight.clone();
@@ -1298,9 +1293,8 @@ pub async fn enqueue_profile_download(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let client = client(&state).await?;
+    let (client, cdn_http) = state.download_clients().await?;
     let cfg = state.cfg.read().await.clone();
-    let cdn_http = state.cdn_http.clone();
     let catalog = state.catalog.clone();
     let jobs: Arc<JobRegistry> = state.jobs.clone();
 
@@ -1870,9 +1864,8 @@ pub async fn download_post(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let client = client(&state).await?;
+    let (client, cdn_http) = state.download_clients().await?;
     let cfg = state.cfg.read().await.clone();
-    let cdn_http = state.cdn_http.clone();
     let catalog = state.catalog.clone();
     let jobs: Arc<JobRegistry> = state.jobs.clone();
 
@@ -2242,7 +2235,7 @@ pub(crate) async fn enqueue_fetched_post_download(
     };
 
     let cfg = state.cfg.read().await.clone();
-    let cdn_http = state.cdn_http.clone();
+    let cdn_http = state.cdn_client().await;
     let catalog = state.catalog.clone();
     let jobs = Arc::clone(&state.jobs);
     let job_id = uuid::Uuid::new_v4().to_string();
