@@ -8,6 +8,7 @@ const ipc = vi.hoisted(() => ({
   downloadPost: vi.fn(),
   enqueueProfileDownload: vi.fn(),
   fetchProfile: vi.fn(),
+  remoteMediaUrl: vi.fn((url: string) => `remote-media:${url}`),
   resolveInput: vi.fn(),
 }));
 
@@ -63,6 +64,19 @@ beforeEach(() => {
 });
 
 describe("DownloadView concurrency", () => {
+  it("renders the profile avatar through the remote-media protocol", async () => {
+    ipc.resolveInput.mockResolvedValue({ kind: "profile", username: "nike" });
+    ipc.fetchProfile.mockResolvedValue(publicPreview);
+    const wrapper = render();
+    await wrapper.get("input").setValue("nike");
+    await wrapper.get("form").trigger("submit");
+    await flushPromises();
+
+    expect(wrapper.get("img").attributes("src")).toBe(
+      `remote-media:${publicPreview.profile.avatar_url}`,
+    );
+  });
+
   it("leaves active download rendering to the global application footer", async () => {
     const wrapper = render();
     useJobsStore().addPlaceholder("job-1", "@instagram stories");

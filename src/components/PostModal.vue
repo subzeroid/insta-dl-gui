@@ -4,6 +4,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
   downloadDirect,
   downloadPost,
+  remoteMediaUrl,
   type FetchedPostCategory,
   type Post,
   type StoryItem,
@@ -28,15 +29,21 @@ let clearCopyFeedbackTimer: number | undefined;
 let copyGeneration = 0;
 
 const videoUrl = computed(() => {
-  if (props.post) return props.post.resources.find((r) => r.kind === "video")?.url ?? null;
-  return props.story?.kind === "video" ? props.story.media_url : null;
+  const url = props.post
+    ? props.post.resources.find((r) => r.kind === "video")?.url ?? ""
+    : props.story?.kind === "video"
+      ? props.story.media_url
+      : "";
+  return url ? remoteMediaUrl(url) : null;
 });
 
 const imageUrl = computed(() => {
   if (props.post) {
-    return props.post.thumbnail_url ?? props.post.resources.find((r) => r.kind === "photo")?.url ?? "";
+    const url =
+      props.post.thumbnail_url ?? props.post.resources.find((r) => r.kind === "photo")?.url ?? "";
+    return remoteMediaUrl(url);
   }
-  return props.story?.kind === "photo" ? props.story.media_url : "";
+  return props.story?.kind === "photo" ? remoteMediaUrl(props.story.media_url) : "";
 });
 
 const caption = computed(() => props.post?.caption ?? "");

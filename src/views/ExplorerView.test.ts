@@ -12,6 +12,7 @@ const ipc = vi.hoisted(() => ({
   fetchProfile: vi.fn(),
   fetchReels: vi.fn(),
   fetchStories: vi.fn(),
+  remoteMediaUrl: vi.fn((url: string) => `remote-media:${url}`),
   resolveInput: vi.fn(),
   searchUsers: vi.fn(),
 }));
@@ -165,6 +166,46 @@ afterEach(() => {
 });
 
 describe("ExplorerView async wiring", () => {
+  it("routes profile, grid, story, and search avatars through remote-media URLs", async () => {
+    vi.useFakeTimers();
+    ipc.searchUsers.mockResolvedValueOnce([
+      {
+        pk: "search-user",
+        username: "nike-search",
+        is_verified: false,
+        is_private: false,
+        avatar_url: "https://cdninstagram.com/search-avatar.jpg",
+      },
+    ]);
+    ipc.fetchStories.mockResolvedValueOnce([
+      story("story", "https://cdninstagram.com/story.jpg"),
+    ]);
+    const post = photoPost("photo", "https://cdninstagram.com/post-thumb");
+    const wrapper = render();
+
+    await wrapper.get("input").setValue("nike");
+    vi.advanceTimersByTime(250);
+    await flushPromises();
+    expect(wrapper.get("img.h-6").attributes("src")).toBe(
+      "remote-media:https://cdninstagram.com/search-avatar.jpg",
+    );
+
+    vi.useRealTimers();
+    await loadProfile(wrapper, { ...preview, recent_posts: [post] });
+    expect(wrapper.get("img.h-16").attributes("src")).toBe(
+      `remote-media:${preview.profile.avatar_url}`,
+    );
+    expect(wrapper.get('[data-media-id="photo"] img').attributes("src")).toBe(
+      "remote-media:https://cdninstagram.com/post-thumb",
+    );
+
+    await button(wrapper, "Stories").trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-story-id="story"] img').attributes("src")).toBe(
+      "remote-media:https://cdninstagram.com/story.jpg",
+    );
+  });
+
   it("filters loaded Posts for the grid and Shown download while preserving hidden selected posts", async () => {
     const photo = photoPost("photo", "https://cdninstagram.com/photo");
     const video = videoPost("video", "https://cdninstagram.com/video");
@@ -937,8 +978,8 @@ describe("ExplorerView async wiring", () => {
     expect(ipc.fetchReels).toHaveBeenCalledTimes(1);
     expect(ipc.fetchReels).toHaveBeenCalledWith("42", null);
     expect(wrapper.findAll("[data-media-id] img").map((image) => image.attributes("src"))).toEqual([
-      "https://cdninstagram.com/reel-one.jpg",
-      "https://cdninstagram.com/reel-two.jpg",
+      "remote-media:https://cdninstagram.com/reel-one.jpg",
+      "remote-media:https://cdninstagram.com/reel-two.jpg",
     ]);
     expect(wrapper.text()).not.toContain("https://cdninstagram.com/feed.jpg");
   });
@@ -957,7 +998,7 @@ describe("ExplorerView async wiring", () => {
     expect(wrapper.text()).toContain("Nike");
     expect(wrapper.text()).not.toContain("Loading profile");
     expect(wrapper.get("[data-media-id] img").attributes("src")).toBe(
-      "https://cdninstagram.com/feed.jpg",
+      "remote-media:https://cdninstagram.com/feed.jpg",
     );
     await wrapper.get("[data-media-id] [data-action='preview']").trigger("click");
     expect(wrapper.find("post-modal-stub").exists()).toBe(true);
@@ -968,7 +1009,7 @@ describe("ExplorerView async wiring", () => {
 
     pending.resolve([story("s1", "https://cdninstagram.com/story.jpg")]);
     await flushPromises();
-    expect(wrapper.find("img[src='https://cdninstagram.com/story.jpg']").exists()).toBe(true);
+    expect(wrapper.find("img[src='remote-media:https://cdninstagram.com/story.jpg']").exists()).toBe(true);
   });
 
   it("keeps the visible profile's pending Stories request alive while the query is edited", async () => {
@@ -984,7 +1025,7 @@ describe("ExplorerView async wiring", () => {
 
     expect(ipc.fetchStories).toHaveBeenCalledTimes(1);
     expect(wrapper.text()).toContain("Nike");
-    expect(wrapper.find("img[src='https://cdninstagram.com/nike-story.jpg']").exists()).toBe(true);
+    expect(wrapper.find("img[src='remote-media:https://cdninstagram.com/nike-story.jpg']").exists()).toBe(true);
   });
 
   it("isolates an automatic stories failure and retries only on request", async () => {
@@ -1000,7 +1041,7 @@ describe("ExplorerView async wiring", () => {
 
     expect(wrapper.text()).toContain("Nike");
     expect(wrapper.get("[data-media-id] img").attributes("src")).toBe(
-      "https://cdninstagram.com/feed.jpg",
+      "remote-media:https://cdninstagram.com/feed.jpg",
     );
     expect(wrapper.text()).not.toContain("stories unavailable");
     expect(ipc.fetchStories).toHaveBeenCalledTimes(1);
@@ -1037,11 +1078,11 @@ describe("ExplorerView async wiring", () => {
     await button(wrapper, "Retry stories").trigger("click");
 
     expect(wrapper.text()).not.toContain("stories unavailable");
-    expect(wrapper.find("img[src='https://cdninstagram.com/existing-story.jpg']").exists()).toBe(true);
+    expect(wrapper.find("img[src='remote-media:https://cdninstagram.com/existing-story.jpg']").exists()).toBe(true);
     retry.resolve([story("s2", "https://cdninstagram.com/retried-story.jpg")]);
     await flushPromises();
-    expect(wrapper.find("img[src='https://cdninstagram.com/existing-story.jpg']").exists()).toBe(false);
-    expect(wrapper.find("img[src='https://cdninstagram.com/retried-story.jpg']").exists()).toBe(true);
+    expect(wrapper.find("img[src='remote-media:https://cdninstagram.com/existing-story.jpg']").exists()).toBe(false);
+    expect(wrapper.find("img[src='remote-media:https://cdninstagram.com/retried-story.jpg']").exists()).toBe(true);
   });
 
   it("loads more clips without duplicates and downloads the exact shown snapshot", async () => {
@@ -1070,9 +1111,9 @@ describe("ExplorerView async wiring", () => {
     await flushPromises();
 
     expect(wrapper.findAll("[data-media-id] img").map((image) => image.attributes("src"))).toEqual([
-      "https://cdninstagram.com/first.jpg",
-      "https://cdninstagram.com/second.jpg",
-      "https://cdninstagram.com/third.jpg",
+      "remote-media:https://cdninstagram.com/first.jpg",
+      "remote-media:https://cdninstagram.com/second.jpg",
+      "remote-media:https://cdninstagram.com/third.jpg",
     ]);
     expect(ipc.fetchReels).toHaveBeenNthCalledWith(2, "42", "next");
 
@@ -1442,13 +1483,13 @@ describe("ExplorerView async wiring", () => {
       "Shown 1",
       "Selected 0",
     ]);
-    expect(wrapper.find("img[src='https://cdninstagram.com/story.jpg']").exists()).toBe(true);
+    expect(wrapper.find("img[src='remote-media:https://cdninstagram.com/story.jpg']").exists()).toBe(true);
 
     await button(wrapper, "Reels").trigger("click");
     await flushPromises();
 
     expect(wrapper.text()).not.toContain("Download all stories");
-    expect(wrapper.find("img[src='https://cdninstagram.com/story.jpg']").exists()).toBe(false);
+    expect(wrapper.find("img[src='remote-media:https://cdninstagram.com/story.jpg']").exists()).toBe(false);
     expect(wrapper.text()).toContain("No reels yet.");
   });
 
@@ -1473,12 +1514,12 @@ describe("ExplorerView async wiring", () => {
     await loadProfile(wrapper, adidasPreview);
     await button(wrapper, "Stories").trigger("click");
 
-    expect(wrapper.find("img[src='https://cdninstagram.com/adidas-story.jpg']").exists()).toBe(true);
+    expect(wrapper.find("img[src='remote-media:https://cdninstagram.com/adidas-story.jpg']").exists()).toBe(true);
     nikeStories.resolve([story("nike", "https://cdninstagram.com/nike-story.jpg")]);
     await flushPromises();
 
-    expect(wrapper.find("img[src='https://cdninstagram.com/nike-story.jpg']").exists()).toBe(false);
-    expect(wrapper.find("img[src='https://cdninstagram.com/adidas-story.jpg']").exists()).toBe(true);
+    expect(wrapper.find("img[src='remote-media:https://cdninstagram.com/nike-story.jpg']").exists()).toBe(false);
+    expect(wrapper.find("img[src='remote-media:https://cdninstagram.com/adidas-story.jpg']").exists()).toBe(true);
   });
 
   it("uses the stories request generation when the same profile is loaded again", async () => {
@@ -1493,12 +1534,12 @@ describe("ExplorerView async wiring", () => {
     await loadProfile(wrapper);
     await button(wrapper, "Stories").trigger("click");
 
-    expect(wrapper.find("img[src='https://cdninstagram.com/fresh-story.jpg']").exists()).toBe(true);
+    expect(wrapper.find("img[src='remote-media:https://cdninstagram.com/fresh-story.jpg']").exists()).toBe(true);
     firstNikeStories.resolve([story("stale", "https://cdninstagram.com/stale-story.jpg")]);
     await flushPromises();
 
-    expect(wrapper.find("img[src='https://cdninstagram.com/stale-story.jpg']").exists()).toBe(false);
-    expect(wrapper.find("img[src='https://cdninstagram.com/fresh-story.jpg']").exists()).toBe(true);
+    expect(wrapper.find("img[src='remote-media:https://cdninstagram.com/stale-story.jpg']").exists()).toBe(false);
+    expect(wrapper.find("img[src='remote-media:https://cdninstagram.com/fresh-story.jpg']").exists()).toBe(true);
   });
 
   it("retains the selected profile, Reels tab, and page after remount", async () => {
@@ -1584,7 +1625,7 @@ describe("ExplorerView async wiring", () => {
     pending.resolve([story("s1", "https://cdninstagram.com/preserved-story.jpg")]);
     await flushPromises();
 
-    expect(second.find("img[src='https://cdninstagram.com/preserved-story.jpg']").exists()).toBe(true);
+    expect(second.find("img[src='remote-media:https://cdninstagram.com/preserved-story.jpg']").exists()).toBe(true);
     expect(useExplorerStore().storiesLoading).toBe(false);
   });
 

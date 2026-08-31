@@ -9,6 +9,7 @@ pub mod library_protocol;
 pub mod models;
 pub mod network;
 pub mod proxy;
+mod remote_media_protocol;
 pub mod scanner;
 pub mod targets;
 
@@ -432,6 +433,22 @@ pub fn run() {
                 let response =
                     library_protocol::handle_library_protocol(catalog, &webview_label, request)
                         .await;
+                responder.respond(response);
+            });
+        })
+        .register_asynchronous_uri_scheme_protocol("remote-media", |context, request, responder| {
+            let app_handle = context.app_handle().clone();
+            let webview_label = context.webview_label().to_owned();
+            tauri::async_runtime::spawn(async move {
+                // Snapshot the current client per protocol request. Settings updates affect
+                // subsequent requests, while this request keeps its existing proxy routing.
+                let client = app_handle.state::<AppState>().cdn_client().await;
+                let response = remote_media_protocol::handle_remote_media_protocol(
+                    client,
+                    &webview_label,
+                    request,
+                )
+                .await;
                 responder.respond(response);
             });
         })

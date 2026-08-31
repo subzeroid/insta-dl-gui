@@ -9,6 +9,7 @@ import {
   fetchProfile,
   fetchReels,
   fetchStories,
+  remoteMediaUrl,
   resolveInput,
   searchUsers,
   type Post,
@@ -583,7 +584,7 @@ onUnmounted(() => {
         >
           <img
             v-if="u.avatar_url"
-            :src="u.avatar_url"
+            :src="remoteMediaUrl(u.avatar_url)"
             class="h-6 w-6 shrink-0 rounded-full object-cover"
             referrerpolicy="no-referrer"
           />
@@ -607,7 +608,7 @@ onUnmounted(() => {
         <div class="flex items-center gap-4">
           <img
             v-if="preview.profile.avatar_url"
-            :src="preview.profile.avatar_url"
+            :src="remoteMediaUrl(preview.profile.avatar_url)"
             class="h-16 w-16 shrink-0 rounded-full border border-line object-cover"
             referrerpolicy="no-referrer"
           />
@@ -737,7 +738,7 @@ onUnmounted(() => {
               >
                 <img
                   v-if="thumbUrl(p)"
-                  :src="thumbUrl(p)"
+                  :src="remoteMediaUrl(thumbUrl(p))"
                   class="h-full w-full object-cover"
                   referrerpolicy="no-referrer"
                   loading="lazy"
@@ -832,7 +833,7 @@ onUnmounted(() => {
               >
                 <img
                   v-if="s.thumb_url || s.media_url"
-                  :src="s.thumb_url || s.media_url"
+                  :src="remoteMediaUrl(s.thumb_url || s.media_url)"
                   class="h-20 w-20 rounded-full object-cover"
                   referrerpolicy="no-referrer"
                 />

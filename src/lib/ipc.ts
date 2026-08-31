@@ -203,6 +203,23 @@ export function libraryMediaUrl(fileId: number): string {
   return `${mediaBase}/${fileId}`;
 }
 
+export function remoteMediaUrl(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url;
+  }
+  if (parsed.protocol !== "https:") return url;
+
+  const bytes = new TextEncoder().encode(url);
+  if (bytes.length > 16 * 1024) return "";
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  const encoded = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return convertFileSrc(`media/${encoded}`, "remote-media");
+}
+
 export async function saveSettings(opts: { dest_dir?: string; sidecar?: boolean }): Promise<ConfigState> {
   return invoke("save_settings", { destDir: opts.dest_dir, sidecar: opts.sidecar });
 }

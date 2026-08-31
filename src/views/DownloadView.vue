@@ -6,6 +6,7 @@ import {
   downloadPost,
   enqueueProfileDownload,
   fetchProfile,
+  remoteMediaUrl,
   resolveInput,
   type ProfileOptions,
   type ProfilePreview,
@@ -120,7 +121,7 @@ onMounted(() => {
       <div class="flex items-center gap-4 p-5">
         <img
           v-if="preview.profile.avatar_url"
-          :src="preview.profile.avatar_url"
+          :src="remoteMediaUrl(preview.profile.avatar_url)"
           class="h-16 w-16 rounded-full border border-line object-cover"
           referrerpolicy="no-referrer"
         />

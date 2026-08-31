@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const ipc = vi.hoisted(() => ({
   downloadDirect: vi.fn(),
   downloadPost: vi.fn(),
+  remoteMediaUrl: vi.fn((url: string) => `remote-media:${url}`),
 }));
 const clipboard = vi.hoisted(() => ({ writeText: vi.fn() }));
 
@@ -78,6 +79,24 @@ afterEach(() => {
 });
 
 describe("PostModal copy actions", () => {
+  it("renders post and story previews through the remote-media protocol without changing downloads", async () => {
+    const postWrapper = render();
+    expect(postWrapper.get("img").attributes("src")).toBe(
+      `remote-media:${post.resources[0].url}`,
+    );
+    await postWrapper.findAll("button").find((button) => button.text() === "Download")!.trigger("click");
+    await flushPromises();
+    expect(ipc.downloadPost).toHaveBeenCalledWith(post.code);
+
+    const storyWrapper = render({ post: null, story });
+    expect(storyWrapper.get("img").attributes("src")).toBe(`remote-media:${story.media_url}`);
+    await storyWrapper.findAll("button").find((button) => button.text() === "Download")!.trigger("click");
+    await flushPromises();
+    expect(ipc.downloadDirect).toHaveBeenCalledWith("nike", "stories", [
+      { url: story.media_url, pk: story.pk, taken_at: story.taken_at },
+    ]);
+  });
+
   it("copies the complete untruncated caption and announces success", async () => {
     const wrapper = render();
 
