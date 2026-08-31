@@ -94,7 +94,7 @@ async fn cdn_client_routes_requests_through_an_http_proxy() {
 
     let client = build_cdn_client(Some(&proxy.uri())).expect("proxy client");
     let response = client
-        .get("http://cdninstagram.com/asset.jpg")
+        .get("http://cdn.invalid/asset.jpg")
         .send()
         .await
         .expect("cdn response");
