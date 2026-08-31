@@ -76,7 +76,9 @@ describe("profile pagination mock", () => {
       "socks5h://proxy.example:0",
       "https://proxy.example/path",
       "https://proxy.example/?query=yes",
+      "https://proxy.example/?",
       "https://proxy.example/#fragment",
+      "https://proxy.example/#",
     ]) {
       await expect(setProxy(url)).rejects.toThrow(
         "Enter a valid HTTP, HTTPS, SOCKS5, or SOCKS5H proxy URL",

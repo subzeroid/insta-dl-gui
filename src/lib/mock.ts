@@ -783,10 +783,12 @@ export function installTauriMock(): void {
       throw new Error(PROXY_VALIDATION_ERROR);
     }
     const scheme = parsed.protocol.slice(0, -1).toLowerCase();
+    const hasQueryOrFragmentMarker = trimmedProxy.includes("?") || trimmedProxy.includes("#");
     if (
       !["http", "https", "socks5", "socks5h"].includes(scheme) ||
       !parsed.hostname ||
       (parsed.pathname !== "/" && parsed.pathname !== "") ||
+      hasQueryOrFragmentMarker ||
       parsed.search ||
       parsed.hash ||
       parsed.port === "0" ||
