@@ -33,9 +33,12 @@ const {
   profilePreview: preview,
   activeTab,
   postFilter,
+  postsPage,
+  postsPageSize,
   reels,
   reelsCursor,
   reelsLoaded,
+  reelsPage,
   stories,
   storiesError,
   storiesLoading,
@@ -87,6 +90,12 @@ const gridPosts = computed(() => {
       : "carousel";
   return sourcePosts.value.filter((post) => classifyPost(post).kind === kind);
 });
+const postsEmptyMessage = computed(() => {
+  if (postFilter.value === "all") return "No posts yet.";
+  const filterLabel = postFilters.find((filter) => filter.id === postFilter.value)?.label.toLowerCase();
+  const loadedCount = sourcePosts.value.length;
+  return `No ${filterLabel ?? "matching posts"} in ${loadedCount} loaded ${loadedCount === 1 ? "post" : "posts"}.`;
+});
 function isDownloadablePost(post: Post): boolean {
   return (
     Array.isArray(post.resources) &&
@@ -128,6 +137,21 @@ const allDownloadTitle = computed(() =>
     ? "Refreshes and downloads all current Stories; uses additional API requests."
     : `Fetch and download the complete ${activeTab.value === "posts" ? "Posts" : "Reels"} archive; uses API requests.`,
 );
+const postsTotalPages = computed(() => {
+  const totalItems = preview.value?.profile.media_count;
+  if (totalItems === undefined || postsPageSize.value <= 0) return null;
+  return Math.max(postsPage.value, Math.ceil(totalItems / postsPageSize.value));
+});
+const paginationStatus = computed(() => {
+  if (activeTab.value === "posts" && postsPage.value > 0) {
+    const total = postsTotalPages.value;
+    return total === null ? `Page ${postsPage.value}` : `Page ${postsPage.value} of ${total}`;
+  }
+  if (activeTab.value === "reels" && reelsPage.value > 0) {
+    return `Page ${reelsPage.value}`;
+  }
+  return null;
+});
 
 function previewMediaLabel(post: Post): string {
   const display = classifyPost(post);
@@ -153,6 +177,11 @@ function thumbUrl(p: Post): string {
 
 function fmt(n?: number): string {
   return n === undefined ? "—" : new Intl.NumberFormat("en", { notation: "compact" }).format(n);
+}
+
+function relationshipPath(kind: "followers" | "following") {
+  const username = preview.value?.profile.username ?? "";
+  return `/explore/${encodeURIComponent(username)}/${kind}`;
 }
 
 function onQueryInput() {
@@ -517,19 +546,37 @@ function openPostModal(post: Post) {
   modalPost.value = post;
 }
 
+function resumeRetainedProfile() {
+  if (!preview.value) return;
+  if (
+    !preview.value.profile.is_private &&
+    stories.value === null &&
+    storiesError.value === null &&
+    !storiesLoading.value
+  ) {
+    void loadStories();
+  }
+  if (activeTab.value === "reels" && !reelsLoaded.value) {
+    void loadReels(null);
+  }
+}
+
 onMounted(() => {
+  const requestedProfile = new URLSearchParams(window.location.search)
+    .get("profile")
+    ?.trim()
+    .replace(/^@/, "");
+  if (requestedProfile) {
+    query.value = `@${requestedProfile}`;
+    if (preview.value?.profile.username.toLowerCase() !== requestedProfile.toLowerCase()) {
+      void loadProfile(requestedProfile);
+    } else {
+      resumeRetainedProfile();
+    }
+    return;
+  }
   if (preview.value) {
-    if (
-      !preview.value.profile.is_private &&
-      stories.value === null &&
-      storiesError.value === null &&
-      !storiesLoading.value
-    ) {
-      void loadStories();
-    }
-    if (activeTab.value === "reels" && !reelsLoaded.value) {
-      void loadReels(null);
-    }
+    resumeRetainedProfile();
     return;
   }
   if (new URLSearchParams(window.location.search).get("demo") === "explore") {
@@ -619,8 +666,28 @@ onUnmounted(() => {
               <span v-if="preview.profile.is_verified" class="text-sm text-sky-400" title="Verified">✔</span>
             </div>
             <p class="truncate text-sm text-slate-400">{{ preview.profile.full_name || "\u00A0" }}</p>
-            <p class="mt-0.5 text-xs tabular-nums text-slate-500">
-              {{ fmt(preview.profile.media_count) }} posts · {{ fmt(preview.profile.follower_count) }} followers
+            <p class="mt-0.5 flex flex-wrap items-center gap-x-1 text-xs tabular-nums text-slate-500">
+              <span>{{ fmt(preview.profile.media_count) }} posts</span>
+              <span aria-hidden="true">·</span>
+              <RouterLink
+                v-if="!preview.profile.is_private"
+                data-relationship="followers"
+                :to="relationshipPath('followers')"
+                class="underline decoration-transparent underline-offset-2 hover:text-slate-200 hover:decoration-current"
+              >
+                {{ fmt(preview.profile.follower_count) }} followers
+              </RouterLink>
+              <span v-else>{{ fmt(preview.profile.follower_count) }} followers</span>
+              <span aria-hidden="true">·</span>
+              <RouterLink
+                v-if="!preview.profile.is_private"
+                data-relationship="following"
+                :to="relationshipPath('following')"
+                class="underline decoration-transparent underline-offset-2 hover:text-slate-200 hover:decoration-current"
+              >
+                {{ fmt(preview.profile.following_count) }} following
+              </RouterLink>
+              <span v-else>{{ fmt(preview.profile.following_count) }} following</span>
             </p>
           </div>
           <div class="flex shrink-0 items-center gap-2">
@@ -641,55 +708,67 @@ onUnmounted(() => {
       </div>
 
       <template v-if="!preview.profile.is_private">
-        <!-- Tabs -->
-        <div class="flex items-center gap-1">
-          <button
-            v-for="t in tabs"
-            :key="t.id"
-            type="button"
-            class="rounded-lg px-3 py-1.5 text-sm transition-colors"
-            :class="
-              activeTab === t.id
-                ? 'bg-surface-3 text-slate-100'
-                : 'text-slate-400 hover:bg-surface-2 hover:text-slate-200'
-            "
-            @click="selectTab(t.id)"
+        <!-- Explore controls -->
+        <div class="space-y-2">
+          <div data-explorer-toolbar class="flex flex-wrap items-center gap-x-2 gap-y-2">
+            <div data-explore-tabs class="flex shrink-0 items-center gap-1">
+              <button
+                v-for="t in tabs"
+                :key="t.id"
+                type="button"
+                class="rounded-lg px-2.5 py-1.5 text-sm transition-colors"
+                :class="
+                  activeTab === t.id
+                    ? 'bg-surface-3 text-slate-100'
+                    : 'text-slate-400 hover:bg-surface-2 hover:text-slate-200'
+                "
+                @click="selectTab(t.id)"
+              >
+                {{ t.label }}
+              </button>
+            </div>
+            <DownloadScopeGroup
+              class="ml-auto shrink-0"
+              :shown-count="shownCount"
+              :selected-count="selectedCount"
+              :busy="activeGroupBusy"
+              :all-title="allDownloadTitle"
+              :shown-disabled-reason="shownDisabledReason"
+              :selected-disabled-reason="selectedDisabledReason"
+              @download-all="downloadAll"
+              @download-shown="downloadSnapshot('shown')"
+              @download-selected="downloadSnapshot('selected')"
+            />
+          </div>
+          <div
+            v-if="activeTab === 'posts'"
+            data-post-filter-row
+            class="flex"
           >
-            {{ t.label }}
-          </button>
-          <DownloadScopeGroup
-            class="ml-auto"
-            :shown-count="shownCount"
-            :selected-count="selectedCount"
-            :busy="activeGroupBusy"
-            :all-title="allDownloadTitle"
-            :shown-disabled-reason="shownDisabledReason"
-            :selected-disabled-reason="selectedDisabledReason"
-            @download-all="downloadAll"
-            @download-shown="downloadSnapshot('shown')"
-            @download-selected="downloadSnapshot('selected')"
-          />
-        </div>
-
-        <div
-          v-if="activeTab === 'posts'"
-          role="group"
-          aria-label="Posts filter"
-          class="inline-flex overflow-hidden rounded-md border border-line bg-surface-1"
-        >
-          <button
-            v-for="filter in postFilters"
-            :key="filter.id"
-            type="button"
-            :data-post-filter="filter.id"
-            :aria-pressed="postFilter === filter.id"
-            :aria-current="postFilter === filter.id ? 'true' : undefined"
-            class="border-r border-line px-2.5 py-1 text-xs text-slate-300 transition-colors last:border-r-0"
-            :class="postFilter === filter.id ? 'bg-surface-3 text-slate-100' : 'hover:bg-surface-2'"
-            @click="postFilter = filter.id"
-          >
-            {{ filter.label }}
-          </button>
+            <div
+              role="group"
+              aria-label="Posts filter"
+              class="inline-flex shrink-0 overflow-hidden rounded-md border border-line bg-surface-1"
+            >
+              <button
+                v-for="filter in postFilters"
+                :key="filter.id"
+                type="button"
+                :data-post-filter="filter.id"
+                :aria-pressed="postFilter === filter.id"
+                :aria-current="postFilter === filter.id ? 'true' : undefined"
+                class="border-l border-line px-2 py-1 text-xs text-slate-400 transition-colors first:border-l-0"
+                :class="
+                  postFilter === filter.id
+                    ? 'bg-accent/15 text-white shadow-[inset_0_-2px_0_var(--color-accent)]'
+                    : 'hover:bg-surface-2 hover:text-slate-200'
+                "
+                @click="postFilter = filter.id"
+              >
+                {{ filter.label }}
+              </button>
+            </div>
+          </div>
         </div>
 
         <!-- Posts / Reels grid -->
@@ -771,20 +850,32 @@ onUnmounted(() => {
             class="card flex items-center justify-center p-12 text-sm text-slate-500"
           >
             {{
-              activeTab === "reels"
-                ? "No reels yet."
-                : postFilter === "all"
-                  ? "No posts yet."
-                  : "No matching loaded posts."
+              activeTab === "reels" ? "No reels yet." : postsEmptyMessage
             }}
           </div>
-          <div v-if="activeTab === 'posts' && preview.end_cursor" class="flex justify-center">
-            <button class="btn-secondary" :disabled="loadingMore" @click="loadMore">
+          <div
+            v-if="paginationStatus"
+            class="flex flex-wrap items-center justify-center gap-3"
+          >
+            <span
+              data-pagination-status
+              class="text-xs tabular-nums text-slate-500"
+              aria-live="polite"
+            >{{ paginationStatus }}</span>
+            <button
+              v-if="activeTab === 'posts' && preview.end_cursor"
+              class="btn-secondary"
+              :disabled="loadingMore"
+              @click="loadMore"
+            >
               {{ loadingMore ? "Loading…" : "Load more" }}
             </button>
-          </div>
-          <div v-if="activeTab === 'reels' && reelsCursor" class="flex justify-center">
-            <button class="btn-secondary" :disabled="reelsLoading" @click="loadReels(reelsCursor)">
+            <button
+              v-else-if="activeTab === 'reels' && reelsCursor"
+              class="btn-secondary"
+              :disabled="reelsLoading"
+              @click="loadReels(reelsCursor)"
+            >
               {{ reelsLoading ? "Loading…" : "Load more" }}
             </button>
           </div>

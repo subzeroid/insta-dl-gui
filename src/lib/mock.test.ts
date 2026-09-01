@@ -9,6 +9,8 @@ import {
   enqueueFetchedPostDownload,
   enqueueProfileDownload,
   ensureConfiguredLibraryRoot,
+  fetchProfileSummary,
+  fetchRelationships,
   fetchStories,
   getLibraryItem,
   libraryMediaUrl,
@@ -20,6 +22,7 @@ import {
   requestLibraryPreviewAccess,
   remoteMediaUrl,
   revealLibraryFile,
+  searchRelationships,
   configState,
   setProxy,
   startLibraryScan,
@@ -48,6 +51,27 @@ afterEach(() => {
 });
 
 describe("profile pagination mock", () => {
+  it("provides cursor-paged relationship lists and server-side search", async () => {
+    installTauriMock();
+
+    await expect(fetchProfileSummary("natgeo")).resolves.toMatchObject({
+      pk: "25025320",
+      username: "natgeo",
+      follower_count: 713_000_000,
+      following_count: 234,
+    });
+    const first = await fetchRelationships("25025320", "following", null);
+    const second = await fetchRelationships("25025320", "following", first.next_cursor);
+    expect(first.users).toHaveLength(12);
+    expect(first.next_cursor).toBe("following-cursor");
+    expect(second.users).toHaveLength(12);
+    expect(second.next_cursor).toBeNull();
+    expect(new Set([...first.users, ...second.users].map((user) => user.pk)).size).toBe(24);
+
+    const results = await searchRelationships("25025320", "following", "meta");
+    expect(results.map((user) => user.username)).toEqual(["meta", "metaglasses"]);
+  });
+
   it("permits only registered demo remote-media fixtures and revokes them on dispose", async () => {
     installTauriMock();
     const profile = (await invoke()("fetch_profile", {

@@ -50,7 +50,17 @@ Use the information control beside **All / Shown / Selected** for an in-app expl
 
 Use **Load more** on Posts or Reels before **Shown** if you want more pages in that exact snapshot. Shown and Selected accept at most 500 items. At 501 or more, the action is disabled and nothing is silently truncated or split; use **All** for the complete archive instead.
 
+Posts show the current page and, when the profile total allows it, an estimated total page count. Reels show the current loaded page.
+
 Click a card to preview it, or use its checkbox to add it to **Selected**. A Post or Reel preview can copy the full description or canonical Instagram link. After Queue accepts a Selected snapshot, only the submitted selections are cleared; a failed enqueue keeps them selected, and a card reselected while the request is pending stays selected. Press **Escape** to close autocomplete or an open preview.
+
+## Browse Followers and Following
+
+On a public profile, click its **Followers** or **Following** count to open a dedicated relationship page. The first page loads immediately; use **Load more** to follow the cursor through additional pages. When the profile total and first page size are available, the page status includes an estimated total number of pages.
+
+Type at least two characters in the relationship search box to search the complete Followers or Following list through HikerAPI. Each search costs 1 request. Clearing the search restores the relationship pages you already loaded, and selecting an account opens that profile back in Explore.
+
+Private profile counts are not links. If a private relationship URL is opened directly, the app explains that the lists are unavailable, disables search, and does not issue a relationship request.
 
 ## Where files end up
 
@@ -132,7 +142,7 @@ Settings displays only a credential-redacted hint, but the complete URL is store
 
 The footer keeps download activity visible from Download, Explore, Library and Settings. It shows the active job count, current file and downloaded bytes; click anywhere on it to open **Queue**.
 
-The **Queue** screen lists all jobs with per-file progress and byte counters. Failed jobs show the reason (private profile, quota exhausted, deleted post). Cancelled and finished jobs can be cleared.
+The **Queue** screen lists all jobs with their start time, per-file progress and byte counters. Terminal jobs also show when they finished. Failed jobs show the reason (private profile, quota exhausted, deleted post). Cancelled and finished jobs can be cleared.
 
 Click a completed job to inspect the exact, ordered media files newly saved by that download. Queue distinguishes requested Instagram items from saved files, so selecting four posts can correctly produce five files when one is a carousel. Each row shows a photo or video preview, safe basename and size, with **Open** and **Show in Finder** actions when the file is available. Large results start with 50 files and load the next 50 on demand. JSON sidecars and files skipped because they already existed are not included in this result list.
 

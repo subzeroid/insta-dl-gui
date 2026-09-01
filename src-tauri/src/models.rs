@@ -37,6 +37,7 @@ pub struct Profile {
     pub full_name: Option<String>,
     pub media_count: u64,
     pub follower_count: Option<u64>,
+    pub following_count: Option<u64>,
     pub is_private: bool,
     pub is_verified: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,6 +54,19 @@ pub struct SearchUser {
     pub is_private: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationshipKind {
+    Followers,
+    Following,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UserPage {
+    pub users: Vec<SearchUser>,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

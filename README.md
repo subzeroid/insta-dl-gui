@@ -21,9 +21,10 @@ Paste your HikerAPI token once, then download any public profile's content with 
 - **Single posts & reels** — paste an `instagram.com/p/…` or `/reel/…` link
 - **Full profiles** — posts, reels-only, active stories, highlights, and HD avatar, each selectable
 - **Explore first** — the app opens on profile discovery; browse labeled photos, videos, carousels and stories, filter Posts by media type, select exact cards, then use one **Download · All · Shown · Selected** control
+- **Profile relationships** — open a public profile's paginated Followers or Following list, search the complete list, and jump straight into another account in Explore
 - **Useful previews** — open a Post or Reel to copy its description or canonical Instagram link
 - **No login, no ban risk** — HikerAPI token only; your Instagram account never touches the flow
-- **Live Queue** — per-job byte counts, file counters and cancel support; completed jobs open the exact saved-file list with previews and system file actions
+- **Live Queue** — per-job start and finish times, byte counts, file counters and cancel support; completed jobs open the exact saved-file list with previews and system file actions
 - **Resilient downloads** — transient network and CDN server failures retry automatically; partial jobs count only files actually saved
 - **Shared network proxy** — route both HikerAPI requests and Instagram CDN media through one HTTP, HTTPS, SOCKS5 or SOCKS5H proxy
 - **Incremental archives** — already-downloaded files are skipped on re-runs (like `--fast-update`)

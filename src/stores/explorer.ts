@@ -16,9 +16,12 @@ export const useExplorerStore = defineStore("explorer", () => {
   const profilePreview = ref<ProfilePreview | null>(null);
   const activeTab = ref<ExploreTab>("posts");
   const postFilter = ref<PostFilter>("all");
+  const postsPage = ref(0);
+  const postsPageSize = ref(0);
   const reels = ref<Post[]>([]);
   const reelsCursor = ref<string | null>(null);
   const reelsLoaded = ref(false);
+  const reelsPage = ref(0);
   const stories = ref<StoryItem[] | null>(null);
   const storiesError: Ref<string | null> = ref(null);
   const storiesLoading = ref(false);
@@ -41,9 +44,12 @@ export const useExplorerStore = defineStore("explorer", () => {
     profilePreview.value = null;
     activeTab.value = "posts";
     postFilter.value = "all";
+    postsPage.value = 0;
+    postsPageSize.value = 0;
     reels.value = [];
     reelsCursor.value = null;
     reelsLoaded.value = false;
+    reelsPage.value = 0;
     stories.value = null;
     storiesError.value = null;
     storiesLoading.value = false;
@@ -60,6 +66,8 @@ export const useExplorerStore = defineStore("explorer", () => {
 
   function commitProfile(value: ProfilePreview) {
     profilePreview.value = value;
+    postsPage.value = value.recent_posts.length > 0 || value.end_cursor ? 1 : 0;
+    postsPageSize.value = value.recent_posts.length;
   }
 
   function commitMorePosts(username: string, page: ProfilePreview): boolean {
@@ -74,6 +82,7 @@ export const useExplorerStore = defineStore("explorer", () => {
       recent_posts: mergeUniquePosts(profilePreview.value.recent_posts, page.recent_posts),
       end_cursor: page.end_cursor,
     };
+    postsPage.value += 1;
     return true;
   }
 
@@ -90,6 +99,7 @@ export const useExplorerStore = defineStore("explorer", () => {
     reels.value = mergeUniquePosts(reels.value, posts);
     reelsCursor.value = next && !requestedReelsCursors.has(next) ? next : null;
     reelsLoaded.value = true;
+    reelsPage.value += 1;
     return true;
   }
 
@@ -178,9 +188,12 @@ export const useExplorerStore = defineStore("explorer", () => {
     profilePreview,
     activeTab,
     postFilter,
+    postsPage,
+    postsPageSize,
     reels,
     reelsCursor,
     reelsLoaded,
+    reelsPage,
     stories,
     storiesError,
     storiesLoading,

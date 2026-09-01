@@ -257,6 +257,7 @@ fn profile() -> Profile {
         full_name: Some("Nike".into()),
         media_count: 3,
         follower_count: Some(100),
+        following_count: Some(25),
         is_private: false,
         is_verified: true,
         avatar_url: None,

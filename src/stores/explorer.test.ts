@@ -36,6 +36,44 @@ beforeEach(() => {
 });
 
 describe("Explore session state", () => {
+  it("tracks accepted Posts and Reels pages and resets them with the profile session", () => {
+    const store = useExplorerStore();
+    const firstPosts = Array.from({ length: 12 }, (_, index) => post(`p${index}`));
+    store.commitProfile({
+      ...preview("nike", "42", firstPosts),
+      profile: {
+        ...preview("nike", "42").profile,
+        media_count: 25,
+      },
+      end_cursor: "posts-next",
+    });
+
+    expect(store.postsPage).toBe(1);
+    expect(store.postsPageSize).toBe(12);
+    expect(
+      store.commitMorePosts("nike", {
+        ...preview("nike", "42", [post("p12")]),
+        profile: {
+          ...preview("nike", "42").profile,
+          media_count: 25,
+        },
+        end_cursor: null,
+      }),
+    ).toBe(true);
+    expect(store.postsPage).toBe(2);
+    expect(store.postsPageSize).toBe(12);
+
+    expect(store.commitReelsPage("42", [post("r1")], null, "reels-next")).toBe(true);
+    expect(store.reelsPage).toBe(1);
+    expect(store.commitReelsPage("42", [post("r2")], "reels-next", null)).toBe(true);
+    expect(store.reelsPage).toBe(2);
+
+    store.beginProfileLoad();
+    expect(store.postsPage).toBe(0);
+    expect(store.postsPageSize).toBe(0);
+    expect(store.reelsPage).toBe(0);
+  });
+
   it("persists a Posts filter without changing retained selections and resets it for a replacement profile", () => {
     const pinia = createPinia();
     setActivePinia(pinia);

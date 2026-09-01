@@ -16,8 +16,8 @@ use crate::config::Config;
 use crate::hiker::{map_post, map_profile, map_search_user};
 use crate::jobs::JobRegistry;
 use crate::models::{
-    DirectItem, FetchedPostCategory, FetchedPostScope, Post, Profile, ProfileOptions, SearchUser,
-    StoryItem,
+    DirectItem, FetchedPostCategory, FetchedPostScope, Post, Profile, ProfileOptions,
+    RelationshipKind, SearchUser, StoryItem, UserPage,
 };
 use crate::targets::Target;
 use crate::AppState;
@@ -1020,6 +1020,61 @@ pub async fn search_users(
     let client = client(&state).await?;
     let users = client.search_accounts(q).await.map_err(|e| e.to_string())?;
     Ok(users.iter().filter_map(map_search_user).collect())
+}
+
+#[tauri::command]
+pub async fn fetch_profile_summary(
+    username: String,
+    state: State<'_, AppState>,
+) -> Result<Profile, String> {
+    let client = client(&state).await?;
+    let user = client
+        .user_by_username(username.trim())
+        .await
+        .map_err(|error| error.to_string())?;
+    map_profile(&user).ok_or_else(|| "Could not parse profile payload".to_owned())
+}
+
+#[tauri::command]
+pub async fn fetch_relationships(
+    user_id: String,
+    kind: RelationshipKind,
+    max_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<UserPage, String> {
+    let client = client(&state).await?;
+    match kind {
+        RelationshipKind::Followers => {
+            client
+                .user_followers_chunk(user_id.trim(), max_id.as_deref())
+                .await
+        }
+        RelationshipKind::Following => {
+            client
+                .user_following_chunk(user_id.trim(), max_id.as_deref())
+                .await
+        }
+    }
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn search_relationships(
+    user_id: String,
+    kind: RelationshipKind,
+    query: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<SearchUser>, String> {
+    let query = query.trim();
+    if query.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let client = client(&state).await?;
+    match kind {
+        RelationshipKind::Followers => client.search_followers(user_id.trim(), query).await,
+        RelationshipKind::Following => client.search_following(user_id.trim(), query).await,
+    }
+    .map_err(|error| error.to_string())
 }
 
 #[derive(Serialize)]

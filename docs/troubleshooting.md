@@ -10,7 +10,7 @@ Your balance hit zero mid-run (HTTP 402). Top up at [hikerapi.com](https://hiker
 
 ## "Not found on Instagram (private profile or deleted post)"
 
-For a post link, the post may be deleted or belong to an inaccessible private account. A private profile lookup should still show its public avatar; its posts, reels, stories and highlights remain unavailable.
+For a post link, the post may be deleted or belong to an inaccessible private account. A private profile lookup should still show its public avatar; its posts, reels, stories, highlights, Followers and Following lists remain unavailable.
 
 ## Downloads fail with "CDN host … is not allowed"
 

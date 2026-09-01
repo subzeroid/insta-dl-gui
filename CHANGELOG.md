@@ -2,6 +2,24 @@
 
 All notable changes to insta-dl-gui are documented in this file.
 
+## 0.6.0 - 2026-09-01
+
+### Added
+
+- Profiles now link to paginated Followers and Following pages with search, loading states, retry behavior, and direct navigation back into Explore.
+- Explore shows the current loaded page for Posts and Reels, plus an estimated total page count for Posts.
+- Queue records and displays when each download started and, for terminal jobs, when it finished.
+
+### Changed
+
+- Post type filters live on a dedicated second row with consistent segmented-control borders, while the download scopes use the primary action color.
+- HikerAPI token and network proxy fields remain readable while editing so values can be verified before applying them.
+
+### Fixed
+
+- Failed relationship pagination retries the same cursor without discarding already loaded accounts.
+- Private profiles explain that Followers and Following are unavailable instead of issuing relationship or search requests.
+
 ## 0.5.0 - 2026-08-30
 
 ### Added

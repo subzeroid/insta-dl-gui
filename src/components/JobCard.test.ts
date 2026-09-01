@@ -115,3 +115,47 @@ describe("JobCard completed download inspection", () => {
     expect(wrapper.emitted("inspect")).toBeUndefined();
   });
 });
+
+describe("JobCard timing", () => {
+  const formatter = new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "medium",
+  });
+
+  it("shows localized start and finish timestamps for a completed job", () => {
+    const startedAt = Date.parse("2026-09-01T09:10:11.000Z");
+    const finishedAt = Date.parse("2026-09-01T09:12:13.000Z");
+    const wrapper = render(doneJob({ startedAt, finishedAt }));
+
+    expect(wrapper.get("[data-job-timing]").text()).toContain(
+      `Started: ${formatter.format(startedAt)}`,
+    );
+    expect(wrapper.get("[data-job-timing]").text()).toContain(
+      `Finished: ${formatter.format(finishedAt)}`,
+    );
+    expect(wrapper.get("[data-job-started-at]").attributes("datetime")).toBe(
+      new Date(startedAt).toISOString(),
+    );
+    expect(wrapper.get("[data-job-finished-at]").attributes("datetime")).toBe(
+      new Date(finishedAt).toISOString(),
+    );
+  });
+
+  it("marks an active job as in progress", () => {
+    const startedAt = Date.parse("2026-09-01T09:10:11.000Z");
+    const wrapper = render(doneJob({ state: "downloading", startedAt }));
+
+    expect(wrapper.get("[data-job-timing]").text()).toContain(
+      `Started: ${formatter.format(startedAt)}`,
+    );
+    expect(wrapper.get("[data-job-timing]").text()).toContain("In progress");
+    expect(wrapper.find("[data-job-finished-at]").exists()).toBe(false);
+  });
+
+  it("does not invent timestamps for legacy in-memory cards", () => {
+    const wrapper = render(doneJob());
+
+    expect(wrapper.get("[data-job-timing]").text()).toContain("Started: —");
+    expect(wrapper.get("[data-job-timing]").text()).toContain("Finished: —");
+  });
+});

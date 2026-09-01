@@ -103,12 +103,15 @@ describe("Settings Library registration warning", () => {
     expect(link.text()).toContain("Library");
   });
 
-  it("shows the masked current token and keeps empty replacement disabled", async () => {
+  it("shows the safe current token and keeps replacement text readable", async () => {
     const { wrapper } = await renderSettings();
 
     expect(wrapper.get("[data-testid='token-hint']").text()).toContain("***old1");
-    expect(wrapper.get("input[name='hiker-token']").attributes("type")).toBe("password");
+    const input = wrapper.get<HTMLInputElement>("input[name='hiker-token']");
+    expect(input.attributes("type")).toBe("text");
     expect(wrapper.get("[data-testid='replace-token']").attributes("disabled")).toBeDefined();
+    await input.setValue("visible-token");
+    expect(input.element.value).toBe("visible-token");
   });
 
   it("labels the proxy input and shows only the safe stored hint", async () => {
@@ -120,7 +123,7 @@ describe("Settings Library registration warning", () => {
     const label = wrapper.get<HTMLLabelElement>('label[for="network-proxy"]');
     const input = wrapper.get<HTMLInputElement>("#network-proxy");
     expect(label.text()).toBe("Network proxy");
-    expect(input.attributes("type")).toBe("password");
+    expect(input.attributes("type")).toBe("text");
     expect(input.attributes("aria-describedby")).toBe(
       "proxy-explanation proxy-current proxy-support",
     );
@@ -130,6 +133,11 @@ describe("Settings Library registration warning", () => {
     expect(input.element.value).toBe("");
     expect(wrapper.html()).not.toContain("alice");
     expect(wrapper.html()).not.toContain("secret");
+    await input.setValue("socks5h://alice:secret@proxy.example:1080");
+    expect(input.element.value).toBe("socks5h://alice:secret@proxy.example:1080");
+    expect(wrapper.get("[data-testid='proxy-hint']").text()).toBe(
+      "socks5h://***@proxy.example:1080/",
+    );
   });
 
   it("applies a trimmed replacement proxy and updates the safe stored hint", async () => {

@@ -18,6 +18,8 @@ export interface JobView {
   requestedItems?: number;
   outputs?: JobOutputFile[];
   conflictKeys?: string[];
+  startedAt?: number;
+  finishedAt?: number;
 }
 
 export const useJobsStore = defineStore("jobs", () => {
@@ -26,6 +28,7 @@ export const useJobsStore = defineStore("jobs", () => {
   let started = false;
 
   function apply(p: JobProgress) {
+    const observedAt = Date.now();
     const existing = jobs.get(p.job_id);
     const job =
       existing ??
@@ -45,8 +48,11 @@ export const useJobsStore = defineStore("jobs", () => {
         requestedItems: undefined,
         outputs: undefined,
         conflictKeys: [],
+        startedAt: observedAt,
+        finishedAt: undefined,
       });
     if (!existing) jobs.set(p.job_id, job);
+    job.startedAt ??= observedAt;
     job.state = p.state;
     if (p.state === "downloading") {
       job.currentFile = p.current_file ?? job.currentFile;
@@ -65,6 +71,9 @@ export const useJobsStore = defineStore("jobs", () => {
     if (p.state === "failed") {
       job.error = p.error;
     }
+    if (p.state === "done" || p.state === "failed" || p.state === "cancelled") {
+      job.finishedAt ??= observedAt;
+    }
   }
 
   async function init() {
@@ -81,6 +90,7 @@ export const useJobsStore = defineStore("jobs", () => {
     if (existing) {
       existing.label = label;
       existing.conflictKeys = [...new Set([...(existing.conflictKeys ?? []), ...normalizedKeys])];
+      existing.startedAt ??= Date.now();
     } else {
       jobs.set(id, reactive({
         id,
@@ -98,6 +108,8 @@ export const useJobsStore = defineStore("jobs", () => {
         requestedItems: undefined,
         outputs: undefined,
         conflictKeys: normalizedKeys,
+        startedAt: Date.now(),
+        finishedAt: undefined,
       }));
     }
   }

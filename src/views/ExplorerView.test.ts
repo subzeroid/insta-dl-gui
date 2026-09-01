@@ -113,7 +113,14 @@ function render(pinia: Pinia = createPinia()) {
   const wrapper = mount(ExplorerView, {
     global: {
       plugins: [pinia],
-      stubs: { JobCard: true, PostModal: true },
+      stubs: {
+        JobCard: true,
+        PostModal: true,
+        RouterLink: {
+          props: ["to"],
+          template: '<a :data-to="JSON.stringify(to)"><slot /></a>',
+        },
+      },
     },
   });
   wrappers.push(wrapper);
@@ -135,6 +142,11 @@ async function loadProfile(
 }
 
 function button(wrapper: ReturnType<typeof render>, label: string) {
+  const download = wrapper
+    .find("[role='group'][aria-label='Download']")
+    .findAll("button")
+    .find((item) => item.text() === label);
+  if (download) return download;
   const found = wrapper.findAll("button").find((item) => item.text() === label);
   if (!found) throw new Error(`Button not found: ${label}`);
   return found;
@@ -155,7 +167,8 @@ function finishJob(jobId: string, state: "done" | "failed" | "cancelled" = "done
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  ipc.remoteMediaUrl.mockImplementation((url: string) => `remote-media:${url}`);
   ipc.fetchStories.mockResolvedValue([]);
 });
 
@@ -163,6 +176,7 @@ afterEach(() => {
   for (const wrapper of wrappers.splice(0)) wrapper.unmount();
   document.body.replaceChildren();
   vi.useRealTimers();
+  window.history.replaceState({}, "", "/");
 });
 
 describe("ExplorerView async wiring", () => {
@@ -204,6 +218,38 @@ describe("ExplorerView async wiring", () => {
     expect(wrapper.get('[data-story-id="story"] img').attributes("src")).toBe(
       "remote-media:https://cdninstagram.com/story.jpg",
     );
+  });
+
+  it("links public profile counts to Followers and Following pages", async () => {
+    const wrapper = render();
+    await loadProfile(wrapper, {
+      ...preview,
+      profile: {
+        ...preview.profile,
+        follower_count: 291_000_000,
+        following_count: 234,
+      },
+    });
+
+    expect(wrapper.get('[data-relationship="followers"]').attributes("data-to")).toContain(
+      "/explore/nike/followers",
+    );
+    expect(wrapper.get('[data-relationship="followers"]').text()).toContain("291M followers");
+    expect(wrapper.get('[data-relationship="following"]').attributes("data-to")).toContain(
+      "/explore/nike/following",
+    );
+    expect(wrapper.get('[data-relationship="following"]').text()).toContain("234 following");
+  });
+
+  it("loads a profile requested by a relationship-result deep link", async () => {
+    window.history.replaceState({}, "", "/explore?profile=adidas");
+    ipc.fetchProfile.mockResolvedValueOnce(adidasPreview);
+    const wrapper = render();
+    await flushPromises();
+
+    expect(ipc.fetchProfile).toHaveBeenCalledWith("adidas", null);
+    expect(wrapper.get("input").element.value).toBe("@adidas");
+    expect(wrapper.text()).toContain("Adidas");
   });
 
   it("filters loaded Posts for the grid and Shown download while preserving hidden selected posts", async () => {
@@ -371,7 +417,7 @@ describe("ExplorerView async wiring", () => {
     });
 
     await wrapper.get('[data-post-filter="photos"]').trigger("click");
-    expect(wrapper.text()).toContain("No matching loaded posts.");
+    expect(wrapper.text()).toContain("No photos in 1 loaded post.");
     expect(button(wrapper, "Load more").exists()).toBe(true);
 
     await button(wrapper, "Reels").trigger("click");
@@ -381,18 +427,74 @@ describe("ExplorerView async wiring", () => {
     expect(wrapper.find("[data-post-filter]").exists()).toBe(false);
   });
 
+  it("shows the current Posts page and total pages calculated from the profile count", async () => {
+    const firstPage = Array.from({ length: 12 }, (_, index) =>
+      photoPost(`p${index}`, `https://cdninstagram.com/p${index}`),
+    );
+    const secondPage = Array.from({ length: 12 }, (_, index) =>
+      photoPost(`p${index + 12}`, `https://cdninstagram.com/p${index + 12}`),
+    );
+    const wrapper = render();
+    await loadProfile(wrapper, {
+      ...preview,
+      profile: { ...preview.profile, media_count: 25 },
+      recent_posts: firstPage,
+      end_cursor: "posts-page-2",
+    });
+
+    expect(wrapper.get("[data-pagination-status]").text()).toBe("Page 1 of 3");
+    ipc.fetchProfile.mockResolvedValueOnce({
+      ...preview,
+      profile: { ...preview.profile, media_count: 25 },
+      recent_posts: secondPage,
+      end_cursor: "posts-page-3",
+    });
+    await button(wrapper, "Load more").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get("[data-pagination-status]").text()).toBe("Page 2 of 3");
+  });
+
+  it("shows only the current Reels page because the clips API has no reels total", async () => {
+    ipc.fetchReels
+      .mockResolvedValueOnce({
+        posts: [videoPost("r1", "https://cdninstagram.com/r1")],
+        end_cursor: "reels-page-2",
+      })
+      .mockResolvedValueOnce({
+        posts: [videoPost("r2", "https://cdninstagram.com/r2")],
+        end_cursor: null,
+      });
+    const wrapper = render();
+    await loadProfile(wrapper, {
+      ...preview,
+      profile: { ...preview.profile, media_count: 25 },
+    });
+
+    await button(wrapper, "Reels").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-pagination-status]").text()).toBe("Page 1");
+
+    await button(wrapper, "Load more").trigger("click");
+    await flushPromises();
+    expect(wrapper.get("[data-pagination-status]").text()).toBe("Page 2");
+  });
+
   it("uses a filter-specific empty state for every empty Posts media filter", async () => {
     const cases = [
       {
         filter: "photos",
+        label: "photos",
         posts: [videoPost("video", "https://cdninstagram.com/video")],
       },
       {
         filter: "videos",
+        label: "videos",
         posts: [photoPost("photo", "https://cdninstagram.com/photo")],
       },
       {
         filter: "carousels",
+        label: "carousels",
         posts: [photoPost("photo", "https://cdninstagram.com/photo")],
       },
     ] as const;
@@ -407,7 +509,7 @@ describe("ExplorerView async wiring", () => {
 
       await wrapper.get(`[data-post-filter="${entry.filter}"]`).trigger("click");
       expect(wrapper.findAll("[data-media-id]")).toHaveLength(0);
-      expect(wrapper.text()).toContain("No matching loaded posts.");
+      expect(wrapper.text()).toContain(`No ${entry.label} in 1 loaded post.`);
       expect(wrapper.text()).not.toContain("No posts yet.");
       expect(button(wrapper, "Shown 0").attributes("disabled")).toBeDefined();
       expect(button(wrapper, "Load more").exists()).toBe(true);
@@ -572,6 +674,27 @@ describe("ExplorerView async wiring", () => {
     expect(wrapper.text()).not.toContain("Download all posts");
     expect(wrapper.text()).not.toContain("Download shown (");
     expect(wrapper.text()).not.toContain("Download all stories");
+  });
+
+  it("keeps tabs and downloads on the first row with a clean Posts filter row below", async () => {
+    const wrapper = render();
+    await loadProfile(wrapper, {
+      ...preview,
+      recent_posts: [photoPost("photo", "https://cdninstagram.com/photo")],
+    });
+
+    const toolbar = wrapper.get("[data-explorer-toolbar]");
+    expect(toolbar.find('[data-explore-tabs]').exists()).toBe(true);
+    expect(toolbar.find('[aria-label="Download"]').exists()).toBe(true);
+    expect(toolbar.find('[aria-label="Posts filter"]').exists()).toBe(false);
+
+    const filterRow = wrapper.get("[data-post-filter-row]");
+    const filters = filterRow.findAll("button");
+    expect(filterRow.find('[aria-label="Posts filter"]').exists()).toBe(true);
+    expect(filters).toHaveLength(4);
+    expect(filters.every((filter) => filter.classes().includes("border-l"))).toBe(true);
+    expect(filters[0].classes()).toContain("shadow-[inset_0_-2px_0_var(--color-accent)]");
+    expect(filters[0].classes()).not.toContain("ring-1");
   });
 
   it("suppresses duplicate group actions, disables the group, and retries after failure", async () => {
@@ -1562,6 +1685,28 @@ describe("ExplorerView async wiring", () => {
     expect(second.findAll("[data-media-id] img")).toHaveLength(1);
     expect(ipc.fetchProfile).toHaveBeenCalledTimes(1);
     expect(ipc.fetchReels).toHaveBeenCalledTimes(1);
+  });
+
+  it("resumes unresolved Reels when a retained profile route remounts", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const store = useExplorerStore();
+    store.commitProfile(preview);
+    store.activeTab = "reels";
+    window.history.replaceState({}, "", "/explore?profile=nike");
+    ipc.fetchReels.mockResolvedValue({
+      posts: [videoPost("r1", "https://cdninstagram.com/recovered-reel.jpg")],
+      end_cursor: null,
+    });
+
+    const wrapper = render(pinia);
+    await flushPromises();
+
+    expect(ipc.fetchProfile).not.toHaveBeenCalled();
+    expect(ipc.fetchReels).toHaveBeenCalledWith("42", null);
+    expect(wrapper.get('[data-media-id="r1"] img').attributes("src")).toBe(
+      "remote-media:https://cdninstagram.com/recovered-reel.jpg",
+    );
   });
 
   it("auto-loads unresolved stories once when a public profile remounts", async () => {
