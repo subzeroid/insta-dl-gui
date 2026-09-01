@@ -546,6 +546,21 @@ function openPostModal(post: Post) {
   modalPost.value = post;
 }
 
+function resumeRetainedProfile() {
+  if (!preview.value) return;
+  if (
+    !preview.value.profile.is_private &&
+    stories.value === null &&
+    storiesError.value === null &&
+    !storiesLoading.value
+  ) {
+    void loadStories();
+  }
+  if (activeTab.value === "reels" && !reelsLoaded.value) {
+    void loadReels(null);
+  }
+}
+
 onMounted(() => {
   const requestedProfile = new URLSearchParams(window.location.search)
     .get("profile")
@@ -555,21 +570,13 @@ onMounted(() => {
     query.value = `@${requestedProfile}`;
     if (preview.value?.profile.username.toLowerCase() !== requestedProfile.toLowerCase()) {
       void loadProfile(requestedProfile);
+    } else {
+      resumeRetainedProfile();
     }
     return;
   }
   if (preview.value) {
-    if (
-      !preview.value.profile.is_private &&
-      stories.value === null &&
-      storiesError.value === null &&
-      !storiesLoading.value
-    ) {
-      void loadStories();
-    }
-    if (activeTab.value === "reels" && !reelsLoaded.value) {
-      void loadReels(null);
-    }
+    resumeRetainedProfile();
     return;
   }
   if (new URLSearchParams(window.location.search).get("demo") === "explore") {

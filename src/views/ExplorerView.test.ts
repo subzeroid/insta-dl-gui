@@ -1687,6 +1687,28 @@ describe("ExplorerView async wiring", () => {
     expect(ipc.fetchReels).toHaveBeenCalledTimes(1);
   });
 
+  it("resumes unresolved Reels when a retained profile route remounts", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const store = useExplorerStore();
+    store.commitProfile(preview);
+    store.activeTab = "reels";
+    window.history.replaceState({}, "", "/explore?profile=nike");
+    ipc.fetchReels.mockResolvedValue({
+      posts: [videoPost("r1", "https://cdninstagram.com/recovered-reel.jpg")],
+      end_cursor: null,
+    });
+
+    const wrapper = render(pinia);
+    await flushPromises();
+
+    expect(ipc.fetchProfile).not.toHaveBeenCalled();
+    expect(ipc.fetchReels).toHaveBeenCalledWith("42", null);
+    expect(wrapper.get('[data-media-id="r1"] img').attributes("src")).toBe(
+      "remote-media:https://cdninstagram.com/recovered-reel.jpg",
+    );
+  });
+
   it("auto-loads unresolved stories once when a public profile remounts", async () => {
     const pinia = createPinia();
     setActivePinia(pinia);
