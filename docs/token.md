@@ -18,6 +18,8 @@ One request ≈ one API call. Typical costs:
 | Profile preview (what you see before downloading) | 2 |
 | Feed pagination | 1 per page (~12–18 posts each) |
 | Reels pagination | 1 per clips page |
+| Followers or Following pagination | 1 per page |
+| Search a Followers or Following list | 1 |
 | Stories | 2 |
 | Highlights listing | 2 |
 | Each highlight reel's items | 1 per reel |
