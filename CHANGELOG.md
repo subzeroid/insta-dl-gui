@@ -7,7 +7,7 @@ All notable changes to insta-dl-gui are documented in this file.
 ### Added
 
 - Profiles now link to paginated Followers and Following pages with search, loading states, retry behavior, and direct navigation back into Explore.
-- Explore shows the current loaded page and an estimated total page count for Posts and Reels.
+- Explore shows the current loaded page for Posts and Reels, plus an estimated total page count for Posts.
 - Queue records and displays when each download started and, for terminal jobs, when it finished.
 
 ### Changed
