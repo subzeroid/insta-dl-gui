@@ -17,6 +17,8 @@ import type {
   LibraryScanProgress,
   Post,
   ProfileOptions,
+  RelationshipKind,
+  SearchUser,
 } from "./ipc";
 
 type CmdArgs = Record<string, unknown>;
@@ -144,6 +146,21 @@ const MOCK_STORIES = [
   },
 ];
 const MOCK_STORY_KINDS = new Map(MOCK_STORIES.map((story) => [story.pk, story.kind]));
+
+function mockRelationshipUsers(kind: RelationshipKind): SearchUser[] {
+  const names = kind === "following"
+    ? ["meta", "metaglasses", ...Array.from({ length: 22 }, (_, index) => `following_${index + 3}`)]
+    : Array.from({ length: 24 }, (_, index) => `follower_${index + 1}`);
+  return names.map((username, index) => ({
+    pk: `${(kind === "followers" ? 8_000_000 : 8_100_000) + index}`,
+    username,
+    full_name: username.replace(/_/g, " ").replace(/^./, (letter: string) => letter.toUpperCase()),
+    is_verified: index === 0,
+    is_private: index % 7 === 0,
+    avatar_url: AVATAR,
+  }));
+}
+
 const MOCK_REMOTE_MEDIA_FIXTURES = new Set([
   AVATAR,
   MOCK_VIDEO,
@@ -678,6 +695,7 @@ function reply(
           full_name: "Instagram",
           media_count: 7421,
           follower_count: 713_000_000,
+          following_count: 234,
           is_private: false,
           is_verified: true,
           avatar_url: AVATAR,
@@ -702,6 +720,33 @@ function reply(
         }),
         end_cursor: args?.endCursor ? null : "cursor",
       };
+    }
+    case "fetch_profile_summary":
+      return {
+        pk: "25025320",
+        username: String(args?.username ?? "instagram"),
+        full_name: "Instagram",
+        media_count: 7421,
+        follower_count: 713_000_000,
+        following_count: 234,
+        is_private: false,
+        is_verified: true,
+        avatar_url: AVATAR,
+      };
+    case "fetch_relationships": {
+      const kind = args?.kind === "following" ? "following" : "followers";
+      const pageStart = args?.maxId ? 12 : 0;
+      return {
+        users: mockRelationshipUsers(kind).slice(pageStart, pageStart + 12),
+        next_cursor: args?.maxId ? null : `${kind}-cursor`,
+      };
+    }
+    case "search_relationships": {
+      const kind = args?.kind === "following" ? "following" : "followers";
+      const query = String(args?.query ?? "").trim().toLowerCase();
+      return mockRelationshipUsers(kind).filter((user) =>
+        `${user.username} ${user.full_name ?? ""}`.toLowerCase().includes(query),
+      );
     }
     case "fetch_reels": {
       const pageStart = args?.endCursor ? 11 : 0;

@@ -289,6 +289,7 @@ export interface Profile {
   full_name?: string;
   media_count: number;
   follower_count?: number;
+  following_count?: number;
   is_private: boolean;
   is_verified: boolean;
   avatar_url?: string;
@@ -312,6 +313,13 @@ export interface SearchUser {
   is_verified: boolean;
   is_private: boolean;
   avatar_url?: string;
+}
+
+export type RelationshipKind = "followers" | "following";
+
+export interface UserPage {
+  users: SearchUser[];
+  next_cursor: string | null;
 }
 
 export interface StoryItem {
@@ -343,6 +351,26 @@ export async function resolveInput(input: string): Promise<Target> {
 
 export async function fetchProfile(username: string, endCursor?: string | null): Promise<ProfilePreview> {
   return invoke("fetch_profile", { username, endCursor: endCursor ?? null });
+}
+
+export async function fetchProfileSummary(username: string): Promise<Profile> {
+  return invoke("fetch_profile_summary", { username });
+}
+
+export async function fetchRelationships(
+  userId: string,
+  kind: RelationshipKind,
+  maxId?: string | null,
+): Promise<UserPage> {
+  return invoke("fetch_relationships", { userId, kind, maxId: maxId ?? null });
+}
+
+export async function searchRelationships(
+  userId: string,
+  kind: RelationshipKind,
+  query: string,
+): Promise<SearchUser[]> {
+  return invoke("search_relationships", { userId, kind, query });
 }
 
 export async function fetchReels(userId: string, endCursor?: string | null): Promise<MediaPage> {

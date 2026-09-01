@@ -113,7 +113,14 @@ function render(pinia: Pinia = createPinia()) {
   const wrapper = mount(ExplorerView, {
     global: {
       plugins: [pinia],
-      stubs: { JobCard: true, PostModal: true },
+      stubs: {
+        JobCard: true,
+        PostModal: true,
+        RouterLink: {
+          props: ["to"],
+          template: '<a :data-to="JSON.stringify(to)"><slot /></a>',
+        },
+      },
     },
   });
   wrappers.push(wrapper);
@@ -169,6 +176,7 @@ afterEach(() => {
   for (const wrapper of wrappers.splice(0)) wrapper.unmount();
   document.body.replaceChildren();
   vi.useRealTimers();
+  window.history.replaceState({}, "", "/");
 });
 
 describe("ExplorerView async wiring", () => {
@@ -210,6 +218,38 @@ describe("ExplorerView async wiring", () => {
     expect(wrapper.get('[data-story-id="story"] img').attributes("src")).toBe(
       "remote-media:https://cdninstagram.com/story.jpg",
     );
+  });
+
+  it("links public profile counts to Followers and Following pages", async () => {
+    const wrapper = render();
+    await loadProfile(wrapper, {
+      ...preview,
+      profile: {
+        ...preview.profile,
+        follower_count: 291_000_000,
+        following_count: 234,
+      },
+    });
+
+    expect(wrapper.get('[data-relationship="followers"]').attributes("data-to")).toContain(
+      "/explore/nike/followers",
+    );
+    expect(wrapper.get('[data-relationship="followers"]').text()).toContain("291M followers");
+    expect(wrapper.get('[data-relationship="following"]').attributes("data-to")).toContain(
+      "/explore/nike/following",
+    );
+    expect(wrapper.get('[data-relationship="following"]').text()).toContain("234 following");
+  });
+
+  it("loads a profile requested by a relationship-result deep link", async () => {
+    window.history.replaceState({}, "", "/explore?profile=adidas");
+    ipc.fetchProfile.mockResolvedValueOnce(adidasPreview);
+    const wrapper = render();
+    await flushPromises();
+
+    expect(ipc.fetchProfile).toHaveBeenCalledWith("adidas", null);
+    expect(wrapper.get("input").element.value).toBe("@adidas");
+    expect(wrapper.text()).toContain("Adidas");
   });
 
   it("filters loaded Posts for the grid and Shown download while preserving hidden selected posts", async () => {

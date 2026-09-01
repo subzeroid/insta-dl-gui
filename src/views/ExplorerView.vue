@@ -179,6 +179,11 @@ function fmt(n?: number): string {
   return n === undefined ? "—" : new Intl.NumberFormat("en", { notation: "compact" }).format(n);
 }
 
+function relationshipPath(kind: "followers" | "following") {
+  const username = preview.value?.profile.username ?? "";
+  return `/explore/${encodeURIComponent(username)}/${kind}`;
+}
+
 function onQueryInput() {
   window.clearTimeout(debounce);
   const seq = requests.autocomplete.begin();
@@ -542,6 +547,17 @@ function openPostModal(post: Post) {
 }
 
 onMounted(() => {
+  const requestedProfile = new URLSearchParams(window.location.search)
+    .get("profile")
+    ?.trim()
+    .replace(/^@/, "");
+  if (requestedProfile) {
+    query.value = `@${requestedProfile}`;
+    if (preview.value?.profile.username.toLowerCase() !== requestedProfile.toLowerCase()) {
+      void loadProfile(requestedProfile);
+    }
+    return;
+  }
   if (preview.value) {
     if (
       !preview.value.profile.is_private &&
@@ -643,8 +659,28 @@ onUnmounted(() => {
               <span v-if="preview.profile.is_verified" class="text-sm text-sky-400" title="Verified">✔</span>
             </div>
             <p class="truncate text-sm text-slate-400">{{ preview.profile.full_name || "\u00A0" }}</p>
-            <p class="mt-0.5 text-xs tabular-nums text-slate-500">
-              {{ fmt(preview.profile.media_count) }} posts · {{ fmt(preview.profile.follower_count) }} followers
+            <p class="mt-0.5 flex flex-wrap items-center gap-x-1 text-xs tabular-nums text-slate-500">
+              <span>{{ fmt(preview.profile.media_count) }} posts</span>
+              <span aria-hidden="true">·</span>
+              <RouterLink
+                v-if="!preview.profile.is_private"
+                data-relationship="followers"
+                :to="relationshipPath('followers')"
+                class="underline decoration-transparent underline-offset-2 hover:text-slate-200 hover:decoration-current"
+              >
+                {{ fmt(preview.profile.follower_count) }} followers
+              </RouterLink>
+              <span v-else>{{ fmt(preview.profile.follower_count) }} followers</span>
+              <span aria-hidden="true">·</span>
+              <RouterLink
+                v-if="!preview.profile.is_private"
+                data-relationship="following"
+                :to="relationshipPath('following')"
+                class="underline decoration-transparent underline-offset-2 hover:text-slate-200 hover:decoration-current"
+              >
+                {{ fmt(preview.profile.following_count) }} following
+              </RouterLink>
+              <span v-else>{{ fmt(preview.profile.following_count) }} following</span>
             </p>
           </div>
           <div class="flex shrink-0 items-center gap-2">

@@ -102,6 +102,32 @@ fn parse_post_chunk(v: Value, label: &str) -> Result<crate::models::PostPage, Hi
     })
 }
 
+fn parse_user_chunk(v: Value, label: &str) -> Result<crate::models::UserPage, HikerError> {
+    let arr = v
+        .as_array()
+        .ok_or_else(|| HikerError::Transient(format!("{label}: expected [users, cursor]")))?;
+    let users = arr
+        .first()
+        .and_then(Value::as_array)
+        .ok_or_else(|| HikerError::Transient(format!("{label}: expected users array")))?;
+    let next_cursor = arr
+        .get(1)
+        .and_then(Value::as_str)
+        .filter(|cursor| !cursor.trim().is_empty())
+        .map(String::from);
+    Ok(crate::models::UserPage {
+        users: users.iter().filter_map(map_search_user).collect(),
+        next_cursor,
+    })
+}
+
+fn parse_users(v: Value, label: &str) -> Result<Vec<crate::models::SearchUser>, HikerError> {
+    let users = v
+        .as_array()
+        .ok_or_else(|| HikerError::Transient(format!("{label}: expected users array")))?;
+    Ok(users.iter().filter_map(map_search_user).collect())
+}
+
 /// Snapshot of quota captured from response headers.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct QuotaHeaders {
@@ -230,6 +256,62 @@ impl HikerClient {
             )
             .await?;
         parse_post_chunk(v, "clips/chunk")
+    }
+
+    pub async fn user_followers_chunk(
+        &self,
+        user_id: &str,
+        max_id: Option<&str>,
+    ) -> Result<crate::models::UserPage, HikerError> {
+        let (v, _) = self
+            .get(
+                "/v1/user/followers/chunk",
+                &[("user_id", user_id), ("max_id", max_id.unwrap_or(""))],
+            )
+            .await?;
+        parse_user_chunk(v, "followers/chunk")
+    }
+
+    pub async fn user_following_chunk(
+        &self,
+        user_id: &str,
+        max_id: Option<&str>,
+    ) -> Result<crate::models::UserPage, HikerError> {
+        let (v, _) = self
+            .get(
+                "/v1/user/following/chunk",
+                &[("user_id", user_id), ("max_id", max_id.unwrap_or(""))],
+            )
+            .await?;
+        parse_user_chunk(v, "following/chunk")
+    }
+
+    pub async fn search_followers(
+        &self,
+        user_id: &str,
+        query: &str,
+    ) -> Result<Vec<crate::models::SearchUser>, HikerError> {
+        let (v, _) = self
+            .get(
+                "/v1/user/search/followers",
+                &[("user_id", user_id), ("query", query)],
+            )
+            .await?;
+        parse_users(v, "search/followers")
+    }
+
+    pub async fn search_following(
+        &self,
+        user_id: &str,
+        query: &str,
+    ) -> Result<Vec<crate::models::SearchUser>, HikerError> {
+        let (v, _) = self
+            .get(
+                "/v1/user/search/following",
+                &[("user_id", user_id), ("query", query)],
+            )
+            .await?;
+        parse_users(v, "search/following")
     }
 
     /// GET /v2/user/stories (billed 2 requests) → `{"reel": {"items": [...]}}`.
@@ -385,6 +467,7 @@ pub fn map_profile(user: &serde_json::Value) -> Option<crate::models::Profile> {
             .and_then(|v| v.as_u64())
             .unwrap_or(0),
         follower_count: user.get("follower_count").and_then(|v| v.as_u64()),
+        following_count: user.get("following_count").and_then(|v| v.as_u64()),
         is_private: user
             .get("is_private")
             .and_then(|v| v.as_bool())
@@ -485,4 +568,85 @@ pub fn map_search_user(u: &Value) -> Option<crate::models::SearchUser> {
             .and_then(|v| v.as_str())
             .map(String::from),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn followers_chunk_uses_max_id_and_maps_the_safe_user_page() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/user/followers/chunk"))
+            .and(query_param("user_id", "42"))
+            .and(query_param("max_id", "cursor-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                [
+                    {
+                        "pk": 7,
+                        "username": "runner",
+                        "full_name": "Runner",
+                        "profile_pic_url": "https://cdninstagram.com/runner.jpg",
+                        "is_private": false,
+                        "is_verified": true
+                    },
+                    { "pk": "invalid-without-username" }
+                ],
+                "cursor-2"
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = HikerClient::with_base_url("token".into(), server.uri());
+
+        let page = client
+            .user_followers_chunk("42", Some("cursor-1"))
+            .await
+            .unwrap();
+
+        assert_eq!(page.next_cursor.as_deref(), Some("cursor-2"));
+        assert_eq!(page.users.len(), 1);
+        assert_eq!(page.users[0].pk, "7");
+        assert_eq!(page.users[0].username, "runner");
+        assert!(page.users[0].is_verified);
+    }
+
+    #[tokio::test]
+    async fn following_search_uses_the_dedicated_server_side_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/user/search/following"))
+            .and(query_param("user_id", "42"))
+            .and(query_param("query", "meta"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "pk": "9", "username": "meta", "full_name": "Meta" }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = HikerClient::with_base_url("token".into(), server.uri());
+
+        let users = client.search_following("42", "meta").await.unwrap();
+
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].username, "meta");
+    }
+
+    #[test]
+    fn profile_mapping_includes_the_following_count() {
+        let profile = map_profile(&serde_json::json!({
+            "pk": "42",
+            "username": "nike",
+            "media_count": 10,
+            "follower_count": 20,
+            "following_count": 30
+        }))
+        .unwrap();
+
+        assert_eq!(profile.follower_count, Some(20));
+        assert_eq!(profile.following_count, Some(30));
+    }
 }
