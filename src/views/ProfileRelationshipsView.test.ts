@@ -29,22 +29,28 @@ function user(pk: string, username: string) {
   };
 }
 
-function render(kind: "followers" | "following" = "followers", isPrivate = false) {
+function render(
+  kind: "followers" | "following" = "followers",
+  isPrivate = false,
+  seedProfile = true,
+) {
   const pinia = createPinia();
   setActivePinia(pinia);
-  useExplorerStore(pinia).commitProfile({
-    profile: {
-      pk: "42",
-      username: "nike",
-      media_count: 10,
-      follower_count: 5,
-      following_count: 4,
-      is_private: isPrivate,
-      is_verified: true,
-    },
-    recent_posts: [],
-    end_cursor: null,
-  });
+  if (seedProfile) {
+    useExplorerStore(pinia).commitProfile({
+      profile: {
+        pk: "42",
+        username: "nike",
+        media_count: 10,
+        follower_count: 5,
+        following_count: 4,
+        is_private: isPrivate,
+        is_verified: true,
+      },
+      recent_posts: [],
+      end_cursor: null,
+    });
+  }
   const wrapper = mount(ProfileRelationshipsView, {
     props: { username: "nike", kind },
     global: {
@@ -73,6 +79,36 @@ afterEach(() => {
 });
 
 describe("ProfileRelationshipsView", () => {
+  it("loads a cold profile route and proxies profile and relationship avatars", async () => {
+    ipc.fetchProfileSummary.mockResolvedValue({
+      pk: "42",
+      username: "nike",
+      full_name: "Nike",
+      media_count: 10,
+      follower_count: 5,
+      following_count: 4,
+      is_private: false,
+      is_verified: true,
+      avatar_url: "https://cdninstagram.com/nike.jpg",
+    });
+    ipc.fetchRelationships.mockResolvedValue({
+      users: [user("1", "runner")],
+      next_cursor: null,
+    });
+
+    const wrapper = render("followers", false, false);
+    await flushPromises();
+
+    expect(ipc.fetchProfileSummary).toHaveBeenCalledWith("nike");
+    expect(ipc.fetchRelationships).toHaveBeenCalledWith("42", "followers", null);
+    expect(wrapper.findAll("img").map((image) => image.attributes("src"))).toEqual([
+      "remote-media:https://cdninstagram.com/nike.jpg",
+      "remote-media:https://cdninstagram.com/runner.jpg",
+    ]);
+    expect(ipc.remoteMediaUrl).toHaveBeenCalledWith("https://cdninstagram.com/nike.jpg");
+    expect(ipc.remoteMediaUrl).toHaveBeenCalledWith("https://cdninstagram.com/runner.jpg");
+  });
+
   it("loads, merges, and counts cursor pages", async () => {
     ipc.fetchRelationships
       .mockResolvedValueOnce({

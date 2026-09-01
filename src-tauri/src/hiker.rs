@@ -573,7 +573,7 @@ pub fn map_search_user(u: &Value) -> Option<crate::models::SearchUser> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path, query_param};
+    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
@@ -612,6 +612,51 @@ mod tests {
         assert_eq!(page.users[0].pk, "7");
         assert_eq!(page.users[0].username, "runner");
         assert!(page.users[0].is_verified);
+    }
+
+    #[tokio::test]
+    async fn following_chunk_uses_its_dedicated_endpoint_and_empty_initial_cursor() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/user/following/chunk"))
+            .and(query_param("user_id", "42"))
+            .and(query_param_is_missing("max_id"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                [{ "pk": "8", "username": "sprinter", "is_private": true }],
+                null
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = HikerClient::with_base_url("token".into(), server.uri());
+
+        let page = client.user_following_chunk("42", None).await.unwrap();
+
+        assert_eq!(page.next_cursor, None);
+        assert_eq!(page.users.len(), 1);
+        assert_eq!(page.users[0].username, "sprinter");
+        assert!(page.users[0].is_private);
+    }
+
+    #[tokio::test]
+    async fn follower_search_uses_the_dedicated_server_side_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/user/search/followers"))
+            .and(query_param("user_id", "42"))
+            .and(query_param("query", "run"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "pk": "7", "username": "runner", "full_name": "Runner" }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = HikerClient::with_base_url("token".into(), server.uri());
+
+        let users = client.search_followers("42", "run").await.unwrap();
+
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].username, "runner");
     }
 
     #[tokio::test]
