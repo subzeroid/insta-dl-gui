@@ -23,6 +23,7 @@ vi.mock("../lib/ipc", () => ({
 }));
 
 import DownloadView from "./DownloadView.vue";
+import RemoteImage from "../components/RemoteImage.vue";
 import { useJobsStore } from "../stores/jobs";
 
 const publicPreview = {
@@ -64,7 +65,7 @@ beforeEach(() => {
 });
 
 describe("DownloadView concurrency", () => {
-  it("renders the profile avatar through the remote-media protocol", async () => {
+  it("renders the profile avatar through the resilient remote image boundary", async () => {
     ipc.resolveInput.mockResolvedValue({ kind: "profile", username: "nike" });
     ipc.fetchProfile.mockResolvedValue(publicPreview);
     const wrapper = render();
@@ -72,9 +73,11 @@ describe("DownloadView concurrency", () => {
     await wrapper.get("form").trigger("submit");
     await flushPromises();
 
-    expect(wrapper.get("img").attributes("src")).toBe(
-      `remote-media:${publicPreview.profile.avatar_url}`,
-    );
+    expect(wrapper.getComponent(RemoteImage).props()).toMatchObject({
+      source: publicPreview.profile.avatar_url,
+      alt: "@nike profile picture",
+      variant: "avatar",
+    });
   });
 
   it("leaves active download rendering to the global application footer", async () => {

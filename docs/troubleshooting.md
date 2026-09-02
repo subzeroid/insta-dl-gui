@@ -16,6 +16,20 @@ For a post link, the post may be deleted or belong to an inaccessible private ac
 
 A safety check: the app only downloads from official Instagram CDN hosts (`cdninstagram.com`, `fbcdn.net`). If you see this error on a normal post, the media URL likely expired between fetching and downloading — just retry; a fresh URL is minted per attempt.
 
+## Profile data loads, but Instagram previews do not
+
+![insta-dl-gui Explore with unavailable Instagram preview placeholders](troubleshooting-remote-media.png)
+
+Instagram profile data can load while avatars and post thumbnails fall back to neutral placeholders. When two distinct previews fail within 10 seconds, the app shows one global warning instead of reporting every failed image.
+
+- **Open Settings** jumps directly to the **Network proxy** card.
+- **Retry** reloads every currently mounted preview after you change the connection.
+- **Dismiss** hides the warning for the current app process only.
+
+On a direct connection, turn on a VPN and press **Retry**. If your network needs a shared proxy, configure it in Settings so both HikerAPI requests and Instagram media use the same route. If a proxy is already configured, verify its scheme, hostname, port and credentials, press **Apply proxy**, then retry; use **Clear proxy** when the connection should be direct.
+
+The warning cannot distinguish a local block from a proxy problem or a temporary upstream/CDN failure. It is preview-only: it does not block or alter profile metadata or download behavior, and it never displays failed media URLs, the HikerAPI token or proxy credentials.
+
 ## The network proxy is unreachable or rejects authentication
 
 Open **Settings** and verify the proxy scheme, hostname, port and credentials. The app accepts HTTP, HTTPS, SOCKS5 and SOCKS5H proxy URLs, including credentials in the URL. Press **Apply proxy** again after correcting it; the saved proxy is used for new HikerAPI requests and Instagram CDN/media downloads without restarting the app.

@@ -4,13 +4,15 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
   downloadDirect,
   downloadPost,
-  remoteMediaUrl,
   type FetchedPostCategory,
   type Post,
   type StoryItem,
 } from "../lib/ipc";
+import { tokenizeCaptionMentions } from "../lib/captionMentions";
 import { canonicalInstagramUrl } from "../lib/postDisplay";
 import { useJobsStore } from "../stores/jobs";
+import RemoteImage from "./RemoteImage.vue";
+import RemoteVideo from "./RemoteVideo.vue";
 
 const props = defineProps<{
   username: string;
@@ -19,7 +21,7 @@ const props = defineProps<{
   postCategory?: FetchedPostCategory;
 }>();
 
-const emit = defineEmits<{ close: [] }>();
+const emit = defineEmits<{ close: []; "open-profile": [username: string] }>();
 const jobs = useJobsStore();
 const busy = ref(false);
 const error = ref<string | null>(null);
@@ -28,25 +30,23 @@ const copyFeedback = ref<"description" | "link" | null>(null);
 let clearCopyFeedbackTimer: number | undefined;
 let copyGeneration = 0;
 
-const videoUrl = computed(() => {
-  const url = props.post
+const videoSource = computed(() =>
+  props.post
     ? props.post.resources.find((r) => r.kind === "video")?.url ?? ""
     : props.story?.kind === "video"
       ? props.story.media_url
-      : "";
-  return url ? remoteMediaUrl(url) : null;
-});
+      : "",
+);
 
-const imageUrl = computed(() => {
+const imageSource = computed(() => {
   if (props.post) {
-    const url =
-      props.post.thumbnail_url ?? props.post.resources.find((r) => r.kind === "photo")?.url ?? "";
-    return remoteMediaUrl(url);
+    return props.post.thumbnail_url ?? props.post.resources.find((r) => r.kind === "photo")?.url ?? "";
   }
-  return props.story?.kind === "photo" ? remoteMediaUrl(props.story.media_url) : "";
+  return props.story?.kind === "photo" ? props.story.media_url : "";
 });
 
 const caption = computed(() => props.post?.caption ?? "");
+const captionTokens = computed(() => tokenizeCaptionMentions(caption.value));
 const hasCaption = computed(() => caption.value.trim().length > 0);
 const canonicalPostUrl = computed(() =>
   props.post ? canonicalInstagramUrl(props.post.code, props.postCategory ?? "posts") : "",
@@ -93,6 +93,22 @@ function close() {
   emit("close");
 }
 
+function openProfile(event: MouseEvent, username: string) {
+  if (
+    event.button !== 0 ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.shiftKey ||
+    event.altKey
+  ) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  emit("open-profile", username);
+}
+
 async function download() {
   if (busy.value) return;
   busy.value = true;
@@ -134,13 +150,23 @@ watch(
 <template>
   <Teleport to="body">
     <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" @click.self="close">
-      <div class="card w-full max-w-xl overflow-hidden">
-        <video v-if="videoUrl" :src="videoUrl" controls class="max-h-[60vh] w-full bg-black" />
-        <img
-          v-else-if="imageUrl"
-          :src="imageUrl"
-          class="max-h-[60vh] w-full bg-black object-contain"
-          referrerpolicy="no-referrer"
+      <div
+        data-testid="post-modal-card"
+        class="card max-h-[calc(100vh-2rem)] w-full max-w-xl overflow-y-auto"
+      >
+        <RemoteVideo
+          v-if="videoSource"
+          :source="videoSource"
+          :label="`${meta} video preview`"
+          :controls="true"
+          class="h-[60vh] max-h-[60vh] w-full"
+        />
+        <RemoteImage
+          v-else-if="imageSource"
+          :source="imageSource"
+          :alt="`${meta} preview`"
+          variant="modal"
+          class="h-[60vh] max-h-[60vh] w-full bg-black"
         />
         <div v-else class="flex h-64 items-center justify-center bg-surface-2 text-sm text-slate-500">
           No preview available
@@ -148,7 +174,23 @@ watch(
 
         <div class="space-y-3 p-4">
           <p class="text-xs text-slate-500">{{ meta }}</p>
-          <p v-if="caption" class="line-clamp-4 text-sm text-slate-300">{{ caption }}</p>
+          <p
+            v-if="caption"
+            data-caption
+            class="whitespace-pre-wrap break-words text-sm text-slate-300"
+            :class="{ 'line-clamp-4': !captionTokens.some((token) => token.kind === 'mention') }"
+          >
+            <template v-for="(token, index) in captionTokens" :key="index">
+              <a
+                v-if="token.kind === 'mention'"
+                :data-caption-mention="token.username"
+                :href="`/explore?profile=${encodeURIComponent(token.username)}`"
+                class="rounded-sm text-accent underline decoration-current underline-offset-2 hover:decoration-current focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                @click="openProfile($event, token.username)"
+              >{{ token.text }}</a>
+              <template v-else>{{ token.text }}</template>
+            </template>
+          </p>
           <p v-if="error" class="rounded-lg border border-err/40 bg-err/10 px-3 py-2 text-sm text-err">{{ error }}</p>
           <p
             v-if="copyError"

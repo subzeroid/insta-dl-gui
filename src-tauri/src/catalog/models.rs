@@ -285,3 +285,21 @@ pub(crate) struct CatalogRecoveryFile {
     pub kind: MediaFileKind,
     pub byte_size: i64,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CatalogDownloadStatusCandidate {
+    pub root_id: i64,
+    pub root_path: PathBuf,
+    pub relative_path: PathBuf,
+    pub kind: MediaFileKind,
+    pub byte_size: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CatalogDownloadStatusEvidence {
+    pub remote_key: String,
+    pub ordinal: u32,
+    /// Saturated at two because callers only distinguish unique from ambiguous evidence.
+    pub candidate_count: u8,
+    pub candidate: Option<CatalogDownloadStatusCandidate>,
+}

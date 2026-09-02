@@ -610,6 +610,8 @@ describe("Library browsing", () => {
       "library://localhost/media/2002",
     );
     expect(videoCard.get("video").attributes("preload")).toBe("metadata");
+    expect(wrapper.find("[data-remote-image]").exists()).toBe(false);
+    expect(wrapper.find("[data-remote-video]").exists()).toBe(false);
   });
 
   it("falls back to the local video placeholder when a near-viewport preview fails", async () => {

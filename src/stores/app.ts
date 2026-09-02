@@ -1,9 +1,12 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
+import { getVersion } from "@tauri-apps/api/app";
 import * as ipc from "../lib/ipc";
+import { useRemoteMediaHealthStore } from "./remoteMediaHealth";
 
 export const useAppStore = defineStore("app", () => {
   const ready = ref(false);
+  const appVersion = ref<string | null>(null);
   const hasToken = ref(false);
   const tokenHint = ref<string | null>(null);
   const hasProxy = ref(false);
@@ -14,7 +17,16 @@ export const useAppStore = defineStore("app", () => {
   const catalogWarning = ref<string | null>(null);
   const balance = ref<ipc.Balance | null>(null);
 
+  async function loadAppVersion() {
+    try {
+      appVersion.value = (await getVersion()).trim() || null;
+    } catch {
+      appVersion.value = null;
+    }
+  }
+
   async function init() {
+    void loadAppVersion();
     const s = await ipc.configState();
     applyInitialState(s);
     ready.value = true;
@@ -54,7 +66,9 @@ export const useAppStore = defineStore("app", () => {
     if (proxySaving.value) return;
     proxySaving.value = true;
     try {
+      const remoteMediaHealth = useRemoteMediaHealthStore();
       applyProxyState(await ipc.setProxy(proxyUrl));
+      remoteMediaHealth.retryAll();
     } finally {
       proxySaving.value = false;
     }
@@ -71,12 +85,9 @@ export const useAppStore = defineStore("app", () => {
     return nextBalance;
   }
 
-  function onTokenSet() {
-    hasToken.value = true;
-  }
-
   return {
     ready,
+    appVersion,
     hasToken,
     tokenHint,
     hasProxy,
@@ -91,6 +102,5 @@ export const useAppStore = defineStore("app", () => {
     setProxy,
     refreshBalance,
     replaceToken,
-    onTokenSet,
   };
 });

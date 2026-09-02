@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { storeToRefs } from "pinia";
-import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import { useRoute, useRouter, type LocationQueryValue } from "vue-router";
 import {
+  checkDownloadStatuses,
   downloadDirect,
   downloadPost,
   enqueueFetchedPostDownload,
@@ -9,13 +11,14 @@ import {
   fetchProfile,
   fetchReels,
   fetchStories,
-  remoteMediaUrl,
   resolveInput,
   searchUsers,
   type Post,
   type SearchUser,
   type StoryItem,
   type FetchedPostCategory,
+  type DownloadStatus,
+  type DownloadStatusRequest,
 } from "../lib/ipc";
 import { useExplorerStore, type ExploreTab, type PostFilter } from "../stores/explorer";
 import { useJobsStore } from "../stores/jobs";
@@ -24,10 +27,13 @@ import DownloadScopeGroup from "../components/DownloadScopeGroup.vue";
 import MediaSelectionCheckbox from "../components/MediaSelectionCheckbox.vue";
 import MediaTypeBadge from "../components/MediaTypeBadge.vue";
 import PostModal from "../components/PostModal.vue";
+import RemoteImage from "../components/RemoteImage.vue";
 import { classifyPost } from "../lib/postDisplay";
 
 const jobs = useJobsStore();
 const explorer = useExplorerStore();
+const route = useRoute();
+const router = useRouter();
 const {
   query,
   profilePreview: preview,
@@ -65,6 +71,25 @@ const requests = createExplorerRequestState();
 const activeActions = reactive(new Set<string>());
 let profileSession = Symbol("explorer-profile-session");
 const MAX_EXACT_SNAPSHOT_ITEMS = 500;
+const DOWNLOAD_STATUS_CHUNK_SIZE = 500;
+
+interface DownloadStatusController {
+  generation: number;
+  running: boolean;
+  dirty: boolean;
+}
+
+const downloadStatuses = reactive<Record<ExploreTab, Map<string, DownloadStatus>>>({
+  posts: new Map(),
+  reels: new Map(),
+  stories: new Map(),
+});
+const downloadStatusControllers: Record<ExploreTab, DownloadStatusController> = {
+  posts: { generation: 0, running: false, dirty: false },
+  reels: { generation: 0, running: false, dirty: false },
+  stories: { generation: 0, running: false, dirty: false },
+};
+let downloadStatusesMounted = true;
 
 const tabs = [
   { id: "posts", label: "Posts" },
@@ -102,6 +127,130 @@ function isDownloadablePost(post: Post): boolean {
     post.resources.length > 0 &&
     post.resources.every((resource) => resource.kind === "photo" || resource.kind === "video")
   );
+}
+
+function postStatusRequests(posts: readonly Post[]): DownloadStatusRequest[] {
+  const requestsByPk = new Map<string, DownloadStatusRequest>();
+  for (const post of posts) {
+    if (!isDownloadablePost(post) || requestsByPk.has(post.pk)) continue;
+    requestsByPk.set(post.pk, {
+      namespace: "post",
+      pk: post.pk,
+      resources: post.resources.map((resource) => resource.kind as "photo" | "video"),
+    });
+  }
+  return [...requestsByPk.values()];
+}
+
+function storyStatusRequests(items: readonly StoryItem[]): DownloadStatusRequest[] {
+  const requestsByPk = new Map<string, DownloadStatusRequest>();
+  for (const item of items) {
+    if (requestsByPk.has(item.pk)) continue;
+    requestsByPk.set(item.pk, {
+      namespace: "story",
+      pk: item.pk,
+      resources: [item.kind],
+    });
+  }
+  return [...requestsByPk.values()];
+}
+
+function allStatusRequests(tab: ExploreTab): DownloadStatusRequest[] {
+  if (tab === "posts") return postStatusRequests(sourcePosts.value);
+  if (tab === "reels") return postStatusRequests(reels.value);
+  return storyStatusRequests(stories.value ?? []);
+}
+
+function invalidateDownloadStatuses(clear: boolean) {
+  for (const tab of tabs.map((item) => item.id)) {
+    const controller = downloadStatusControllers[tab];
+    controller.generation += 1;
+    controller.dirty = false;
+    if (clear) downloadStatuses[tab] = new Map();
+  }
+}
+
+function applyDownloadStatusResults(
+  tab: ExploreTab,
+  mode: "merge" | "full",
+  results: readonly DownloadStatus[],
+) {
+  const next = mode === "full" ? new Map<string, DownloadStatus>() : new Map(downloadStatuses[tab]);
+  for (const result of results) {
+    if (result.state === "not_downloaded") next.delete(result.pk);
+    else next.set(result.pk, result);
+  }
+  downloadStatuses[tab] = next;
+}
+
+async function refreshDownloadStatuses(
+  tab: ExploreTab,
+  mode: "merge" | "full",
+  requestedItems: readonly DownloadStatusRequest[] = allStatusRequests(tab),
+) {
+  const profile = preview.value?.profile;
+  if (!downloadStatusesMounted || !profile) return;
+  const controller = downloadStatusControllers[tab];
+  if (controller.running) {
+    controller.generation += 1;
+    controller.dirty = true;
+    return;
+  }
+
+  const items = [...requestedItems];
+  if (items.length === 0) {
+    if (mode === "full") downloadStatuses[tab] = new Map();
+    return;
+  }
+
+  const generation = ++controller.generation;
+  const session = profileSession;
+  const profilePk = profile.pk;
+  controller.running = true;
+  try {
+    const results: DownloadStatus[] = [];
+    for (let start = 0; start < items.length; start += DOWNLOAD_STATUS_CHUNK_SIZE) {
+      const chunk = items.slice(start, start + DOWNLOAD_STATUS_CHUNK_SIZE);
+      results.push(...await checkDownloadStatuses(chunk));
+    }
+    if (
+      downloadStatusesMounted &&
+      profileSession === session &&
+      preview.value?.profile.pk === profilePk &&
+      controller.generation === generation
+    ) {
+      applyDownloadStatusResults(tab, mode, results);
+    }
+  } catch {
+    // Status is ancillary. Keep the last verified badge and the main Explore flow usable.
+  } finally {
+    controller.running = false;
+    if (controller.dirty && downloadStatusesMounted && preview.value) {
+      controller.dirty = false;
+      void refreshDownloadStatuses(tab, "full");
+    }
+  }
+}
+
+function downloadStatus(tab: ExploreTab, pk: string): DownloadStatus | undefined {
+  return downloadStatuses[tab].get(pk);
+}
+
+function downloadStatusLabel(status: DownloadStatus): string {
+  return status.state === "downloaded"
+    ? "Downloaded"
+    : `Partial ${status.available_resources}/${status.expected_resources}`;
+}
+
+function mediaDownloadStatusLabel(tab: ExploreTab, pk: string): string | null {
+  const status = downloadStatus(tab, pk);
+  return status ? downloadStatusLabel(status) : null;
+}
+
+function mediaDownloadStatusClass(tab: ExploreTab, pk: string): string {
+  return downloadStatus(tab, pk)?.state === "partial"
+    ? "bg-amber-950/90 text-amber-300"
+    : "bg-emerald-950/90 text-emerald-300";
 }
 const downloadableGridPosts = computed(() => gridPosts.value.filter(isDownloadablePost));
 const downloadablePostIds = computed(() => {
@@ -273,6 +422,7 @@ async function submit() {
 async function loadProfile(username: string) {
   const seq = requests.profile.begin();
   profileSession = Symbol("explorer-profile-session");
+  invalidateDownloadStatuses(true);
   requests.reels.invalidate();
   loading.value = true;
   loadingMore.value = false;
@@ -287,6 +437,7 @@ async function loadProfile(username: string) {
     const result = await fetchProfile(username, null);
     if (!requests.profile.isCurrent(seq)) return;
     explorer.commitProfile(result);
+    void refreshDownloadStatuses("posts", "merge", postStatusRequests(result.recent_posts));
     if (!result.profile.is_private) {
       void loadStories();
     }
@@ -307,6 +458,7 @@ async function loadMore() {
   const seq = requests.profile.snapshot();
   loadingMore.value = true;
   error.value = null;
+  const existingPostIds = new Set(sourcePosts.value.map((post) => post.pk));
   try {
     const more = await fetchProfile(username, cursor);
     if (
@@ -316,7 +468,10 @@ async function loadMore() {
     ) {
       return;
     }
-    explorer.commitMorePosts(username, more);
+    if (explorer.commitMorePosts(username, more)) {
+      const added = sourcePosts.value.filter((post) => !existingPostIds.has(post.pk));
+      void refreshDownloadStatuses("posts", "merge", postStatusRequests(added));
+    }
   } catch (e) {
     if (requests.profile.isCurrent(seq) && preview.value?.profile.username === username) {
       error.value = String(e);
@@ -485,10 +640,14 @@ async function loadReels(cursor: string | null) {
   reelsLoading.value = true;
   reelsError.value = null;
   reelsRetryCursor.value = cursor;
+  const existingReelIds = new Set(reels.value.map((post) => post.pk));
   try {
     const page = await fetchReels(userId, cursor);
     if (!requests.reels.isCurrent(seq) || preview.value?.profile.pk !== userId) return;
-    explorer.commitReelsPage(userId, page.posts, cursor, page.end_cursor);
+    if (explorer.commitReelsPage(userId, page.posts, cursor, page.end_cursor)) {
+      const added = reels.value.filter((post) => !existingReelIds.has(post.pk));
+      void refreshDownloadStatuses("reels", "merge", postStatusRequests(added));
+    }
     reelsRetryCursor.value = null;
   } catch (e) {
     if (!requests.reels.isCurrent(seq) || preview.value?.profile.pk !== userId) return;
@@ -504,7 +663,9 @@ async function selectTab(tab: ExploreTab) {
   activeTab.value = tab;
   if (tab === "reels" && !reelsLoaded.value) {
     await loadReels(null);
+    return;
   }
+  void refreshDownloadStatuses(tab, "full");
 }
 
 async function downloadAvatar() {
@@ -541,6 +702,43 @@ function closeModal() {
   modalStory.value = null;
 }
 
+function normalizeRouteProfile(
+  value: LocationQueryValue | LocationQueryValue[] | undefined,
+): string | null {
+  const first = Array.isArray(value) ? value[0] : value;
+  return first?.trim().replace(/^@/, "") || null;
+}
+
+function applyRouteProfile(username: string): void {
+  query.value = `@${username}`;
+  if (preview.value?.profile.username.toLowerCase() === username.toLowerCase()) {
+    resumeRetainedProfile();
+    return;
+  }
+  void loadProfile(username);
+}
+
+async function openProfileFromCaption(username: string): Promise<void> {
+  const target = username.trim().replace(/^@/, "");
+  closeModal();
+  if (!target) return;
+
+  const current = preview.value?.profile.username;
+  if (current?.toLowerCase() === target.toLowerCase()) return;
+
+  const currentRouteProfile = normalizeRouteProfile(route.query.profile);
+  if (current && currentRouteProfile?.toLowerCase() !== current.toLowerCase()) {
+    await router.replace({
+      path: "/explore",
+      query: { ...route.query, profile: current },
+    });
+  }
+  await router.push({
+    path: "/explore",
+    query: { ...route.query, profile: target },
+  });
+}
+
 function openPostModal(post: Post) {
   modalPostCategory.value = activeTab.value === "reels" ? "reels" : "posts";
   modalPost.value = post;
@@ -548,45 +746,87 @@ function openPostModal(post: Post) {
 
 function resumeRetainedProfile() {
   if (!preview.value) return;
-  if (
+  const startsStoriesLoad =
     !preview.value.profile.is_private &&
     stories.value === null &&
     storiesError.value === null &&
-    !storiesLoading.value
+    !storiesLoading.value;
+  if (
+    startsStoriesLoad
   ) {
     void loadStories();
   }
   if (activeTab.value === "reels" && !reelsLoaded.value) {
     void loadReels(null);
+    return;
   }
+  if (activeTab.value === "stories" && startsStoriesLoad) return;
+  void refreshDownloadStatuses(activeTab.value, "full");
 }
 
-onMounted(() => {
-  const requestedProfile = new URLSearchParams(window.location.search)
-    .get("profile")
-    ?.trim()
-    .replace(/^@/, "");
-  if (requestedProfile) {
-    query.value = `@${requestedProfile}`;
-    if (preview.value?.profile.username.toLowerCase() !== requestedProfile.toLowerCase()) {
-      void loadProfile(requestedProfile);
-    } else {
-      resumeRetainedProfile();
+const terminalJobStates = new Set(["done", "failed", "cancelled"]);
+const seenTerminalJobIds = new Set(
+  [...jobs.jobs.values()]
+    .filter((job) => terminalJobStates.has(job.state))
+    .map((job) => job.id),
+);
+
+watch(stories, (items) => {
+  if (items !== null) {
+    void refreshDownloadStatuses("stories", "merge", storyStatusRequests(items));
+  }
+});
+
+watch(
+  () => [...jobs.jobs.values()].map((job) => [job.id, job.state] as const),
+  (states) => {
+    let terminalObserved = false;
+    for (const [id, state] of states) {
+      if (!terminalJobStates.has(state) || seenTerminalJobIds.has(id)) continue;
+      seenTerminalJobIds.add(id);
+      terminalObserved = true;
     }
+    if (terminalObserved) void refreshDownloadStatuses(activeTab.value, "full");
+  },
+  { flush: "post" },
+);
+
+watch(
+  () => route.query.profile,
+  (value, previousValue) => {
+    const username = normalizeRouteProfile(value);
+    const previousUsername = normalizeRouteProfile(previousValue);
+    if (!username || username.toLowerCase() === previousUsername?.toLowerCase()) return;
+    applyRouteProfile(username);
+  },
+);
+
+onMounted(() => {
+  const searchParams = new URLSearchParams(window.location.search);
+  const requestedProfile = normalizeRouteProfile(route.query.profile);
+  if (requestedProfile) {
+    applyRouteProfile(requestedProfile);
     return;
   }
   if (preview.value) {
     resumeRetainedProfile();
     return;
   }
-  if (new URLSearchParams(window.location.search).get("demo") === "explore") {
+  if (searchParams.get("demo") === "remote-media-failure") {
+    query.value = "@preview_demo";
+    void loadProfile("preview_demo");
+    return;
+  }
+  if (searchParams.get("demo") === "explore") {
     query.value = "@natgeo";
     void loadProfile("natgeo");
   }
 });
 
 onUnmounted(() => {
+  downloadStatusesMounted = false;
   profileSession = Symbol("explorer-profile-session");
+  invalidateDownloadStatuses(true);
   window.clearTimeout(debounce);
   requests.autocomplete.invalidate();
   requests.profile.invalidate();
@@ -629,13 +869,12 @@ onUnmounted(() => {
           @mousedown.prevent="pickSuggestion(u)"
           @mousemove="highlight = i"
         >
-          <img
-            v-if="u.avatar_url"
-            :src="remoteMediaUrl(u.avatar_url)"
-            class="h-6 w-6 shrink-0 rounded-full object-cover"
-            referrerpolicy="no-referrer"
+          <RemoteImage
+            :source="u.avatar_url"
+            alt=""
+            variant="compact-avatar"
+            class="h-6 w-6 shrink-0 rounded-full"
           />
-          <span v-else class="h-6 w-6 shrink-0 rounded-full bg-surface-3"></span>
           <span class="font-semibold text-slate-100">{{ u.username }}</span>
           <span v-if="u.is_verified" class="text-xs text-sky-400" title="Verified">✔</span>
           <span class="truncate text-sm text-slate-500">{{ u.full_name }}</span>
@@ -653,13 +892,12 @@ onUnmounted(() => {
       <!-- Profile header -->
       <div class="card p-5">
         <div class="flex items-center gap-4">
-          <img
-            v-if="preview.profile.avatar_url"
-            :src="remoteMediaUrl(preview.profile.avatar_url)"
-            class="h-16 w-16 shrink-0 rounded-full border border-line object-cover"
-            referrerpolicy="no-referrer"
+          <RemoteImage
+            :source="preview.profile.avatar_url"
+            :alt="`@${preview.profile.username} profile picture`"
+            variant="avatar"
+            class="h-16 w-16 shrink-0 rounded-full border border-line"
           />
-          <span v-else class="h-16 w-16 shrink-0 rounded-full bg-surface-3"></span>
           <div class="min-w-0 flex-1">
             <div class="flex items-center gap-1.5">
               <span class="truncate text-lg font-semibold text-slate-100">{{ preview.profile.username }}</span>
@@ -815,14 +1053,13 @@ onUnmounted(() => {
                 :aria-label="`Preview ${previewMediaLabel(p)} ${p.code}`"
                 @click="openPostModal(p)"
               >
-                <img
-                  v-if="thumbUrl(p)"
-                  :src="remoteMediaUrl(thumbUrl(p))"
-                  class="h-full w-full object-cover"
-                  referrerpolicy="no-referrer"
+                <RemoteImage
+                  :source="thumbUrl(p)"
+                  alt=""
+                  variant="thumbnail"
+                  class="h-full w-full rounded-lg"
                   loading="lazy"
                 />
-                <span v-else class="block h-full w-full bg-gradient-to-br from-surface-2 to-surface-3"></span>
               </button>
               <MediaTypeBadge
                 v-bind="classifyPost(p)"
@@ -835,6 +1072,14 @@ onUnmounted(() => {
                 :disabled-reason="!isDownloadablePost(p) ? 'This post has no downloadable media.' : undefined"
                 @toggle="togglePostSelection(p)"
               />
+              <span
+                v-if="mediaDownloadStatusLabel(activeTab, p.pk)"
+                data-download-status
+                class="pointer-events-none absolute bottom-2 left-2 z-10 rounded px-1.5 py-0.5 text-[10px] font-semibold shadow-sm"
+                :class="mediaDownloadStatusClass(activeTab, p.pk)"
+              >
+                {{ mediaDownloadStatusLabel(activeTab, p.pk) }}
+              </span>
               <span
                 v-if="!isDownloadablePost(p)"
                 data-download-unavailable
@@ -922,19 +1167,26 @@ onUnmounted(() => {
                 :aria-label="`Preview story ${s.pk}`"
                 @click="modalStory = s"
               >
-                <img
-                  v-if="s.thumb_url || s.media_url"
-                  :src="remoteMediaUrl(s.thumb_url || s.media_url)"
-                  class="h-20 w-20 rounded-full object-cover"
-                  referrerpolicy="no-referrer"
+                <RemoteImage
+                  :source="s.thumb_url || s.media_url"
+                  alt=""
+                  variant="story"
+                  class="h-20 w-20 rounded-full"
                 />
-                <span v-else class="block h-20 w-20 rounded-full bg-gradient-to-br from-surface-2 to-surface-3"></span>
               </button>
               <MediaSelectionCheckbox
                 :selected="selectedIdSet.has(s.pk)"
                 :label="`Select story ${s.pk}`"
                 @toggle="explorer.toggleSelected('stories', s.pk)"
               />
+              <span
+                v-if="mediaDownloadStatusLabel('stories', s.pk)"
+                data-download-status
+                class="pointer-events-none absolute bottom-0 left-0 z-10 rounded px-1.5 py-0.5 text-[10px] font-semibold shadow-sm"
+                :class="mediaDownloadStatusClass('stories', s.pk)"
+              >
+                {{ mediaDownloadStatusLabel("stories", s.pk) }}
+              </span>
             </div>
           </div>
           <div
@@ -961,6 +1213,7 @@ onUnmounted(() => {
       :post-category="modalPostCategory"
       :story="modalStory"
       @close="closeModal"
+      @open-profile="openProfileFromCaption"
     />
   </div>
 </template>

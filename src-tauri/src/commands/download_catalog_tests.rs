@@ -12,7 +12,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
 use crate::catalog::{
-    FileAvailability, LibraryFile, LibraryItemDetail, LibraryQuery, LibrarySort, MediaFileKind,
+    CatalogFileInput, CatalogMediaInput, FileAvailability, LibraryFile, LibraryItemDetail,
+    LibraryQuery, LibrarySort, MediaFileKind, MediaItemKind,
 };
 use crate::models::{MediaKind, MediaResource};
 
@@ -250,6 +251,669 @@ impl Fixture {
     }
 }
 
+fn status_request(
+    namespace: DownloadStatusNamespace,
+    pk: &str,
+    resources: Vec<MediaFileKind>,
+) -> DownloadStatusRequest {
+    DownloadStatusRequest {
+        namespace,
+        pk: pk.into(),
+        resources,
+    }
+}
+
+fn catalog_status_item(
+    fixture: &Fixture,
+    root: &Path,
+    remote_key: &str,
+    item_kind: MediaItemKind,
+    files: &[(i64, &str, MediaFileKind, &[u8])],
+) {
+    let registered = fixture.catalog.register_root(root, "Status files").unwrap();
+    let mut catalog_files = Vec::with_capacity(files.len());
+    for (ordinal, relative_path, kind, bytes) in files {
+        let path = root.join(relative_path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&path, bytes).unwrap();
+        catalog_files.push(CatalogFileInput {
+            root_id: registered.id,
+            relative_path: PathBuf::from(relative_path),
+            ordinal: *ordinal,
+            kind: *kind,
+            byte_size: i64::try_from(bytes.len()).unwrap(),
+            mtime: 1,
+            last_seen_at: 1,
+        });
+    }
+    fixture
+        .catalog
+        .upsert_media(&CatalogMediaInput {
+            remote_key: remote_key.into(),
+            kind: item_kind,
+            remote_pk: remote_key.split_once(':').map(|(_, pk)| pk.into()),
+            shortcode: None,
+            owner_pk: None,
+            owner_username: Some("nike".into()),
+            taken_at: Some(1),
+            caption: None,
+            like_count: None,
+            comment_count: None,
+            imported_at: 1,
+            updated_at: 1,
+            files: catalog_files,
+            source_id: None,
+        })
+        .unwrap();
+}
+
+fn status_for(
+    fixture: &Fixture,
+    request: DownloadStatusRequest,
+) -> Result<DownloadStatus, DownloadStatusLookupError> {
+    let mut statuses = check_download_statuses_blocking(
+        &fixture.catalog,
+        &fixture.root,
+        validate_download_status_requests(vec![request]).unwrap(),
+    )?;
+    Ok(statuses.remove(0))
+}
+
+#[test]
+fn download_status_validation_accepts_empty_and_preserves_order_and_namespaces() {
+    assert!(validate_download_status_requests(Vec::new())
+        .unwrap()
+        .is_empty());
+    let requests = vec![
+        status_request(
+            DownloadStatusNamespace::Story,
+            "42",
+            vec![MediaFileKind::Video],
+        ),
+        status_request(
+            DownloadStatusNamespace::Post,
+            "42",
+            vec![MediaFileKind::Photo],
+        ),
+    ];
+
+    let validated = validate_download_status_requests(requests.clone()).unwrap();
+
+    assert_eq!(validated, requests);
+}
+
+#[test]
+fn empty_download_status_batch_returns_without_opening_the_repository() {
+    let fixture = Fixture::new();
+    fs::remove_file(&fixture.database_path).unwrap();
+    fs::create_dir(&fixture.database_path).unwrap();
+
+    let statuses =
+        check_download_statuses_blocking(&fixture.catalog, &fixture.root, Vec::new()).unwrap();
+
+    assert!(statuses.is_empty());
+}
+
+#[test]
+fn download_status_contract_uses_snake_case_wire_values() {
+    let request: DownloadStatusRequest = serde_json::from_value(serde_json::json!({
+        "namespace": "story",
+        "pk": "42",
+        "resources": ["video"]
+    }))
+    .unwrap();
+    assert_eq!(request.namespace, DownloadStatusNamespace::Story);
+    assert_eq!(request.resources, vec![MediaFileKind::Video]);
+
+    let response = serde_json::to_value(DownloadStatus {
+        namespace: DownloadStatusNamespace::Post,
+        pk: "7".into(),
+        state: DownloadStatusState::NotDownloaded,
+        available_resources: 0,
+        expected_resources: 1,
+    })
+    .unwrap();
+    assert_eq!(response["namespace"], "post");
+    assert_eq!(response["state"], "not_downloaded");
+}
+
+#[test]
+fn download_status_validation_rejects_invalid_batches_and_shapes() {
+    let oversized = (0..=MAX_DOWNLOAD_STATUS_IDENTITIES)
+        .map(|pk| {
+            status_request(
+                DownloadStatusNamespace::Post,
+                &pk.to_string(),
+                vec![MediaFileKind::Photo],
+            )
+        })
+        .collect();
+    assert!(validate_download_status_requests(oversized).is_err());
+
+    for pk in [
+        "",
+        "12a",
+        "１２",
+        &"1".repeat(MAX_DOWNLOAD_STATUS_PK_BYTES + 1),
+    ] {
+        assert!(validate_download_status_requests(vec![status_request(
+            DownloadStatusNamespace::Post,
+            pk,
+            vec![MediaFileKind::Photo],
+        )])
+        .is_err());
+    }
+
+    let duplicate = status_request(
+        DownloadStatusNamespace::Post,
+        "42",
+        vec![MediaFileKind::Photo],
+    );
+    assert!(validate_download_status_requests(vec![duplicate.clone(), duplicate]).is_err());
+    assert!(validate_download_status_requests(vec![status_request(
+        DownloadStatusNamespace::Post,
+        "1",
+        Vec::new(),
+    )])
+    .is_err());
+    assert!(validate_download_status_requests(vec![status_request(
+        DownloadStatusNamespace::Post,
+        "1",
+        vec![MediaFileKind::Photo; MAX_DOWNLOAD_STATUS_RESOURCES_PER_POST + 1],
+    )])
+    .is_err());
+    assert!(validate_download_status_requests(vec![status_request(
+        DownloadStatusNamespace::Story,
+        "1",
+        vec![MediaFileKind::Photo, MediaFileKind::Video],
+    )])
+    .is_err());
+    assert!(validate_download_status_requests(vec![status_request(
+        DownloadStatusNamespace::Post,
+        "1",
+        vec![MediaFileKind::Metadata],
+    )])
+    .is_err());
+}
+
+#[test]
+fn download_statuses_report_complete_single_carousel_partial_and_missing_in_request_order() {
+    let fixture = Fixture::new();
+    catalog_status_item(
+        &fixture,
+        &fixture.root,
+        "post:101",
+        MediaItemKind::Post,
+        &[(0, "one.jpg", MediaFileKind::Photo, &JPEG)],
+    );
+    catalog_status_item(
+        &fixture,
+        &fixture.root,
+        "post:102",
+        MediaItemKind::Post,
+        &[
+            (0, "carousel.jpg", MediaFileKind::Photo, &JPEG),
+            (1, "carousel.mp4", MediaFileKind::Video, &MP4),
+        ],
+    );
+    catalog_status_item(
+        &fixture,
+        &fixture.root,
+        "post:103",
+        MediaItemKind::Post,
+        &[
+            (0, "complete-carousel.jpg", MediaFileKind::Photo, &JPEG),
+            (1, "complete-carousel.mp4", MediaFileKind::Video, &MP4),
+        ],
+    );
+
+    let statuses = check_download_statuses_blocking(
+        &fixture.catalog,
+        &fixture.root,
+        validate_download_status_requests(vec![
+            status_request(
+                DownloadStatusNamespace::Post,
+                "999",
+                vec![MediaFileKind::Photo],
+            ),
+            status_request(
+                DownloadStatusNamespace::Post,
+                "102",
+                vec![
+                    MediaFileKind::Photo,
+                    MediaFileKind::Video,
+                    MediaFileKind::Photo,
+                ],
+            ),
+            status_request(
+                DownloadStatusNamespace::Post,
+                "101",
+                vec![MediaFileKind::Photo],
+            ),
+            status_request(
+                DownloadStatusNamespace::Post,
+                "103",
+                vec![MediaFileKind::Photo, MediaFileKind::Video],
+            ),
+        ])
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        statuses,
+        vec![
+            DownloadStatus {
+                namespace: DownloadStatusNamespace::Post,
+                pk: "999".into(),
+                state: DownloadStatusState::NotDownloaded,
+                available_resources: 0,
+                expected_resources: 1,
+            },
+            DownloadStatus {
+                namespace: DownloadStatusNamespace::Post,
+                pk: "102".into(),
+                state: DownloadStatusState::Partial,
+                available_resources: 2,
+                expected_resources: 3,
+            },
+            DownloadStatus {
+                namespace: DownloadStatusNamespace::Post,
+                pk: "101".into(),
+                state: DownloadStatusState::Downloaded,
+                available_resources: 1,
+                expected_resources: 1,
+            },
+            DownloadStatus {
+                namespace: DownloadStatusNamespace::Post,
+                pk: "103".into(),
+                state: DownloadStatusState::Downloaded,
+                available_resources: 2,
+                expected_resources: 2,
+            },
+        ]
+    );
+}
+
+#[test]
+fn download_statuses_allow_the_same_pk_in_post_and_story_namespaces() {
+    let fixture = Fixture::new();
+    catalog_status_item(
+        &fixture,
+        &fixture.root,
+        "post:42",
+        MediaItemKind::Post,
+        &[(0, "post-42.jpg", MediaFileKind::Photo, &JPEG)],
+    );
+    catalog_status_item(
+        &fixture,
+        &fixture.root,
+        "story:42",
+        MediaItemKind::Story,
+        &[(0, "story-42.mp4", MediaFileKind::Video, &MP4)],
+    );
+    let requests = validate_download_status_requests(vec![
+        status_request(
+            DownloadStatusNamespace::Story,
+            "42",
+            vec![MediaFileKind::Video],
+        ),
+        status_request(
+            DownloadStatusNamespace::Post,
+            "42",
+            vec![MediaFileKind::Photo],
+        ),
+    ])
+    .unwrap();
+
+    let statuses =
+        check_download_statuses_blocking(&fixture.catalog, &fixture.root, requests).unwrap();
+
+    assert_eq!(statuses.len(), 2);
+    assert_eq!(statuses[0].namespace, DownloadStatusNamespace::Story);
+    assert_eq!(statuses[1].namespace, DownloadStatusNamespace::Post);
+    assert!(statuses
+        .iter()
+        .all(|status| status.state == DownloadStatusState::Downloaded));
+}
+
+#[test]
+fn download_statuses_require_exact_file_size_kind_extension_and_current_root() {
+    let cases = [
+        "deleted",
+        "truncated",
+        "catalog-kind",
+        "extension",
+        "other-root",
+    ];
+    for (index, case) in cases.into_iter().enumerate() {
+        let fixture = Fixture::new();
+        let remote_key = format!("post:{}", 200 + index);
+        let other_root = fixture._temp.path().join("other");
+        fs::create_dir_all(&other_root).unwrap();
+        let catalog_root = if case == "other-root" {
+            other_root.as_path()
+        } else {
+            fixture.root.as_path()
+        };
+        let (path, catalog_kind, requested_kind, bytes): (
+            &str,
+            MediaFileKind,
+            MediaFileKind,
+            &[u8],
+        ) = match case {
+            "catalog-kind" => ("file.mp4", MediaFileKind::Video, MediaFileKind::Photo, &MP4),
+            "extension" => ("file.mp4", MediaFileKind::Photo, MediaFileKind::Photo, &MP4),
+            _ => (
+                "file.jpg",
+                MediaFileKind::Photo,
+                MediaFileKind::Photo,
+                &JPEG,
+            ),
+        };
+        catalog_status_item(
+            &fixture,
+            catalog_root,
+            &remote_key,
+            MediaItemKind::Post,
+            &[(0, path, catalog_kind, bytes)],
+        );
+        if case == "deleted" {
+            fs::remove_file(catalog_root.join(path)).unwrap();
+        } else if case == "truncated" {
+            fs::write(catalog_root.join(path), &JPEG[..3]).unwrap();
+        }
+
+        let status = status_for(
+            &fixture,
+            status_request(
+                DownloadStatusNamespace::Post,
+                remote_key.split_once(':').unwrap().1,
+                vec![requested_kind],
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(status.state, DownloadStatusState::NotDownloaded, "{case}");
+        assert_eq!(status.available_resources, 0, "{case}");
+    }
+}
+
+#[test]
+fn download_statuses_ignore_sidecars_and_share_the_post_namespace_with_reels() {
+    let fixture = Fixture::new();
+    catalog_status_item(
+        &fixture,
+        &fixture.root,
+        "post:301",
+        MediaItemKind::Reel,
+        &[
+            (0, "reel.mp4", MediaFileKind::Video, &MP4),
+            (0, "reel.json", MediaFileKind::Metadata, b"{}"),
+        ],
+    );
+
+    let status = status_for(
+        &fixture,
+        status_request(
+            DownloadStatusNamespace::Post,
+            "301",
+            vec![MediaFileKind::Video],
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(status.state, DownloadStatusState::Downloaded);
+    assert_eq!(status.available_resources, 1);
+}
+
+#[test]
+fn download_statuses_reject_path_escape_and_symlink_evidence() {
+    let fixture = Fixture::new();
+    catalog_status_item(
+        &fixture,
+        &fixture.root,
+        "post:401",
+        MediaItemKind::Post,
+        &[(0, "inside.jpg", MediaFileKind::Photo, &JPEG)],
+    );
+    let connection = rusqlite::Connection::open(&fixture.database_path).unwrap();
+    connection
+        .execute(
+            "UPDATE media_files SET relative_path = '../outside.jpg' WHERE relative_path = 'inside.jpg'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        status_for(
+            &fixture,
+            status_request(
+                DownloadStatusNamespace::Post,
+                "401",
+                vec![MediaFileKind::Photo],
+            ),
+        )
+        .unwrap()
+        .state,
+        DownloadStatusState::NotDownloaded
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let outside = fixture._temp.path().join("outside.jpg");
+        fs::write(&outside, JPEG).unwrap();
+        symlink(&outside, fixture.root.join("link.jpg")).unwrap();
+        catalog_status_item(
+            &fixture,
+            &fixture.root,
+            "post:402",
+            MediaItemKind::Post,
+            &[(0, "placeholder.jpg", MediaFileKind::Photo, &JPEG)],
+        );
+        fs::remove_file(fixture.root.join("placeholder.jpg")).unwrap();
+        connection
+            .execute(
+                "UPDATE media_files SET relative_path = 'link.jpg' WHERE relative_path = 'placeholder.jpg'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            status_for(
+                &fixture,
+                status_request(
+                    DownloadStatusNamespace::Post,
+                    "402",
+                    vec![MediaFileKind::Photo],
+                ),
+            )
+            .unwrap()
+            .state,
+            DownloadStatusState::NotDownloaded
+        );
+    }
+}
+
+#[test]
+fn download_statuses_require_one_global_candidate_before_root_filtering() {
+    let fixture = Fixture::new();
+    catalog_status_item(
+        &fixture,
+        &fixture.root,
+        "post:501",
+        MediaItemKind::Post,
+        &[(0, "current.jpg", MediaFileKind::Photo, &JPEG)],
+    );
+    let other_root_path = fixture._temp.path().join("registered-elsewhere");
+    fs::create_dir_all(&other_root_path).unwrap();
+    fs::write(other_root_path.join("other.jpg"), JPEG).unwrap();
+    let other_root = fixture
+        .catalog
+        .register_root(&other_root_path, "Elsewhere")
+        .unwrap();
+    let connection = rusqlite::Connection::open(&fixture.database_path).unwrap();
+    let media_item_id: i64 = connection
+        .query_row(
+            "SELECT id FROM media_items WHERE remote_key = 'post:501'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO media_files(media_item_id, library_root_id, relative_path, ordinal, kind, byte_size, mtime, exists_on_disk, last_seen_at)
+             VALUES (?1, ?2, 'other.jpg', 0, 'photo', ?3, 1, 1, 1)",
+            (media_item_id, other_root.id, JPEG.len() as i64),
+        )
+        .unwrap();
+
+    let status = status_for(
+        &fixture,
+        status_request(
+            DownloadStatusNamespace::Post,
+            "501",
+            vec![MediaFileKind::Photo],
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(status.state, DownloadStatusState::NotDownloaded);
+}
+
+#[test]
+fn download_status_catalog_evidence_is_bounded_under_duplicate_and_high_ordinal_history() {
+    let fixture = Fixture::new();
+    catalog_status_item(
+        &fixture,
+        &fixture.root,
+        "post:601",
+        MediaItemKind::Post,
+        &[(0, "base.jpg", MediaFileKind::Photo, &JPEG)],
+    );
+    let connection = rusqlite::Connection::open(&fixture.database_path).unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON")
+        .unwrap();
+    let media_item_id: i64 = connection
+        .query_row(
+            "SELECT id FROM media_items WHERE remote_key = 'post:601'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    for index in 1..=40_i64 {
+        let root_path = fixture._temp.path().join(format!("history-{index}"));
+        connection
+            .execute(
+                "INSERT INTO library_roots(path, label, created_at) VALUES (?1, ?2, 1)",
+                (
+                    root_path.to_string_lossy().as_ref(),
+                    format!("History {index}"),
+                ),
+            )
+            .unwrap();
+        let root_id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO media_files(media_item_id, library_root_id, relative_path, ordinal, kind, byte_size, mtime, exists_on_disk, last_seen_at)
+                 VALUES (?1, ?2, ?3, ?4, 'photo', ?5, 1, 1, 1)",
+                (
+                    media_item_id,
+                    root_id,
+                    format!("duplicate-{index}.jpg"),
+                    index % 20,
+                    JPEG.len() as i64,
+                ),
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO media_files(media_item_id, library_root_id, relative_path, ordinal, kind, byte_size, mtime, exists_on_disk, last_seen_at)
+                 VALUES (?1, ?2, ?3, ?4, 'photo', ?5, 1, 1, 1)",
+                (
+                    media_item_id,
+                    root_id,
+                    format!("irrelevant-{index}.jpg"),
+                    100 + index,
+                    JPEG.len() as i64,
+                ),
+            )
+            .unwrap();
+    }
+
+    let evidence = fixture
+        .catalog
+        .download_status_evidence(&["post:601".into(), "post:not-requested".into()])
+        .unwrap();
+
+    assert_eq!(evidence.len(), 20);
+    assert!(evidence.iter().all(|row| row.remote_key == "post:601"));
+    assert!(evidence.iter().all(|row| row.ordinal <= 19));
+    assert!(evidence.iter().all(|row| row.candidate_count <= 2));
+    assert!(evidence
+        .iter()
+        .filter(|row| row.candidate_count == 2)
+        .all(|row| row.candidate.is_none()));
+}
+
+#[test]
+fn download_status_repository_failures_propagate() {
+    let fixture = Fixture::new();
+    fs::remove_file(&fixture.database_path).unwrap();
+    fs::create_dir(&fixture.database_path).unwrap();
+
+    let result = status_for(
+        &fixture,
+        status_request(
+            DownloadStatusNamespace::Post,
+            "701",
+            vec![MediaFileKind::Photo],
+        ),
+    );
+
+    assert!(matches!(result, Err(DownloadStatusLookupError::Catalog(_))));
+}
+
+#[test]
+fn download_status_io_classification_only_treats_not_found_as_unavailable() {
+    let missing =
+        classify_download_status_io::<()>(Err(std::io::Error::from(std::io::ErrorKind::NotFound)))
+            .unwrap();
+    let denied = classify_download_status_io::<()>(Err(std::io::Error::from(
+        std::io::ErrorKind::PermissionDenied,
+    )));
+    let unexpected = classify_download_status_io::<()>(Err(std::io::Error::from(
+        std::io::ErrorKind::InvalidData,
+    )));
+
+    assert!(missing.is_none());
+    assert!(matches!(
+        denied,
+        Err(DownloadStatusLookupError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied
+    ));
+    assert!(matches!(
+        unexpected,
+        Err(DownloadStatusLookupError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData
+    ));
+}
+
+#[test]
+fn download_status_errors_are_sanitized_for_ipc() {
+    let internal = DownloadStatusLookupError::Io(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "secret path and token",
+    ));
+
+    let public = download_status_public_error(&internal);
+
+    assert_eq!(public, DOWNLOAD_STATUS_PUBLIC_ERROR);
+    assert!(!public.contains("secret"));
+    assert!(!public.contains("token"));
+}
+
 fn profile() -> Profile {
     Profile {
         pk: "42".into(),
@@ -289,6 +953,44 @@ fn downloadable_reel_payload(server: &MockServer, pk: &str, code: &str) -> serde
     })
 }
 
+fn downloadable_photo_payload(server: &MockServer, pk: &str, code: &str) -> serde_json::Value {
+    serde_json::json!({
+        "pk": pk,
+        "code": code,
+        "media_type": 1,
+        "taken_at": 1_700_000_000,
+        "image_versions2": {"candidates": [{
+            "url": format!("{}/cdn/{pk}", server.uri()),
+            "width": 1080
+        }]}
+    })
+}
+
+fn downloadable_carousel_payload(server: &MockServer, pk: &str, code: &str) -> serde_json::Value {
+    serde_json::json!({
+        "pk": pk,
+        "code": code,
+        "media_type": 8,
+        "taken_at": 1_700_000_001,
+        "carousel_media": [
+            {
+                "media_type": 1,
+                "image_versions2": {"candidates": [{
+                    "url": format!("{}/cdn/{pk}-1", server.uri()),
+                    "width": 1080
+                }]}
+            },
+            {
+                "media_type": 2,
+                "video_versions": [{
+                    "url": format!("{}/cdn/{pk}-2", server.uri()),
+                    "width": 1080
+                }]
+            }
+        ]
+    })
+}
+
 fn reels_only(max_posts: Option<u64>) -> ProfileOptions {
     ProfileOptions {
         posts: false,
@@ -298,6 +1000,119 @@ fn reels_only(max_posts: Option<u64>) -> ProfileOptions {
         avatar: false,
         max_posts,
     }
+}
+
+#[tokio::test]
+async fn profile_all_cancellation_catalogs_current_partial_carousel_and_keeps_prior_post() {
+    let server = MockServer::start().await;
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    Mock::given(method("GET"))
+        .and(path("/v1/user/medias/chunk"))
+        .and(query_param("user_id", "42"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            [
+                downloadable_photo_payload(&server, "7101", "PRIOR"),
+                downloadable_carousel_payload(&server, "7102", "CURRENT")
+            ],
+            null
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    mount_media(&server, "/cdn/7101", "image/jpeg", &JPEG).await;
+    mount_media(&server, "/cdn/7102-1", "image/jpeg", &JPEG).await;
+    Mock::given(path("/cdn/7102-2"))
+        .respond_with(move |_: &wiremock::Request| {
+            cancel_tx.send(true).unwrap();
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "video/mp4")
+                .set_body_bytes(MP4)
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let fixture = Fixture::new();
+    let client = Arc::new(crate::hiker::HikerClient::with_base_url(
+        "token".into(),
+        server.uri(),
+    ));
+    let cfg = Config {
+        token: None,
+        dest_dir: fixture.root.to_string_lossy().into_owned(),
+        sidecar: true,
+        proxy_url: None,
+    };
+    let opts = ProfileOptions {
+        posts: true,
+        reels: false,
+        stories: false,
+        highlights: false,
+        avatar: false,
+        max_posts: None,
+    };
+
+    let result = run_profile_job(
+        &client,
+        &fixture.http,
+        &fixture.catalog,
+        &fixture.root,
+        &cfg,
+        &NoopProgress,
+        &fixture.root.join("nike"),
+        &profile(),
+        &opts,
+        Vec::new(),
+        Vec::new(),
+        true,
+        Some(cancel_rx),
+    )
+    .await;
+
+    assert!(matches!(result, Err(JobFail::Cancelled)));
+    let items = fixture.all_items();
+    assert_eq!(
+        items.len(),
+        2,
+        "both completed identities must remain cataloged"
+    );
+    let prior = items
+        .iter()
+        .find(|item| item.remote_key == "post:7101")
+        .expect("prior post remains cataloged");
+    assert_eq!(prior.files.len(), 2, "prior post keeps media and sidecar");
+    assert!(prior
+        .files
+        .iter()
+        .any(|file| file.kind == MediaFileKind::Metadata));
+    let current = items
+        .iter()
+        .find(|item| item.remote_key == "post:7102")
+        .expect("current carousel completed resource is cataloged");
+    assert_eq!(current.files.len(), 1, "cancelled carousel has no sidecar");
+    assert_eq!(current.files[0].ordinal, 0);
+    assert_eq!(current.files[0].kind, MediaFileKind::Photo);
+    let prior_status = status_for(
+        &fixture,
+        status_request(
+            DownloadStatusNamespace::Post,
+            "7101",
+            vec![MediaFileKind::Photo],
+        ),
+    )
+    .unwrap();
+    assert_eq!(prior_status.state, DownloadStatusState::Downloaded);
+    let current_status = status_for(
+        &fixture,
+        status_request(
+            DownloadStatusNamespace::Post,
+            "7102",
+            vec![MediaFileKind::Photo, MediaFileKind::Video],
+        ),
+    )
+    .unwrap();
+    assert_eq!(current_status.state, DownloadStatusState::Partial);
+    assert_eq!(current_status.available_resources, 1);
+    assert_eq!(current_status.expected_resources, 2);
 }
 
 #[tokio::test]
@@ -749,6 +1564,64 @@ async fn fetched_batch_already_cancelled_writes_no_media_or_catalog_items() {
         !destination.exists() || fs::read_dir(destination).unwrap().next().is_none(),
         "cancelled batch must not write archive files"
     );
+}
+
+#[tokio::test]
+async fn fetched_carousel_cancellation_catalogs_completed_media_as_partial_without_sidecar() {
+    let server = MockServer::start().await;
+    mount_media(&server, "/completed-before-cancel", "image/jpeg", &JPEG).await;
+    let fixture = Fixture::new();
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    Mock::given(path("/cancel-next-resource"))
+        .respond_with(move |_: &wiremock::Request| {
+            cancel_tx.send(true).unwrap();
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "video/mp4")
+                .set_body_bytes(MP4)
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let item = post(
+        "7001",
+        "PARTIAL-CANCEL",
+        vec![
+            resource(&server, "/completed-before-cancel", MediaKind::Photo),
+            resource(&server, "/cancel-next-resource", MediaKind::Video),
+        ],
+    );
+
+    let result = fixture
+        .run_fetched_posts(&[item], true, &NoopProgress, Some(cancel_rx))
+        .await;
+
+    assert!(matches!(result, Err(JobFail::Cancelled)));
+    let detail = fixture.only_item();
+    assert_eq!(
+        detail.files.len(),
+        1,
+        "cancelled jobs must not write sidecars"
+    );
+    assert_eq!(detail.files[0].ordinal, 0);
+    assert_eq!(detail.files[0].kind, MediaFileKind::Photo);
+    assert!(absolute(&fixture.root, &detail.files[0].relative_path).is_file());
+    let status = status_for(
+        &fixture,
+        status_request(
+            DownloadStatusNamespace::Post,
+            "7001",
+            vec![MediaFileKind::Photo, MediaFileKind::Video],
+        ),
+    )
+    .unwrap();
+    assert_eq!(status.state, DownloadStatusState::Partial);
+    assert_eq!(status.available_resources, 1);
+    assert_eq!(status.expected_resources, 2);
+    let destination = fixture.root.join("nike/posts");
+    assert!(fs::read_dir(destination)
+        .unwrap()
+        .filter_map(Result::ok)
+        .all(|entry| entry.path().extension().and_then(|ext| ext.to_str()) != Some("json")));
 }
 
 #[tokio::test]

@@ -3,12 +3,12 @@ import { computed, onUnmounted, ref, watch } from "vue";
 import {
   fetchProfileSummary,
   fetchRelationships,
-  remoteMediaUrl,
   searchRelationships,
   type Profile,
   type RelationshipKind,
   type SearchUser,
 } from "../lib/ipc";
+import RemoteImage from "../components/RemoteImage.vue";
 import { useExplorerStore } from "../stores/explorer";
 
 const props = defineProps<{
@@ -37,13 +37,31 @@ let searchTimer = 0;
 const requestedCursors = new Set<string>();
 
 const kindLabel = computed(() => props.kind === "followers" ? "Followers" : "Following");
+type RelationshipTab = {
+  kind: RelationshipKind;
+  label: string;
+  count?: number | null;
+};
+
+const relationshipTabs = computed<RelationshipTab[]>(() => [
+  {
+    kind: "followers" as const,
+    label: "Followers",
+    count: profile.value?.follower_count,
+  },
+  {
+    kind: "following" as const,
+    label: "Following",
+    count: profile.value?.following_count,
+  },
+]);
 const privateProfile = computed(() => profile.value?.is_private === true);
 const relationshipTotal = computed(() =>
   props.kind === "followers" ? profile.value?.follower_count : profile.value?.following_count,
 );
 const totalPages = computed(() => {
   const total = relationshipTotal.value;
-  if (total === undefined || pageSize.value <= 0) return null;
+  if (total == null || pageSize.value <= 0) return null;
   return Math.max(page.value, Math.ceil(total / pageSize.value));
 });
 const pageStatus = computed(() => {
@@ -64,6 +82,16 @@ const searchStatus = computed(() => {
   const count = searchResults.value.length;
   return `${count} result${count === 1 ? "" : "s"}`;
 });
+
+function compactCount(count: number | null | undefined) {
+  return count == null ? "" : new Intl.NumberFormat("en", { notation: "compact" }).format(count);
+}
+
+function relationshipLinkLabel(relationship: RelationshipTab) {
+  return relationship.count == null
+    ? relationship.label
+    : `${relationship.label}, ${relationship.count.toLocaleString("en")}`;
+}
 
 function relationshipPath(kind: RelationshipKind) {
   return `/explore/${encodeURIComponent(props.username)}/${kind}`;
@@ -204,13 +232,12 @@ onUnmounted(() => {
 
     <section class="card p-5">
       <div class="flex min-w-0 items-center gap-3">
-        <img
-          v-if="profile?.avatar_url"
-          :src="remoteMediaUrl(profile.avatar_url)"
-          class="size-12 shrink-0 rounded-full border border-line object-cover"
-          referrerpolicy="no-referrer"
+        <RemoteImage
+          :source="profile?.avatar_url"
+          :alt="`@${profile?.username ?? username} profile picture`"
+          variant="avatar"
+          class="size-12 shrink-0 rounded-full"
         />
-        <span v-else class="size-12 shrink-0 rounded-full bg-surface-3"></span>
         <div class="min-w-0 flex-1">
           <h1 class="truncate text-xl font-semibold text-slate-100">
             @{{ profile?.username ?? username }} {{ kindLabel }}
@@ -223,13 +250,23 @@ onUnmounted(() => {
 
       <nav aria-label="Profile relationships" class="mt-4 flex gap-1">
         <RouterLink
-          v-for="relationship in (['followers', 'following'] as const)"
-          :key="relationship"
-          :to="relationshipPath(relationship)"
+          v-for="relationship in relationshipTabs"
+          :key="relationship.kind"
+          :to="relationshipPath(relationship.kind)"
           class="rounded-lg px-3 py-1.5 text-sm capitalize text-slate-400 hover:bg-surface-2 hover:text-slate-100"
-          :class="relationship === kind ? 'bg-surface-3 !text-slate-100' : ''"
+          :class="relationship.kind === kind ? 'bg-surface-3 !text-slate-100' : ''"
+          :title="relationshipLinkLabel(relationship)"
+          :aria-label="relationshipLinkLabel(relationship)"
         >
-          {{ relationship }}
+          {{ relationship.label }}
+          <span
+            v-if="relationship.count != null"
+            data-relationship-count
+            aria-hidden="true"
+            class="ml-1 text-slate-500 tabular-nums"
+          >
+            {{ compactCount(relationship.count) }}
+          </span>
         </RouterLink>
       </nav>
     </section>
@@ -293,13 +330,12 @@ onUnmounted(() => {
           :to="{ path: '/explore', query: { profile: relatedUser.username } }"
           class="flex items-center gap-3 px-4 py-3 hover:bg-surface-2"
         >
-          <img
-            v-if="relatedUser.avatar_url"
-            :src="remoteMediaUrl(relatedUser.avatar_url)"
-            class="size-10 shrink-0 rounded-full border border-line object-cover"
-            referrerpolicy="no-referrer"
+          <RemoteImage
+            :source="relatedUser.avatar_url"
+            alt=""
+            variant="compact-avatar"
+            class="size-10 shrink-0 rounded-full"
           />
-          <span v-else class="size-10 shrink-0 rounded-full bg-surface-3"></span>
           <span class="min-w-0 flex-1">
             <span class="flex items-center gap-1.5">
               <span class="truncate font-medium text-slate-200">{{ relatedUser.username }}</span>

@@ -14,6 +14,7 @@ import type { JobView } from "../stores/jobs";
 const props = defineProps<{ job: JobView }>();
 const emit = defineEmits<{ close: [] }>();
 const OUTPUT_PAGE_SIZE = 50;
+const VIDEO_PREVIEW_ERROR = "Could not play video preview.";
 
 const dialog = ref<HTMLElement | null>(null);
 const accessState = ref<"idle" | "pending" | "allowed" | "denied" | "error" | "unindexed">("idle");
@@ -21,6 +22,7 @@ const rowErrors = reactive<Record<number, string>>({});
 const busyAction = ref<string | null>(null);
 const visibleCount = ref(OUTPUT_PAGE_SIZE);
 const previewUrls = reactive(new Map<number, string>());
+const playingPreviewIds = reactive(new Set<number>());
 let accessGeneration = 0;
 let mounted = false;
 let previousBodyOverflow = "";
@@ -58,6 +60,7 @@ function invalidateAccess() {
 async function loadPreviewAccess() {
   const generation = ++accessGeneration;
   previewUrls.clear();
+  playingPreviewIds.clear();
   for (const key of Object.keys(rowErrors)) delete rowErrors[Number(key)];
   busyAction.value = null;
   const firstIndexed = outputs.value.find((output) => typeof output.file_id === "number");
@@ -98,6 +101,46 @@ function typeLabel(output: JobOutputFile) {
   return output.kind === "video" ? "Video" : "Photo";
 }
 
+function isPreviewPlaying(output: JobOutputFile) {
+  return typeof output.file_id === "number" && playingPreviewIds.has(output.file_id);
+}
+
+function setPreviewPlaying(output: JobOutputFile, playing: boolean) {
+  if (typeof output.file_id !== "number") return;
+  if (playing) playingPreviewIds.add(output.file_id);
+  else playingPreviewIds.delete(output.file_id);
+}
+
+function handleVideoPreviewError(event: Event, output: JobOutputFile, index: number) {
+  const video = event.currentTarget;
+  if (!(video instanceof HTMLVideoElement) || !video.isConnected) return;
+  setPreviewPlaying(output, false);
+  rowErrors[index] = VIDEO_PREVIEW_ERROR;
+}
+
+async function toggleVideoPreview(event: MouseEvent, output: JobOutputFile, index: number) {
+  const container = (event.currentTarget as HTMLButtonElement).parentElement;
+  const video = container?.querySelector<HTMLVideoElement>("video[data-output-preview]");
+  if (!video) return;
+
+  if (isPreviewPlaying(output)) {
+    video.pause();
+    return;
+  }
+
+  delete rowErrors[index];
+  const generation = accessGeneration;
+  try {
+    if (video.error) video.load();
+    await video.play();
+  } catch (cause) {
+    if (!mounted || generation !== accessGeneration) return;
+    if (cause instanceof DOMException && cause.name === "AbortError") return;
+    setPreviewPlaying(output, false);
+    rowErrors[index] = VIDEO_PREVIEW_ERROR;
+  }
+}
+
 async function runAction(action: "open" | "reveal", output: JobOutputFile, index: number) {
   if (typeof output.file_id !== "number" || busyAction.value !== null) return;
   const key = `${action}-${index}`;
@@ -117,7 +160,7 @@ function focusableElements() {
   if (!dialog.value) return [];
   return Array.from(
     dialog.value.querySelectorAll<HTMLElement>(
-      'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), video[controls], [tabindex]:not([tabindex="-1"])',
+      'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
     ),
   ).filter((element) => !element.hasAttribute("hidden"));
 }
@@ -220,17 +263,53 @@ onBeforeUnmount(() => {
             class="rounded-lg border border-line bg-surface-2 p-3"
           >
             <div class="flex flex-wrap gap-4">
-              <div class="flex h-24 w-24 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-black text-xs text-slate-500">
+              <div class="relative flex h-24 w-24 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-black text-xs text-slate-500">
                 <template v-if="typeof output.file_id === 'number' && previewUrls.has(output.file_id)">
-                  <video
-                    v-if="output.kind === 'video'"
-                    data-output-preview
-                    :data-file-id="output.file_id"
-                    :src="previewUrls.get(output.file_id)"
-                    controls
-                    preload="none"
-                    class="h-full w-full object-contain"
-                  />
+                  <template v-if="output.kind === 'video'">
+                    <video
+                      data-output-preview
+                      :data-file-id="output.file_id"
+                      :src="previewUrls.get(output.file_id)"
+                      aria-hidden="true"
+                      preload="none"
+                      class="pointer-events-none h-full w-full object-contain"
+                      @play="setPreviewPlaying(output, true)"
+                      @pause="setPreviewPlaying(output, false)"
+                      @ended="setPreviewPlaying(output, false)"
+                      @error="handleVideoPreviewError($event, output, index)"
+                    />
+                    <button
+                      type="button"
+                      data-action="toggle-video-preview"
+                      :aria-label="`${isPreviewPlaying(output) ? 'Pause' : 'Play'} ${output.basename} preview`"
+                      class="group absolute inset-0 flex items-center justify-center rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-inset"
+                      @click="toggleVideoPreview($event, output, index)"
+                    >
+                      <span
+                        data-video-control-indicator
+                        class="flex h-8 w-8 items-center justify-center rounded-full bg-black/65 text-white shadow-lg transition-colors group-hover:bg-black/80"
+                      >
+                        <svg
+                          v-if="isPreviewPlaying(output)"
+                          aria-hidden="true"
+                          viewBox="0 0 24 24"
+                          fill="currentColor"
+                          class="h-4 w-4"
+                        >
+                          <path d="M6 5h4v14H6zM14 5h4v14h-4z" />
+                        </svg>
+                        <svg
+                          v-else
+                          aria-hidden="true"
+                          viewBox="0 0 24 24"
+                          fill="currentColor"
+                          class="h-4 w-4"
+                        >
+                          <path d="M8 5v14l11-7z" />
+                        </svg>
+                      </span>
+                    </button>
+                  </template>
                   <img
                     v-else
                     data-output-preview

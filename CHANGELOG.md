@@ -2,6 +2,25 @@
 
 All notable changes to insta-dl-gui are documented in this file.
 
+## 0.7.0 - 2026-09-02
+
+### Added
+
+- Explore marks posts, reels, and stories as **Downloaded** or **Partial x/y** using verified files from the local catalog, without spending HikerAPI requests.
+- Profile mentions in post captions are clickable and preserve navigation history between explored profiles.
+- The installed app version is shown below the product name.
+
+### Changed
+
+- Remote Instagram previews now use resilient image and video components with shared proxy-aware retries and actionable VPN/proxy guidance when CDN media is unavailable.
+- Completed-download video controls are smaller so thumbnails remain visible and easier to scan.
+
+### Fixed
+
+- Downloaded-state badges refresh after completed or cancelled jobs, tab changes, pagination, and remounts, including partially completed carousels and profile-wide downloads.
+- First-time token setup now opens Explore and immediately keeps the saved token hint and balance in sync in Settings.
+- The app paints its dark background during native and HTML startup, preventing a white launch flash.
+
 ## 0.6.0 - 2026-09-01
 
 ### Added

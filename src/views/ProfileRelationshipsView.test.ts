@@ -14,6 +14,7 @@ const ipc = vi.hoisted(() => ({
 vi.mock("../lib/ipc", () => ipc);
 
 import ProfileRelationshipsView from "./ProfileRelationshipsView.vue";
+import RemoteImage from "../components/RemoteImage.vue";
 import { useExplorerStore } from "../stores/explorer";
 
 const wrappers: Array<{ unmount: () => void }> = [];
@@ -33,6 +34,10 @@ function render(
   kind: "followers" | "following" = "followers",
   isPrivate = false,
   seedProfile = true,
+  counts: { follower_count?: number; following_count?: number } = {
+    follower_count: 5,
+    following_count: 4,
+  },
 ) {
   const pinia = createPinia();
   setActivePinia(pinia);
@@ -42,8 +47,7 @@ function render(
         pk: "42",
         username: "nike",
         media_count: 10,
-        follower_count: 5,
-        following_count: 4,
+        ...counts,
         is_private: isPrivate,
         is_verified: true,
       },
@@ -79,7 +83,80 @@ afterEach(() => {
 });
 
 describe("ProfileRelationshipsView", () => {
-  it("loads a cold profile route and proxies profile and relationship avatars", async () => {
+  it("shows the follower and following counts in both relationship tabs", async () => {
+    ipc.fetchRelationships.mockResolvedValue({ users: [], next_cursor: null });
+    const wrapper = render();
+    await flushPromises();
+
+    const links = wrapper.get("[aria-label='Profile relationships']").findAll("a");
+    expect(links[0].text()).toBe("Followers 5");
+    expect(links[1].text()).toBe("Following 4");
+  });
+
+  it("shows compact counts with full accessible values", async () => {
+    ipc.fetchRelationships.mockResolvedValue({ users: [], next_cursor: null });
+    const wrapper = render("followers", false, true, {
+      follower_count: 291_000_000,
+      following_count: 264,
+    });
+    await flushPromises();
+
+    const links = wrapper.get("[aria-label='Profile relationships']").findAll("a");
+    expect(links[0].text()).toBe("Followers 291M");
+    expect(links[0].attributes()).toMatchObject({
+      title: "Followers, 291,000,000",
+      "aria-label": "Followers, 291,000,000",
+    });
+    expect(links[0].get("[data-relationship-count]").attributes("aria-hidden")).toBe("true");
+    expect(links[1].text()).toBe("Following 264");
+    expect(links[1].attributes()).toMatchObject({
+      title: "Following, 264",
+      "aria-label": "Following, 264",
+    });
+    expect(links[1].get("[data-relationship-count]").attributes("aria-hidden")).toBe("true");
+  });
+
+  it("omits unavailable relationship counts without placeholders", async () => {
+    ipc.fetchRelationships.mockResolvedValue({ users: [], next_cursor: null });
+    const wrapper = render("followers", false, true, {
+      follower_count: undefined,
+      following_count: undefined,
+    });
+    await flushPromises();
+
+    const links = wrapper.get("[aria-label='Profile relationships']").findAll("a");
+    expect(links[0].text()).toBe("Followers");
+    expect(links[1].text()).toBe("Following");
+    expect(links[0].attributes()).toMatchObject({ title: "Followers", "aria-label": "Followers" });
+    expect(links[1].attributes()).toMatchObject({ title: "Following", "aria-label": "Following" });
+    expect(wrapper.findAll("[data-relationship-count]")).toHaveLength(0);
+    expect(wrapper.text()).not.toContain("—");
+  });
+
+  it("renders zero relationship counts as available", async () => {
+    ipc.fetchRelationships.mockResolvedValue({ users: [], next_cursor: null });
+    const wrapper = render("followers", false, true, {
+      follower_count: 0,
+      following_count: 0,
+    });
+    await flushPromises();
+
+    const links = wrapper.get("[aria-label='Profile relationships']").findAll("a");
+    expect(links[0].text()).toBe("Followers 0");
+    expect(links[0].attributes()).toMatchObject({
+      title: "Followers, 0",
+      "aria-label": "Followers, 0",
+    });
+    expect(links[0].find("[data-relationship-count]").exists()).toBe(true);
+    expect(links[1].text()).toBe("Following 0");
+    expect(links[1].attributes()).toMatchObject({
+      title: "Following, 0",
+      "aria-label": "Following, 0",
+    });
+    expect(links[1].find("[data-relationship-count]").exists()).toBe(true);
+  });
+
+  it("loads a cold profile route with resilient profile and relationship avatars", async () => {
     ipc.fetchProfileSummary.mockResolvedValue({
       pk: "42",
       username: "nike",
@@ -101,12 +178,22 @@ describe("ProfileRelationshipsView", () => {
 
     expect(ipc.fetchProfileSummary).toHaveBeenCalledWith("nike");
     expect(ipc.fetchRelationships).toHaveBeenCalledWith("42", "followers", null);
-    expect(wrapper.findAll("img").map((image) => image.attributes("src"))).toEqual([
-      "remote-media:https://cdninstagram.com/nike.jpg",
-      "remote-media:https://cdninstagram.com/runner.jpg",
+    expect(wrapper.findAllComponents(RemoteImage).map((image) => ({
+      source: image.props("source"),
+      alt: image.props("alt"),
+      variant: image.props("variant"),
+    }))).toEqual([
+      {
+        source: "https://cdninstagram.com/nike.jpg",
+        alt: "@nike profile picture",
+        variant: "avatar",
+      },
+      {
+        source: "https://cdninstagram.com/runner.jpg",
+        alt: "",
+        variant: "compact-avatar",
+      },
     ]);
-    expect(ipc.remoteMediaUrl).toHaveBeenCalledWith("https://cdninstagram.com/nike.jpg");
-    expect(ipc.remoteMediaUrl).toHaveBeenCalledWith("https://cdninstagram.com/runner.jpg");
   });
 
   it("loads, merges, and counts cursor pages", async () => {

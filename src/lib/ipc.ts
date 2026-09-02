@@ -27,6 +27,22 @@ export interface Balance {
 
 export type MediaItemKind = "post" | "reel" | "story" | "avatar";
 export type MediaFileKind = "photo" | "video" | "metadata" | "unknown";
+export type DownloadStatusNamespace = "post" | "story";
+export type DownloadStatusState = "downloaded" | "partial" | "not_downloaded";
+
+export interface DownloadStatusRequest {
+  namespace: DownloadStatusNamespace;
+  pk: string;
+  resources: Array<"photo" | "video">;
+}
+
+export interface DownloadStatus {
+  namespace: DownloadStatusNamespace;
+  pk: string;
+  state: DownloadStatusState;
+  available_resources: number;
+  expected_resources: number;
+}
 export type FileAvailability = "available" | "missing";
 export type LibrarySort = "taken_at_desc" | "imported_at_desc";
 
@@ -171,6 +187,12 @@ export async function queryLibrary(query: LibraryQuery): Promise<LibraryPage> {
 
 export async function getLibraryItem(id: number): Promise<LibraryItemDetail> {
   return invoke("get_library_item", { id });
+}
+
+export async function checkDownloadStatuses(
+  items: DownloadStatusRequest[],
+): Promise<DownloadStatus[]> {
+  return invoke("check_download_statuses", { items });
 }
 
 export async function requestLibraryPreviewAccess(fileId: number): Promise<boolean> {

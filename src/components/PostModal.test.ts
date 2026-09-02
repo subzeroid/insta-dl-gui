@@ -20,6 +20,8 @@ vi.mock("../lib/ipc", () => ({
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => clipboard);
 
 import PostModal from "./PostModal.vue";
+import RemoteImage from "./RemoteImage.vue";
+import RemoteVideo from "./RemoteVideo.vue";
 import type { Post, StoryItem } from "../lib/ipc";
 
 const post: Post = {
@@ -34,6 +36,10 @@ const story: StoryItem = {
   kind: "photo",
   media_url: "https://cdn.example/story.jpg",
 };
+const signedPhotoSource =
+  "https://cdn.example/signed-photo.jpg?token=photo%2Bsignature&expires=999999#preview";
+const signedVideoSource =
+  "https://cdn.example/signed-video.mp4?token=video%2Bsignature&expires=999999#preview";
 
 const wrappers: Array<{ unmount: () => void }> = [];
 
@@ -79,17 +85,130 @@ afterEach(() => {
 });
 
 describe("PostModal copy actions", () => {
-  it("renders post and story previews through the remote-media protocol without changing downloads", async () => {
+  it("keeps the modal card scrollable within the viewport with Download inside", () => {
+    const wrapper = render();
+    const card = wrapper.get(".card");
+
+    expect(card.classes()).toContain("max-h-[calc(100vh-2rem)]");
+    expect(card.classes()).toContain("overflow-y-auto");
+    expect(card.attributes("data-testid")).toBe("post-modal-card");
+    expect(card.findAll("button").some((button) => button.text() === "Download")).toBe(true);
+  });
+
+  it("renders a photo post with the original source through RemoteImage", () => {
+    const wrapper = render();
+    const preview = wrapper.getComponent(RemoteImage);
+
+    expect(preview.props("source")).toBe(post.resources[0].url);
+    expect(preview.props("alt")).toBe("@nike · POSTCODE preview");
+    expect(preview.props("variant")).toBe("modal");
+  });
+
+  it("renders a photo story with the original source through RemoteImage", () => {
+    const wrapper = render({ post: null, story });
+    const preview = wrapper.getComponent(RemoteImage);
+
+    expect(preview.props("source")).toBe(story.media_url);
+    expect(preview.props("alt")).toBe("Story · @nike preview");
+    expect(preview.props("variant")).toBe("modal");
+  });
+
+  it("renders a reel video resource with controls through RemoteVideo", () => {
+    const videoPost: Post = {
+      ...post,
+      code: "REELCODE",
+      owner_username: "runner",
+      resources: [
+        { url: "https://cdn.example/reel-cover.jpg", kind: "photo" },
+        { url: "https://cdn.example/reel-original.mp4", kind: "video" },
+      ],
+    };
+    const wrapper = render({ post: videoPost, postCategory: "reels" });
+    const preview = wrapper.getComponent(RemoteVideo);
+
+    expect(preview.props("source")).toBe(videoPost.resources[1].url);
+    expect(preview.props("label")).toBe("@runner · REELCODE video preview");
+    expect(preview.props("controls")).toBe(true);
+  });
+
+  it("passes signed photo and video sources to remote components unchanged", () => {
+    const photoWrapper = render({
+      post: { ...post, resources: [{ url: signedPhotoSource, kind: "photo" }] },
+    });
+    const videoWrapper = render({
+      post: {
+        ...post,
+        resources: [{ url: signedVideoSource, kind: "video" }],
+      },
+    });
+
+    expect(photoWrapper.getComponent(RemoteImage).props("source")).toBe(signedPhotoSource);
+    expect(videoWrapper.getComponent(RemoteVideo).props("source")).toBe(signedVideoSource);
+  });
+
+  it("prefers a thumbnail for photos and a video resource over any image", () => {
+    const thumbnailSource = "https://cdn.example/thumbnail.jpg?size=modal#cover";
+    const photoResource = "https://cdn.example/photo-resource.jpg";
+    const videoResource = "https://cdn.example/video-resource.mp4?quality=original#media";
+    const photoWrapper = render({
+      post: {
+        ...post,
+        thumbnail_url: thumbnailSource,
+        resources: [{ url: photoResource, kind: "photo" }],
+      },
+    });
+    const videoWrapper = render({
+      post: {
+        ...post,
+        thumbnail_url: thumbnailSource,
+        resources: [
+          { url: photoResource, kind: "photo" },
+          { url: videoResource, kind: "video" },
+        ],
+      },
+    });
+
+    expect(photoWrapper.getComponent(RemoteImage).props("source")).toBe(thumbnailSource);
+    expect(videoWrapper.findComponent(RemoteImage).exists()).toBe(false);
+    expect(videoWrapper.getComponent(RemoteVideo).props("source")).toBe(videoResource);
+  });
+
+  it("switches from a photo preview to the exact new video source after a prop change", async () => {
+    const wrapper = render({
+      post: { ...post, resources: [{ url: signedPhotoSource, kind: "photo" }] },
+    });
+    expect(wrapper.getComponent(RemoteImage).props("source")).toBe(signedPhotoSource);
+
+    await wrapper.setProps({
+      post: { ...post, resources: [{ url: signedVideoSource, kind: "video" }] },
+    });
+    await flushPromises();
+
+    expect(wrapper.findComponent(RemoteImage).exists()).toBe(false);
+    expect(wrapper.getComponent(RemoteVideo).props("source")).toBe(signedVideoSource);
+  });
+
+  it("renders a video story with controls through RemoteVideo", () => {
+    const videoStory: StoryItem = {
+      ...story,
+      kind: "video",
+      media_url: "https://cdn.example/story-original.mp4",
+    };
+    const wrapper = render({ post: null, story: videoStory });
+    const preview = wrapper.getComponent(RemoteVideo);
+
+    expect(preview.props("source")).toBe(videoStory.media_url);
+    expect(preview.props("label")).toBe("Story · @nike video preview");
+    expect(preview.props("controls")).toBe(true);
+  });
+
+  it("keeps post and story downloads unchanged", async () => {
     const postWrapper = render();
-    expect(postWrapper.get("img").attributes("src")).toBe(
-      `remote-media:${post.resources[0].url}`,
-    );
     await postWrapper.findAll("button").find((button) => button.text() === "Download")!.trigger("click");
     await flushPromises();
     expect(ipc.downloadPost).toHaveBeenCalledWith(post.code);
 
     const storyWrapper = render({ post: null, story });
-    expect(storyWrapper.get("img").attributes("src")).toBe(`remote-media:${story.media_url}`);
     await storyWrapper.findAll("button").find((button) => button.text() === "Download")!.trigger("click");
     await flushPromises();
     expect(ipc.downloadDirect).toHaveBeenCalledWith("nike", "stories", [
@@ -217,5 +336,119 @@ describe("PostModal copy actions", () => {
     await flushPromises();
 
     expect(startTimer).not.toHaveBeenCalled();
+  });
+});
+
+describe("PostModal caption mentions", () => {
+  const captionWithMention =
+    "First line\nFollow @Nike_Official or email mail@example.com <em>literally</em>.";
+
+  it("renders valid mentions as accessible profile links while keeping other caption text safe", () => {
+    const wrapper = render({ post: { ...post, caption: captionWithMention } });
+    const captionElement = wrapper.get("[data-caption]");
+    const mention = captionElement
+      .findAll("a[href]")
+      .find((link) => link.element.textContent === "@Nike_Official");
+
+    expect(captionElement.element.tagName).toBe("P");
+    expect(captionElement.classes()).toEqual(
+      expect.arrayContaining(["whitespace-pre-wrap", "break-words"]),
+    );
+    expect(captionElement.classes()).not.toContain("line-clamp-4");
+    expect(mention).toBeDefined();
+    expect(mention!.element.tagName).toBe("A");
+    expect(mention!.attributes("href")).toBe("/explore?profile=Nike_Official");
+    expect(mention!.attributes("aria-label")).toBeUndefined();
+    expect(mention!.classes().join(" ")).toContain("focus-visible:outline-2");
+    expect(mention!.classes()).toContain("underline");
+    expect(mention!.classes()).toContain("decoration-current");
+    expect(mention!.classes()).not.toContain("decoration-transparent");
+    expect(captionElement.findAll("a")).toHaveLength(1);
+    expect(captionElement.element.textContent).toBe(captionWithMention);
+    expect(captionElement.find("em").exists()).toBe(false);
+  });
+
+  it("keeps text-only captions clamped", () => {
+    const wrapper = render({ post: { ...post, caption: "A plain caption without mentions." } });
+
+    expect(wrapper.get("[data-caption]").classes()).toContain("line-clamp-4");
+  });
+
+  it("prevents native navigation and emits the username for an unmodified primary click", () => {
+    const wrapper = render({ post: { ...post, caption: captionWithMention } });
+    const mention = wrapper.get('[data-caption-mention="Nike_Official"]');
+    const bubbledClick = vi.fn();
+    wrapper.get("[data-testid='post-modal-card']").element.addEventListener("click", bubbledClick);
+    const click = new MouseEvent("click", {
+      button: 0,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    mention.element.dispatchEvent(click);
+
+    expect(click.defaultPrevented).toBe(true);
+    expect(bubbledClick).not.toHaveBeenCalled();
+    expect(wrapper.emitted("open-profile")).toEqual([["Nike_Official"]]);
+  });
+
+  it.each([
+    ["a macOS meta-click", { button: 0, metaKey: true }],
+    ["a ctrl-click", { button: 0, ctrlKey: true }],
+    ["a shift-click", { button: 0, shiftKey: true }],
+    ["an alt-click", { button: 0, altKey: true }],
+    ["a non-primary click", { button: 1 }],
+  ])("keeps native navigation and does not emit for %s", (_label, init) => {
+    const wrapper = render({ post: { ...post, caption: captionWithMention } });
+    const mention = wrapper.get('[data-caption-mention="Nike_Official"]');
+    const defaultPreventedAtCard: boolean[] = [];
+    const bubbledClick = vi.fn((event: Event) => {
+      defaultPreventedAtCard.push(event.defaultPrevented);
+      event.preventDefault();
+    });
+    wrapper.get("[data-testid='post-modal-card']").element.addEventListener("click", bubbledClick);
+    const click = new MouseEvent("click", {
+      ...init,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    mention.element.dispatchEvent(click);
+
+    expect(wrapper.emitted("open-profile")).toBeUndefined();
+    expect(bubbledClick).toHaveBeenCalledOnce();
+    expect(defaultPreventedAtCard).toEqual([false]);
+  });
+
+  it("renders independent links for two mentions and emits the clicked username", () => {
+    const wrapper = render({
+      post: { ...post, caption: "Follow @nike and @adidas." },
+    });
+    const mentions = wrapper.findAll("[data-caption-mention]");
+
+    expect(mentions).toHaveLength(2);
+    expect(mentions.map((mention) => mention.attributes("href"))).toEqual([
+      "/explore?profile=nike",
+      "/explore?profile=adidas",
+    ]);
+
+    const click = new MouseEvent("click", {
+      button: 0,
+      bubbles: true,
+      cancelable: true,
+    });
+    mentions[1].element.dispatchEvent(click);
+
+    expect(click.defaultPrevented).toBe(true);
+    expect(wrapper.emitted("open-profile")).toEqual([["adidas"]]);
+  });
+
+  it("copies the exact caption including its newline and mention", async () => {
+    const wrapper = render({ post: { ...post, caption: captionWithMention } });
+
+    await action(wrapper, "copy-description").trigger("click");
+    await flushPromises();
+
+    expect(clipboard.writeText).toHaveBeenCalledWith(captionWithMention);
   });
 });

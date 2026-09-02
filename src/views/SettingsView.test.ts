@@ -25,6 +25,7 @@ vi.mock("../lib/ipc", () => ({
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: dialog.open }));
 
 import { useAppStore } from "../stores/app";
+import { useRemoteMediaHealthStore } from "../stores/remoteMediaHealth";
 import SettingsView from "./SettingsView.vue";
 
 const mountedWrappers: Array<{ unmount: () => void }> = [];
@@ -65,6 +66,7 @@ describe("Settings Library registration warning", () => {
   afterEach(() => {
     for (const wrapper of mountedWrappers.splice(0)) wrapper.unmount();
     document.body.replaceChildren();
+    window.history.replaceState({}, "", "/");
   });
 
   beforeEach(() => {
@@ -103,15 +105,98 @@ describe("Settings Library registration warning", () => {
     expect(link.text()).toContain("Library");
   });
 
-  it("shows the safe current token and keeps replacement text readable", async () => {
+  it("keeps the stored hint masked and toggles only the draft token visibility", async () => {
     const { wrapper } = await renderSettings();
 
-    expect(wrapper.get("[data-testid='token-hint']").text()).toContain("***old1");
+    expect(wrapper.get("[data-testid='token-hint']").text()).toBe("***old1");
+    const label = wrapper.get<HTMLLabelElement>('label[for="replacement-hiker-token"]');
+    expect(label.text()).toBe("HikerAPI token");
+    expect(wrapper.find("#replacement-hiker-token-current").exists()).toBe(true);
     const input = wrapper.get<HTMLInputElement>("input[name='hiker-token']");
-    expect(input.attributes("type")).toBe("text");
+    expect(input.attributes("id")).toBe("replacement-hiker-token");
+    expect(input.attributes("aria-describedby")).toBe("replacement-hiker-token-current");
+    expect(input.attributes("type")).toBe("password");
     expect(wrapper.get("[data-testid='replace-token']").attributes("disabled")).toBeDefined();
     await input.setValue("visible-token");
     expect(input.element.value).toBe("visible-token");
+
+    const showButton = wrapper.get<HTMLButtonElement>("button[aria-label='Show token']");
+    await showButton.trigger("click");
+
+    expect(input.attributes("type")).toBe("text");
+    expect(input.element.value).toBe("visible-token");
+    expect(wrapper.get("[data-testid='token-hint']").text()).toBe("***old1");
+    expect(wrapper.find("button[aria-label='Hide token']").exists()).toBe(true);
+
+    await wrapper.get("button[aria-label='Hide token']").trigger("click");
+
+    expect(input.attributes("type")).toBe("password");
+    expect(input.element.value).toBe("visible-token");
+    expect(input.attributes("name")).toBe("hiker-token");
+    expect(input.attributes("placeholder")).toBe("Paste a new token…");
+    expect(input.attributes("autocomplete")).toBe("off");
+    expect(input.classes()).toEqual(expect.arrayContaining(["font-mono", "text-xs"]));
+  });
+
+  it("disables token controls while validation is pending", async () => {
+    const pending = deferred<{ requests: number; rate: number | null; amount: number | null; currency: string | null }>();
+    ipc.validateToken.mockReturnValueOnce(pending.promise);
+    const { wrapper } = await renderSettings();
+    const input = wrapper.get<HTMLInputElement>("input[name='hiker-token']");
+
+    await input.setValue("fresh-token");
+    await wrapper.get("[data-testid='token-form']").trigger("submit");
+    await nextTick();
+
+    expect(input.attributes("disabled")).toBeDefined();
+    expect(wrapper.get("button[aria-label='Show token']").attributes("disabled")).toBeDefined();
+
+    pending.resolve({ requests: 99, rate: null, amount: null, currency: null });
+    await flushPromises();
+  });
+
+  it("conceals a revealed draft during validation and keeps later drafts hidden", async () => {
+    const pending = deferred<{ requests: number; rate: number | null; amount: number | null; currency: string | null }>();
+    ipc.validateToken.mockReturnValueOnce(pending.promise);
+    const { wrapper } = await renderSettings();
+    const input = wrapper.get<HTMLInputElement>("input[name='hiker-token']");
+
+    await input.setValue("fresh-token");
+    await wrapper.get("button[aria-label='Show token']").trigger("click");
+    expect(input.attributes("type")).toBe("text");
+
+    await wrapper.get("[data-testid='token-form']").trigger("submit");
+    await nextTick();
+
+    expect(input.attributes("type")).toBe("password");
+    expect(input.element.value).toBe("fresh-token");
+    expect(wrapper.get("button[aria-label='Show token']").attributes("disabled")).toBeDefined();
+
+    pending.resolve({ requests: 99, rate: null, amount: null, currency: null });
+    await flushPromises();
+    expect(input.element.value).toBe("");
+    expect(input.attributes("type")).toBe("password");
+
+    await input.setValue("next-token");
+    expect(input.attributes("type")).toBe("password");
+  });
+
+  it("does not validate empty or whitespace-only replacement tokens on direct submit", async () => {
+    const { wrapper } = await renderSettings();
+    const form = wrapper.get("[data-testid='token-form']");
+    const input = wrapper.get<HTMLInputElement>("input[name='hiker-token']");
+
+    await form.trigger("submit");
+    await nextTick();
+    await input.setValue("   ");
+    await form.trigger("submit");
+    await nextTick();
+
+    expect(ipc.validateToken).not.toHaveBeenCalled();
+    expect(wrapper.find("[data-testid='token-success']").exists()).toBe(false);
+    expect(wrapper.find("[data-testid='token-error']").exists()).toBe(false);
+    expect(wrapper.get("[data-testid='replace-token']").text()).toBe("Replace token");
+    expect(wrapper.get("[data-testid='replace-token']").attributes("disabled")).toBeDefined();
   });
 
   it("labels the proxy input and shows only the safe stored hint", async () => {
@@ -120,8 +205,8 @@ describe("Settings Library registration warning", () => {
     expect(wrapper.get("[data-testid='proxy-hint']").text()).toBe(
       "socks5h://***@proxy.example:1080/",
     );
-    const label = wrapper.get<HTMLLabelElement>('label[for="network-proxy"]');
-    const input = wrapper.get<HTMLInputElement>("#network-proxy");
+    const label = wrapper.get<HTMLLabelElement>('label[for="network-proxy-url"]');
+    const input = wrapper.get<HTMLInputElement>("#network-proxy-url");
     expect(label.text()).toBe("Network proxy");
     expect(input.attributes("type")).toBe("text");
     expect(input.attributes("aria-describedby")).toBe(
@@ -140,6 +225,30 @@ describe("Settings Library registration warning", () => {
     );
   });
 
+  it("focuses the safe proxy card for the exact settings hash without prefilling the stored URL", async () => {
+    window.history.replaceState({}, "", "/settings#network-proxy");
+
+    const { wrapper } = await renderSettings();
+    await nextTick();
+
+    const card = wrapper.get<HTMLFormElement>("[data-testid='proxy-form']");
+    const input = wrapper.get<HTMLInputElement>("#network-proxy-url");
+    expect(card.attributes("id")).toBe("network-proxy");
+    expect(card.attributes("tabindex")).toBe("-1");
+    expect(card.classes()).toEqual(
+      expect.arrayContaining([
+        "focus-visible:outline-2",
+        "focus-visible:outline-offset-2",
+        "focus-visible:outline-warn",
+      ]),
+    );
+    expect(document.activeElement).toBe(card.element);
+    expect(input.element.value).toBe("");
+    expect(wrapper.get("[data-testid='proxy-hint']").text()).toBe(
+      "socks5h://***@proxy.example:1080/",
+    );
+  });
+
   it("applies a trimmed replacement proxy and updates the safe stored hint", async () => {
     ipc.setProxy.mockResolvedValue({
       has_token: true,
@@ -150,12 +259,15 @@ describe("Settings Library registration warning", () => {
       sidecar: true,
     });
     const { app, wrapper } = await renderSettings();
-    const input = wrapper.get<HTMLInputElement>("#network-proxy");
+    const remoteMediaHealth = useRemoteMediaHealthStore();
+    expect(remoteMediaHealth.retryGeneration).toBe(0);
+    const input = wrapper.get<HTMLInputElement>("#network-proxy-url");
     await input.setValue("  socks5h://alice:secret@proxy.example:1080  ");
 
     await wrapper.get("[data-testid='proxy-form']").trigger("submit");
     await flushPromises();
 
+    expect(remoteMediaHealth.retryGeneration).toBe(1);
     expect(ipc.setProxy).toHaveBeenCalledWith("socks5h://alice:secret@proxy.example:1080");
     expect(app.hasProxy).toBe(true);
     expect(app.proxyHint).toBe("socks5h://***@new-proxy.example:1080/");
@@ -179,18 +291,21 @@ describe("Settings Library registration warning", () => {
       sidecar: true,
     });
     const { app, wrapper } = await renderSettings();
+    const remoteMediaHealth = useRemoteMediaHealthStore();
+    expect(remoteMediaHealth.retryGeneration).toBe(0);
 
     await wrapper.get("[data-testid='clear-proxy']").trigger("click");
     await flushPromises();
     await nextTick();
 
+    expect(remoteMediaHealth.retryGeneration).toBe(1);
     expect(ipc.setProxy).toHaveBeenCalledWith(null);
     expect(app.hasProxy).toBe(false);
     expect(app.proxyHint).toBeNull();
     expect(wrapper.get("[data-testid='proxy-hint']").text()).toBe("Direct connection");
     expect(wrapper.find("[data-testid='clear-proxy']").exists()).toBe(false);
     expect(wrapper.get("[data-testid='proxy-success']").text()).toBe("Proxy cleared");
-    expect(document.activeElement).toBe(wrapper.get<HTMLInputElement>("#network-proxy").element);
+    expect(document.activeElement).toBe(wrapper.get<HTMLInputElement>("#network-proxy-url").element);
   });
 
   it("keeps the configured proxy and entered replacement when applying fails", async () => {
@@ -198,12 +313,15 @@ describe("Settings Library registration warning", () => {
       new Error("Enter a valid HTTP, HTTPS, SOCKS5, or SOCKS5H proxy URL"),
     );
     const { app, wrapper } = await renderSettings();
-    const input = wrapper.get<HTMLInputElement>("#network-proxy");
+    const remoteMediaHealth = useRemoteMediaHealthStore();
+    expect(remoteMediaHealth.retryGeneration).toBe(0);
+    const input = wrapper.get<HTMLInputElement>("#network-proxy-url");
     await input.setValue("bad-proxy");
 
     await wrapper.get("[data-testid='proxy-form']").trigger("submit");
     await flushPromises();
 
+    expect(remoteMediaHealth.retryGeneration).toBe(0);
     expect(ipc.setProxy).toHaveBeenCalledOnce();
     expect(ipc.configState).toHaveBeenCalledOnce();
     expect(app.hasProxy).toBe(true);
@@ -217,7 +335,7 @@ describe("Settings Library registration warning", () => {
   it("shows the production validation error when Tauri rejects with a string", async () => {
     ipc.setProxy.mockRejectedValue("Enter a valid HTTP, HTTPS, SOCKS5, or SOCKS5H proxy URL");
     const { wrapper } = await renderSettings();
-    await wrapper.get<HTMLInputElement>("#network-proxy").setValue("bad-proxy");
+    await wrapper.get<HTMLInputElement>("#network-proxy-url").setValue("bad-proxy");
 
     await wrapper.get("[data-testid='proxy-form']").trigger("submit");
     await flushPromises();
@@ -231,7 +349,7 @@ describe("Settings Library registration warning", () => {
     const pending = deferred<never>();
     ipc.setProxy.mockReturnValueOnce(pending.promise);
     const { wrapper } = await renderSettings();
-    const input = wrapper.get<HTMLInputElement>("#network-proxy");
+    const input = wrapper.get<HTMLInputElement>("#network-proxy-url");
     input.element.focus();
     await input.setValue("http://proxy.example:8080");
 
@@ -277,7 +395,7 @@ describe("Settings Library registration warning", () => {
     ipc.saveSettings.mockReturnValueOnce(sidecarRequest.promise);
     const { app, wrapper } = await renderSettings();
 
-    await wrapper.get<HTMLInputElement>("#network-proxy").setValue("http://new-proxy.example:8080");
+    await wrapper.get<HTMLInputElement>("#network-proxy-url").setValue("http://new-proxy.example:8080");
     await wrapper.get("[data-testid='proxy-form']").trigger("submit");
     await wrapper.get<HTMLInputElement>('input[type="checkbox"]').setValue(false);
 
@@ -336,7 +454,7 @@ describe("Settings Library registration warning", () => {
     await wrapper.get<HTMLInputElement>("input[name='hiker-token']").setValue("fresh-token");
     await wrapper.get("[data-testid='token-form']").trigger("submit");
     await flushPromises();
-    await wrapper.get<HTMLInputElement>("#network-proxy").setValue("http://new-proxy.example:8080");
+    await wrapper.get<HTMLInputElement>("#network-proxy-url").setValue("http://new-proxy.example:8080");
     await wrapper.get("[data-testid='proxy-form']").trigger("submit");
 
     proxyRequest.resolve({
@@ -374,12 +492,12 @@ describe("Settings Library registration warning", () => {
     ipc.setProxy.mockReturnValueOnce(proxyRequest.promise);
     const pinia = createPinia();
     const first = await renderSettings(pinia);
-    await first.wrapper.get<HTMLInputElement>("#network-proxy").setValue("http://new-proxy.example:8080");
+    await first.wrapper.get<HTMLInputElement>("#network-proxy-url").setValue("http://new-proxy.example:8080");
     await first.wrapper.get("[data-testid='proxy-form']").trigger("submit");
     first.wrapper.unmount();
 
     const second = await renderSettings(pinia);
-    const input = second.wrapper.get<HTMLInputElement>("#network-proxy");
+    const input = second.wrapper.get<HTMLInputElement>("#network-proxy-url");
     await expect(second.app.setProxy("http://ignored-proxy.example:8080")).resolves.toBeUndefined();
 
     expect(ipc.setProxy).toHaveBeenCalledOnce();
@@ -405,7 +523,7 @@ describe("Settings Library registration warning", () => {
   it("maps unexpected proxy apply errors to the fixed safe message", async () => {
     ipc.setProxy.mockRejectedValue("failed /Users/private socks5h://alice:secret@proxy.example");
     const { wrapper } = await renderSettings();
-    await wrapper.get<HTMLInputElement>("#network-proxy").setValue("http://proxy.example:8080");
+    await wrapper.get<HTMLInputElement>("#network-proxy-url").setValue("http://proxy.example:8080");
 
     await wrapper.get("[data-testid='proxy-form']").trigger("submit");
     await flushPromises();
@@ -421,10 +539,13 @@ describe("Settings Library registration warning", () => {
       new Error("failed to save socks5h://alice:secret@proxy.example:1080 in /Users/private/config"),
     );
     const { app, wrapper } = await renderSettings();
+    const remoteMediaHealth = useRemoteMediaHealthStore();
+    expect(remoteMediaHealth.retryGeneration).toBe(0);
 
     await wrapper.get("[data-testid='clear-proxy']").trigger("click");
     await flushPromises();
 
+    expect(remoteMediaHealth.retryGeneration).toBe(0);
     expect(ipc.setProxy).toHaveBeenCalledWith(null);
     expect(app.hasProxy).toBe(true);
     expect(wrapper.find("[data-testid='clear-proxy']").exists()).toBe(true);

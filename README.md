@@ -14,7 +14,7 @@ Powered by [HikerAPI](https://hikerapi.com/p/uk064a1b) · built with [Tauri 2](h
 
 Paste your HikerAPI token once, then download any public profile's content with a couple of clicks. Because downloads go through the HikerAPI cloud instead of a logged-in Instagram session, there is **no account ban risk** — unlike instaloader or gallery-dl.
 
-![insta-dl-gui — profile download screen](docs/screenshot.png)
+![insta-dl-gui Explore profile previews and download controls](docs/screenshot.png)
 
 ## Features
 
@@ -57,6 +57,8 @@ One request ≈ one API call: fetching a post costs 1, stories 2, highlights 2 +
 
 If Instagram media is blocked on your connection, open **Settings** and configure one shared proxy for HikerAPI and CDN traffic. Authenticated proxy URLs are supported; see the [usage guide](docs/usage.md#configure-a-network-proxy) for supported schemes and switching behavior.
 
+If two different previews fail within 10 seconds, the app shows one warning with **Open Settings**, **Retry** and **Dismiss**. Try a VPN for a blocked direct connection, or configure the shared proxy for HikerAPI and Instagram media. The warning is preview-only: profile metadata and download behavior are unchanged.
+
 ## Local media Library
 
 Open **Library** and run the initial scan to index media already in your download folder. New successful downloads are added to the same local catalog automatically. Search by username, shortcode or caption; filter by media kind, available/missing files and captured date; then sort by publication or import date.
@@ -94,7 +96,7 @@ The frontend can run in a plain browser with a mocked Tauri IPC — handy for UI
 
 ```sh
 npx vite &
-node scripts/screenshot.mjs "http://localhost:1420/download?mock=1&demo=profile" docs/screenshot.png
+node scripts/screenshot.mjs "http://localhost:1420/explore?mock=1&demo=explore" docs/screenshot.png
 ```
 
 ## Related projects

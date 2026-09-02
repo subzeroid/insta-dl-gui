@@ -36,7 +36,9 @@ pub struct Profile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub full_name: Option<String>,
     pub media_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub follower_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub following_count: Option<u64>,
     pub is_private: bool,
     pub is_verified: bool,
@@ -143,4 +145,40 @@ pub fn parse_taken_at(v: &serde_json::Value) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(iso)
         .ok()
         .map(|dt| dt.timestamp())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Profile;
+
+    fn profile(follower_count: Option<u64>, following_count: Option<u64>) -> Profile {
+        Profile {
+            pk: "42".into(),
+            username: "nike".into(),
+            full_name: None,
+            media_count: 0,
+            follower_count,
+            following_count,
+            is_private: false,
+            is_verified: false,
+            avatar_url: None,
+        }
+    }
+
+    #[test]
+    fn profile_omits_unavailable_relationship_counts_but_keeps_zero() {
+        let unavailable = serde_json::to_value(profile(None, None)).unwrap();
+        assert!(unavailable.get("follower_count").is_none());
+        assert!(unavailable.get("following_count").is_none());
+
+        let zero = serde_json::to_value(profile(Some(0), Some(0))).unwrap();
+        assert_eq!(
+            zero.get("follower_count").and_then(|value| value.as_u64()),
+            Some(0)
+        );
+        assert_eq!(
+            zero.get("following_count").and_then(|value| value.as_u64()),
+            Some(0)
+        );
+    }
 }

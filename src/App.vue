@@ -4,7 +4,9 @@ import { useRoute, useRouter } from "vue-router";
 import { useAppStore } from "./stores/app";
 import { useJobsStore } from "./stores/jobs";
 import { formatBalance } from "./lib/ipc";
+import AppBrand from "./components/AppBrand.vue";
 import DownloadActivityBar from "./components/DownloadActivityBar.vue";
+import RemoteMediaFailureBanner from "./components/RemoteMediaFailureBanner.vue";
 
 const app = useAppStore();
 const jobs = useJobsStore();
@@ -31,12 +33,7 @@ const showChrome = computed(() => route.path !== "/onboarding");
       v-if="showChrome"
       class="flex min-w-0 flex-col items-stretch gap-2 border-b border-line bg-surface-1 px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
     >
-      <div class="flex shrink-0 items-baseline gap-2 select-none">
-        <span
-          class="bg-gradient-to-r from-[var(--color-accent-2)] to-[var(--color-accent)] bg-clip-text text-lg font-bold text-transparent"
-          >insta-dl-gui</span
-        >
-      </div>
+      <AppBrand :version="app.appVersion" class="shrink-0" />
       <nav
         aria-label="Primary"
         class="flex w-full min-w-0 max-w-full items-center gap-1 overflow-x-auto pb-1 sm:w-auto sm:overflow-visible sm:pb-0"
@@ -66,7 +63,8 @@ const showChrome = computed(() => route.path !== "/onboarding");
         </button>
       </nav>
     </header>
-    <main class="min-h-0 flex-1 overflow-y-auto">
+    <RemoteMediaFailureBanner v-if="showChrome" />
+    <main id="app-main-content" class="min-h-0 flex-1 overflow-y-auto" tabindex="-1">
       <RouterView />
     </main>
     <DownloadActivityBar v-if="showChrome" />

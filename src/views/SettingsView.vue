@@ -3,6 +3,7 @@ import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useAppStore } from "../stores/app";
 import { formatBalance } from "../lib/ipc";
+import TokenInput from "../components/TokenInput.vue";
 
 const app = useAppStore();
 const sidecar = ref(app.sidecar);
@@ -13,6 +14,7 @@ const tokenBusy = ref(false);
 const tokenError = ref<string | null>(null);
 const tokenSuccess = ref<string | null>(null);
 const replacementProxy = ref("");
+const proxyCard = ref<HTMLFormElement | null>(null);
 const proxyInput = ref<HTMLInputElement | null>(null);
 const proxyError = ref<string | null>(null);
 const proxySuccess = ref<string | null>(null);
@@ -20,8 +22,12 @@ const PROXY_VALIDATION_ERROR = "Enter a valid HTTP, HTTPS, SOCKS5, or SOCKS5H pr
 const PROXY_SAVE_ERROR = "Proxy settings could not be saved. The previous proxy is still active.";
 let proxyViewMounted = true;
 
-onMounted(() => {
+onMounted(async () => {
   sidecar.value = app.sidecar;
+  if (window.location.hash === "#network-proxy") {
+    await nextTick();
+    proxyCard.value?.focus();
+  }
 });
 
 onBeforeUnmount(() => {
@@ -116,19 +122,20 @@ async function clearProxy() {
 
     <form data-testid="token-form" class="card space-y-3 p-5" @submit.prevent="replaceToken">
       <div>
-        <div class="text-sm font-medium text-slate-300">HikerAPI token</div>
-        <p class="mt-1 text-xs text-slate-500">
+        <label for="replacement-hiker-token" class="text-sm font-medium text-slate-300">HikerAPI token</label>
+        <p id="replacement-hiker-token-current" class="mt-1 text-xs text-slate-500">
           Current: <span data-testid="token-hint" class="font-mono text-slate-400">{{ app.tokenHint || "Not configured" }}</span>
         </p>
       </div>
       <div class="flex gap-2">
-        <input
+        <TokenInput
           v-model="replacementToken"
+          id="replacement-hiker-token"
           name="hiker-token"
-          class="input font-mono text-xs"
-          type="text"
+          class="font-mono text-xs"
           placeholder="Paste a new token…"
           autocomplete="off"
+          aria-describedby="replacement-hiker-token-current"
           :disabled="tokenBusy"
         />
         <button
@@ -149,13 +156,16 @@ async function clearProxy() {
     </form>
 
     <form
+      id="network-proxy"
+      ref="proxyCard"
       data-testid="proxy-form"
-      class="card space-y-3 p-5"
+      class="card space-y-3 p-5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-warn"
+      tabindex="-1"
       :aria-busy="app.proxySaving"
       @submit.prevent="applyProxy"
     >
       <div>
-        <label for="network-proxy" class="text-sm font-medium text-slate-300">Network proxy</label>
+        <label for="network-proxy-url" class="text-sm font-medium text-slate-300">Network proxy</label>
         <p id="proxy-explanation" class="mt-1 text-xs text-slate-500">
           Routes both HikerAPI and Instagram CDN requests.
         </p>
@@ -173,7 +183,7 @@ async function clearProxy() {
         <input
           v-model="replacementProxy"
           ref="proxyInput"
-          id="network-proxy"
+          id="network-proxy-url"
           name="network-proxy"
           class="input min-w-0 flex-1 font-mono text-xs"
           type="text"

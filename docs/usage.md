@@ -138,6 +138,8 @@ Press **Clear proxy** to restore an explicit direct connection for new operation
 
 Settings displays only a credential-redacted hint, but the complete URL is stored in the app's restrictive local config file so authenticated proxies can reconnect after launch. Do not paste a raw authenticated proxy URL into an issue report; redact its username and password first.
 
+From the preview warning, **Open Settings** jumps directly to this proxy card. After turning on a VPN, applying a corrected proxy or clearing the proxy for a direct connection, **Retry** reloads every currently mounted preview. **Dismiss** hides the warning for the current app process only.
+
 ## Queue
 
 The footer keeps download activity visible from Download, Explore, Library and Settings. It shows the active job count, current file and downloaded bytes; click anywhere on it to open **Queue**.

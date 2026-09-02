@@ -6,12 +6,12 @@ import {
   downloadPost,
   enqueueProfileDownload,
   fetchProfile,
-  remoteMediaUrl,
   resolveInput,
   type ProfileOptions,
   type ProfilePreview,
 } from "../lib/ipc";
 import { buildProfileOptions, hasProfileSelection } from "../lib/profileOptions";
+import RemoteImage from "../components/RemoteImage.vue";
 
 const app = useAppStore();
 const jobs = useJobsStore();
@@ -119,11 +119,11 @@ onMounted(() => {
     <!-- Profile preview -->
     <div v-if="preview" class="card overflow-hidden">
       <div class="flex items-center gap-4 p-5">
-        <img
-          v-if="preview.profile.avatar_url"
-          :src="remoteMediaUrl(preview.profile.avatar_url)"
-          class="h-16 w-16 rounded-full border border-line object-cover"
-          referrerpolicy="no-referrer"
+        <RemoteImage
+          :source="preview.profile.avatar_url"
+          :alt="`@${preview.profile.username} profile picture`"
+          variant="avatar"
+          class="h-16 w-16 shrink-0 rounded-full"
         />
         <div class="min-w-0 flex-1">
           <div class="flex items-center gap-1.5">

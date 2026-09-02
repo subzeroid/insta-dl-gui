@@ -3,9 +3,13 @@
  * (`?mock=1`) for screenshots and UI work without the Rust backend.
  */
 
+import { version as packageVersion } from "../../package.json";
 import type {
   DirectItem,
   ConfigState,
+  DownloadStatus,
+  DownloadStatusNamespace,
+  DownloadStatusRequest,
   JobOutputFile,
   JobProgress,
   LibraryCard,
@@ -36,6 +40,16 @@ interface MockDownloadManifest {
   dir: string;
   requestedItems?: number;
   outputs: JobOutputFile[];
+  evidence: MockDownloadEvidence[][];
+}
+
+interface MockDownloadEvidence {
+  root: string;
+  relativePath: string;
+  namespace: DownloadStatusNamespace;
+  pk: string;
+  ordinal: number;
+  kind: DownloadMediaKind;
 }
 
 const MOCK_DISPOSER = Symbol("insta-dl-gui-tauri-mock-disposer");
@@ -48,6 +62,8 @@ const MOCK_REMOTE_MEDIA_URL_RESOLVER = Symbol.for(
 const MAX_DOWNLOAD_ITEMS = 500;
 const MAX_RESOURCES_PER_POST = 20;
 const MAX_SHORTCODE_BYTES = 256;
+const MAX_DOWNLOAD_STATUS_IDENTITIES = 500;
+const MAX_DOWNLOAD_STATUS_PK_BYTES = 64;
 const ALLOWED_CDN_HOSTS = ["cdninstagram.com", "fbcdn.net"];
 const MOCK_PROFILE_PK_START = 9_000_000;
 const MOCK_REEL_PK_START = 9_100_000;
@@ -116,6 +132,42 @@ function reelPreview(index: number): string {
   );
 }
 
+function mockProfilePosts(pageStart: number, remoteMediaFailureDemo = false): Post[] {
+  return Array.from({ length: 12 }, (_, i) => {
+    const index = pageStart + i;
+    const thumbnail = remoteMediaFailureDemo
+      ? `https://cdninstagram.com/mock-failure/post-${index}.jpg`
+      : profilePreview(index);
+    const isVideo = index % 3 === 0;
+    return {
+      pk: String(MOCK_PROFILE_PK_START + index),
+      code: `DEMO${index}`,
+      caption: `Demo post #${index} — golden hour somewhere far away`,
+      like_count: 1200 * (24 - index),
+      comment_count: 40 + index,
+      taken_at: 1776000000 + index * 86400,
+      owner_username: remoteMediaFailureDemo ? "preview_demo" : "natgeo",
+      thumbnail_url: thumbnail,
+      resources: [{ url: "", kind: isVideo ? ("video" as const) : ("photo" as const) }],
+    };
+  });
+}
+
+function mockReels(pageStart: number): Post[] {
+  return Array.from({ length: 11 }, (_, i) => {
+    const index = pageStart + i;
+    return {
+      pk: String(MOCK_REEL_PK_START + index),
+      code: `REEL${index}`,
+      caption: `Demo reel #${index}`,
+      taken_at: 1_776_000_000 + index * 86_400,
+      owner_username: "natgeo",
+      thumbnail_url: reelPreview(index),
+      resources: [{ url: "", kind: "video" as const }],
+    };
+  });
+}
+
 function mockMediaFixture(kind: DownloadMediaKind): string {
   return kind === "video"
     ? MOCK_VIDEO
@@ -124,21 +176,21 @@ function mockMediaFixture(kind: DownloadMediaKind): string {
 
 const MOCK_STORIES = [
   {
-    pk: "s1",
+    pk: "9200001",
     taken_at: 1_776_787_455,
     kind: "photo" as const,
     media_url: "",
     thumb_url: libraryPreview("STORY 1", "#7c3aed", "#db2777"),
   },
   {
-    pk: "s2",
+    pk: "9200002",
     taken_at: 1_776_787_500,
     kind: "video" as const,
     media_url: "",
     thumb_url: libraryPreview("STORY 2", "#0f766e", "#2563eb"),
   },
   {
-    pk: "s3",
+    pk: "9200003",
     taken_at: 1_776_787_600,
     kind: "photo" as const,
     media_url: "",
@@ -285,6 +337,16 @@ function isLibraryFirstScanDemo(): boolean {
   );
 }
 
+function isRemoteMediaFailureDemo(): boolean {
+  return (
+    new URLSearchParams(window.location.search).get("demo") === "remote-media-failure"
+  );
+}
+
+function isDownloadFailureDemo(): boolean {
+  return new URLSearchParams(window.location.search).get("demo") === "download-failure";
+}
+
 function mockLibraryRoot(): LibraryRoot {
   return isLibraryFirstScanDemo() ? FIRST_SCAN_LIBRARY_ROOT : LIBRARY_ROOT;
 }
@@ -331,11 +393,19 @@ function mockOutput(
 ): JobOutputFile {
   return {
     file_id: allocateFileId(kind),
-    basename: `${safeBasenameSegment(stem, "media")}_${ordinal + 1}.${kind === "video" ? "mp4" : "jpg"}`,
+    basename: mockOutputBasename(stem, kind, ordinal),
     kind,
     byte_size: kind === "video" ? 2_000_000 : 1_500_000,
     ordinal,
   };
+}
+
+function mockOutputBasename(
+  stem: string,
+  kind: DownloadMediaKind,
+  ordinal: number,
+): string {
+  return `${safeBasenameSegment(stem, "media")}_${ordinal + 1}.${kind === "video" ? "mp4" : "jpg"}`;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -542,9 +612,103 @@ function validateDownloadArgs(cmd: string, args: CmdArgs | undefined): CmdArgs {
   }
 }
 
+function validateDownloadStatusRequests(value: unknown): DownloadStatusRequest[] {
+  if (!Array.isArray(value)) throw new Error("Download status items must be an array");
+  if (value.length > MAX_DOWNLOAD_STATUS_IDENTITIES) {
+    throw new Error(
+      `Download status batch exceeds maximum of ${MAX_DOWNLOAD_STATUS_IDENTITIES} items`,
+    );
+  }
+  const identities = new Set<string>();
+  return value.map((candidate) => {
+    if (
+      !isPlainObject(candidate) ||
+      (candidate.namespace !== "post" && candidate.namespace !== "story")
+    ) {
+      throw new Error("Download status namespace must be post or story");
+    }
+    if (typeof candidate.pk !== "string" || !/^\d+$/.test(candidate.pk)) {
+      throw new Error("Download status PK must contain only ASCII digits");
+    }
+    if (new TextEncoder().encode(candidate.pk).length > MAX_DOWNLOAD_STATUS_PK_BYTES) {
+      throw new Error(
+        `Download status PK exceeds maximum of ${MAX_DOWNLOAD_STATUS_PK_BYTES} bytes`,
+      );
+    }
+    const identity = `${candidate.namespace}\u0000${candidate.pk}`;
+    if (identities.has(identity)) {
+      throw new Error("Download status batch contains a duplicate namespace and PK");
+    }
+    identities.add(identity);
+    if (!Array.isArray(candidate.resources)) {
+      throw new Error("Download status resources must be photos or videos");
+    }
+    const resources = Array.from(candidate.resources);
+    if (!resources.every((kind) => kind === "photo" || kind === "video")) {
+      throw new Error("Download status resources must be photos or videos");
+    }
+    if (
+      candidate.namespace === "post" &&
+      (resources.length === 0 || resources.length > MAX_RESOURCES_PER_POST)
+    ) {
+      throw new Error(
+        `Post download status must contain between 1 and ${MAX_RESOURCES_PER_POST} resources`,
+      );
+    }
+    if (candidate.namespace === "story" && resources.length !== 1) {
+      throw new Error("Story download status must contain exactly one resource");
+    }
+    return {
+      namespace: candidate.namespace,
+      pk: candidate.pk,
+      resources,
+    };
+  });
+}
+
+function evidenceKey(
+  namespace: DownloadStatusNamespace,
+  pk: string,
+  ordinal: number,
+): string {
+  return `${namespace}:${pk}:${ordinal}`;
+}
+
+function evidenceCandidateKey(evidence: MockDownloadEvidence): string {
+  return `${evidence.root}\u0000${evidence.relativePath}\u0000${evidence.kind}`;
+}
+
+function mockDownloadStatuses(
+  value: unknown,
+  configuredRoot: string,
+  completedEvidence: ReadonlyMap<string, ReadonlyMap<string, MockDownloadEvidence>>,
+): DownloadStatus[] {
+  return validateDownloadStatusRequests(value).map((item) => {
+    const availableResources = item.resources.reduce((available, kind, ordinal) => {
+      const candidates = completedEvidence.get(evidenceKey(item.namespace, item.pk, ordinal));
+      const evidence = candidates?.size === 1 ? candidates.values().next().value : undefined;
+      return available + Number(evidence?.root === configuredRoot && evidence.kind === kind);
+    }, 0);
+    const expectedResources = item.resources.length;
+    return {
+      namespace: item.namespace,
+      pk: item.pk,
+      state:
+        availableResources === expectedResources
+          ? "downloaded"
+          : availableResources > 0
+            ? "partial"
+            : "not_downloaded",
+      available_resources: availableResources,
+      expected_resources: expectedResources,
+    };
+  });
+}
+
 function fetchedPostManifest(
   args: CmdArgs | undefined,
   allocateFileId: FileIdAllocator,
+  configuredRoot: string,
 ): MockDownloadManifest {
   const username = String(args?.username);
   const category = args?.category as "posts" | "reels";
@@ -556,17 +720,33 @@ function fetchedPostManifest(
       mockOutput(allocateFileId, stem, resource.kind, ordinal),
     );
   });
+  let outputIndex = 0;
+  const evidence = posts.flatMap((post) =>
+    post.resources.map((resource, ordinal) => {
+      const output = outputs[outputIndex++];
+      return [{
+        root: configuredRoot,
+        relativePath: `${username}/posts/${output.basename}`,
+        namespace: "post" as const,
+        pk: post.pk,
+        ordinal,
+        kind: resource.kind,
+      }];
+    }),
+  );
   return {
     label: `@${username} ${category} · ${scope} · ${posts.length}`,
     dir: `/mock/instagram-archive/${username}/${category}`,
     requestedItems: posts.length,
     outputs,
+    evidence,
   };
 }
 
 function directManifest(
   args: CmdArgs | undefined,
   allocateFileId: FileIdAllocator,
+  configuredRoot: string,
 ): MockDownloadManifest {
   const label = safeBasenameSegment(args?.label, "instagram");
   const subfolder = safeBasenameSegment(args?.subfolder, "media");
@@ -581,11 +761,26 @@ function directManifest(
       0,
     );
   });
+  const evidence = items.map((item, index) => {
+    if (subfolder.toLowerCase() !== "stories" || !/^\d+$/.test(item.pk)) return [];
+    const output = outputs[index];
+    return output
+      ? [{
+          root: configuredRoot,
+          relativePath: `${label}/${subfolder}/${output.basename}`,
+          namespace: "story" as const,
+          pk: item.pk,
+          ordinal: 0,
+          kind: output.kind,
+        }]
+      : [];
+  });
   return {
     label: `@${label} ${subfolder}`,
     dir: `/mock/instagram-archive/${label}/${subfolder}`,
     requestedItems: items.length,
     outputs,
+    evidence,
   };
 }
 
@@ -599,27 +794,69 @@ function standalonePostManifest(
     dir: "/mock/instagram-archive/posts",
     requestedItems: 1,
     outputs: [mockOutput(allocateFileId, code, "photo", 0)],
+    evidence: [[]],
   };
 }
 
 function profileManifest(
   args: CmdArgs | undefined,
   allocateFileId: FileIdAllocator,
+  configuredRoot: string,
 ): MockDownloadManifest {
   const username = safeBasenameSegment(args?.username, "instagram");
   const opts = (args?.opts ?? {}) as Partial<ProfileOptions>;
-  const kinds: Array<{ suffix: string; kind: "photo" | "video" }> = [];
-  if (opts.posts) kinds.push({ suffix: "post", kind: "photo" });
-  if (opts.reels) kinds.push({ suffix: "reel", kind: "video" });
-  if (opts.stories) kinds.push({ suffix: "story", kind: "photo" });
-  if (opts.highlights) kinds.push({ suffix: "highlight", kind: "video" });
-  if (opts.avatar) kinds.push({ suffix: "avatar", kind: "photo" });
+  const categories: Array<{
+    suffix: string;
+    kind: DownloadMediaKind;
+    evidence: MockDownloadEvidence[];
+  }> = [];
+  const postEvidence = (posts: Post[]): MockDownloadEvidence[] => {
+    return posts.flatMap((post) =>
+      post.resources.map((resource, ordinal) => ({
+        root: configuredRoot,
+        relativePath: `${username}/posts/${mockOutputBasename(post.code, resource.kind, ordinal)}`,
+        namespace: "post" as const,
+        pk: post.pk,
+        ordinal,
+        kind: resource.kind,
+      })),
+    );
+  };
+  if (opts.posts) {
+    const posts = [...mockProfilePosts(0), ...mockProfilePosts(12)];
+    const maxPosts = typeof opts.max_posts === "number" ? opts.max_posts : posts.length;
+    categories.push({ suffix: "post", kind: "photo", evidence: postEvidence(posts.slice(0, maxPosts)) });
+  }
+  if (opts.reels) {
+    categories.push({
+      suffix: "reel",
+      kind: "video",
+      evidence: postEvidence([...mockReels(0), ...mockReels(11)]),
+    });
+  }
+  if (opts.stories) {
+    categories.push({
+      suffix: "story",
+      kind: "photo",
+      evidence: MOCK_STORIES.map((story) => ({
+        root: configuredRoot,
+        relativePath: `${username}/stories/${mockOutputBasename(story.pk, story.kind, 0)}`,
+        namespace: "story",
+        pk: story.pk,
+        ordinal: 0,
+        kind: story.kind,
+      })),
+    });
+  }
+  if (opts.highlights) categories.push({ suffix: "highlight", kind: "video", evidence: [] });
+  if (opts.avatar) categories.push({ suffix: "avatar", kind: "photo", evidence: [] });
   return {
     label: `@${username} archive`,
     dir: `/mock/instagram-archive/${username}`,
-    outputs: kinds.map(({ suffix, kind }) =>
+    outputs: categories.map(({ suffix, kind }) =>
       mockOutput(allocateFileId, `${username}_${suffix}`, kind, 0),
     ),
+    evidence: categories.map((category) => category.evidence),
   };
 }
 
@@ -627,16 +864,17 @@ function downloadManifest(
   cmd: string,
   args: CmdArgs | undefined,
   allocateFileId: FileIdAllocator,
+  configuredRoot: string,
 ): MockDownloadManifest {
   switch (cmd) {
     case "enqueue_fetched_post_download":
-      return fetchedPostManifest(args, allocateFileId);
+      return fetchedPostManifest(args, allocateFileId, configuredRoot);
     case "download_direct":
-      return directManifest(args, allocateFileId);
+      return directManifest(args, allocateFileId, configuredRoot);
     case "download_post":
       return standalonePostManifest(args, allocateFileId);
     case "enqueue_profile_download":
-      return profileManifest(args, allocateFileId);
+      return profileManifest(args, allocateFileId, configuredRoot);
     default:
       throw new Error(`mock download: unhandled command "${cmd}"`);
   }
@@ -648,6 +886,8 @@ function reply(
   registeredMedia?: ReadonlyMap<number, string>,
 ): unknown {
   switch (cmd) {
+    case "plugin:app|version":
+      return packageVersion;
     case "get_balance":
     case "__balance":
       return { requests: 14_700_000, rate: 10, amount: 123.45, currency: "usd" };
@@ -688,36 +928,26 @@ function reply(
     }
     case "fetch_profile": {
       const pageStart = args?.endCursor ? 12 : 0;
+      const requestedUsername = normalizeUsername(args?.username ?? "instagram");
+      const remoteMediaFailureDemo =
+        isRemoteMediaFailureDemo() && requestedUsername === "preview_demo";
       return {
         profile: {
-          pk: "25025320",
-          username: String(args?.username ?? "instagram"),
-          full_name: "Instagram",
-          media_count: 7421,
-          follower_count: 713_000_000,
-          following_count: 234,
+          pk: remoteMediaFailureDemo ? "preview-demo" : "25025320",
+          username: remoteMediaFailureDemo
+            ? "preview_demo"
+            : String(args?.username ?? "instagram"),
+          full_name: remoteMediaFailureDemo ? "Preview Demo" : "Instagram",
+          media_count: remoteMediaFailureDemo ? 24 : 7421,
+          follower_count: remoteMediaFailureDemo ? 1200 : 713_000_000,
+          following_count: remoteMediaFailureDemo ? 40 : 234,
           is_private: false,
-          is_verified: true,
-          avatar_url: AVATAR,
+          is_verified: !remoteMediaFailureDemo,
+          avatar_url: remoteMediaFailureDemo
+            ? "https://cdninstagram.com/mock-failure/avatar.jpg"
+            : AVATAR,
         },
-        recent_posts: Array.from({ length: 12 }, (_, i) => {
-          const index = pageStart + i;
-          const thumb = profilePreview(index);
-          const isVideo = index % 3 === 0;
-          return {
-            pk: String(MOCK_PROFILE_PK_START + index),
-            code: `DEMO${index}`,
-            caption: `Demo post #${index} — golden hour somewhere far away`,
-            like_count: 1200 * (24 - index),
-            comment_count: 40 + index,
-            taken_at: 1776000000 + index * 86400,
-            owner_username: "natgeo",
-            thumbnail_url: thumb,
-            resources: [
-              { url: "", kind: isVideo ? ("video" as const) : ("photo" as const) },
-            ],
-          };
-        }),
+        recent_posts: mockProfilePosts(pageStart, remoteMediaFailureDemo),
         end_cursor: args?.endCursor ? null : "cursor",
       };
     }
@@ -751,19 +981,7 @@ function reply(
     case "fetch_reels": {
       const pageStart = args?.endCursor ? 11 : 0;
       return {
-        posts: Array.from({ length: 11 }, (_, i) => {
-          const index = pageStart + i;
-          const thumbnail = reelPreview(index);
-          return {
-            pk: String(MOCK_REEL_PK_START + index),
-            code: `REEL${index}`,
-            caption: `Demo reel #${index}`,
-            taken_at: 1_776_000_000 + index * 86_400,
-            owner_username: "natgeo",
-            thumbnail_url: thumbnail,
-            resources: [{ url: "", kind: "video" as const }],
-          };
-        }),
+        posts: mockReels(pageStart),
         end_cursor: args?.endCursor ? null : "reels-cursor",
       };
     }
@@ -821,6 +1039,7 @@ export function installTauriMock(): void {
   let nextFileId = 10_101;
   let disposed = false;
   const registeredMedia = new Map<number, string>();
+  const completedEvidence = new Map<string, Map<string, MockDownloadEvidence>>();
   const config: ConfigState = {
     has_token: true,
     token_hint: "***9f3a",
@@ -918,7 +1137,7 @@ export function installTauriMock(): void {
     const validatedArgs = validateDownloadArgs(cmd, args);
     const jobNumber = nextJobNumber++;
     const jobId = `mock-job-${jobNumber}`;
-    const manifest = downloadManifest(cmd, validatedArgs, allocateFileId);
+    const manifest = downloadManifest(cmd, validatedArgs, allocateFileId, config.dest_dir);
     const active = { label: manifest.label, timers: [] as Array<ReturnType<typeof setTimeout>> };
     activeJobs.set(jobId, active);
     active.timers.push(
@@ -935,6 +1154,34 @@ export function installTauriMock(): void {
           file_name: first?.basename ?? "Preparing download",
         });
       }, 10),
+      ...manifest.outputs.map((_, index) =>
+        setTimeout(
+          () => {
+            if (!activeJobs.has(jobId)) return;
+            for (const evidence of manifest.evidence[index] ?? []) {
+              const key = evidenceKey(evidence.namespace, evidence.pk, evidence.ordinal);
+              const candidates = completedEvidence.get(key) ?? new Map();
+              candidates.set(evidenceCandidateKey(evidence), evidence);
+              completedEvidence.set(key, candidates);
+            }
+          },
+          100 + Math.floor((index * 700) / Math.max(1, manifest.outputs.length)),
+        ),
+      ),
+      ...(isDownloadFailureDemo()
+        ? [
+            setTimeout(() => {
+              if (!activeJobs.delete(jobId)) return;
+              for (const timer of active.timers) clearTimeout(timer);
+              emit("job-progress", {
+                job_id: jobId,
+                state: "failed",
+                label: manifest.label,
+                error: "Mock download failed",
+              });
+            }, 300),
+          ]
+        : []),
       setTimeout(() => {
         if (!activeJobs.delete(jobId)) return;
         const done: JobProgress = {
@@ -1025,6 +1272,11 @@ export function installTauriMock(): void {
         if (cmd === "config_state") return Promise.resolve(configState());
         if (cmd === "save_settings") return Promise.resolve(saveMockSettings(args));
         if (cmd === "set_proxy") return Promise.resolve(setMockProxy(args?.proxyUrl));
+        if (cmd === "check_download_statuses") {
+          return Promise.resolve(
+            mockDownloadStatuses(args?.items, config.dest_dir, completedEvidence),
+          );
+        }
         const response = Promise.resolve(reply(cmd, args, registeredMedia));
         if (cmd === "start_library_scan") {
           void response.then(() => {
@@ -1070,6 +1322,7 @@ export function installTauriMock(): void {
     }
     activeJobs.clear();
     registeredMedia.clear();
+    completedEvidence.clear();
     callbacks.clear();
     listeners.clear();
     if (w.__TAURI_INTERNALS__ === tauriInternals) delete w.__TAURI_INTERNALS__;

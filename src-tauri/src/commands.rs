@@ -1,15 +1,16 @@
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::io::{self, Read};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures_util::FutureExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::catalog::{
-    Catalog, CatalogFileInput, CatalogItemMetadata, MediaFileKind, MediaItemKind,
+    Catalog, CatalogDownloadStatusCandidate, CatalogFileInput, CatalogItemMetadata, MediaFileKind,
+    MediaItemKind,
 };
 use crate::cdn::{self, CdnError};
 use crate::config::Config;
@@ -29,6 +30,58 @@ const MAX_FETCHED_POSTS: usize = 500;
 const MAX_RESOURCES_PER_POST: usize = 20;
 #[allow(dead_code)]
 const MAX_SHORTCODE_BYTES: usize = 256;
+const MAX_DOWNLOAD_STATUS_IDENTITIES: usize = 500;
+const MAX_DOWNLOAD_STATUS_RESOURCES_PER_POST: usize = 20;
+const MAX_DOWNLOAD_STATUS_PK_BYTES: usize = 64;
+const DOWNLOAD_STATUS_PUBLIC_ERROR: &str = "Could not check local download status";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadStatusNamespace {
+    Post,
+    Story,
+}
+
+impl DownloadStatusNamespace {
+    fn remote_key(self, pk: &str) -> String {
+        match self {
+            Self::Post => format!("post:{pk}"),
+            Self::Story => format!("story:{pk}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DownloadStatusRequest {
+    pub namespace: DownloadStatusNamespace,
+    pub pk: String,
+    pub resources: Vec<MediaFileKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DownloadStatusState {
+    Downloaded,
+    Partial,
+    NotDownloaded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DownloadStatus {
+    pub namespace: DownloadStatusNamespace,
+    pub pk: String,
+    pub state: DownloadStatusState,
+    pub available_resources: u32,
+    pub expected_resources: u32,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum DownloadStatusLookupError {
+    #[error("catalog lookup failed: {0}")]
+    Catalog(#[from] crate::catalog::CatalogError),
+    #[error("filesystem lookup failed: {0}")]
+    Io(#[from] io::Error),
+}
 
 #[allow(dead_code)]
 fn validate_fetched_posts(posts: Vec<Post>, allow_loopback: bool) -> Result<Vec<Post>, String> {
@@ -652,6 +705,236 @@ fn media_file_kind_from_path(path: &Path) -> MediaFileKind {
     }
 }
 
+fn validate_download_status_requests(
+    items: Vec<DownloadStatusRequest>,
+) -> Result<Vec<DownloadStatusRequest>, String> {
+    if items.len() > MAX_DOWNLOAD_STATUS_IDENTITIES {
+        return Err(format!(
+            "Download status batch exceeds maximum of {MAX_DOWNLOAD_STATUS_IDENTITIES} items"
+        ));
+    }
+    let mut identities = HashSet::with_capacity(items.len());
+    for item in &items {
+        if item.pk.is_empty() || !item.pk.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("Download status PK must contain only ASCII digits".into());
+        }
+        if item.pk.len() > MAX_DOWNLOAD_STATUS_PK_BYTES {
+            return Err(format!(
+                "Download status PK exceeds maximum of {MAX_DOWNLOAD_STATUS_PK_BYTES} bytes"
+            ));
+        }
+        if !identities.insert((item.namespace, item.pk.as_str())) {
+            return Err("Download status batch contains a duplicate namespace and PK".into());
+        }
+        let valid_resources = item
+            .resources
+            .iter()
+            .all(|kind| matches!(kind, MediaFileKind::Photo | MediaFileKind::Video));
+        if !valid_resources {
+            return Err("Download status resources must be photos or videos".into());
+        }
+        match item.namespace {
+            DownloadStatusNamespace::Post
+                if item.resources.is_empty()
+                    || item.resources.len() > MAX_DOWNLOAD_STATUS_RESOURCES_PER_POST =>
+            {
+                return Err(format!(
+                    "Post download status must contain between 1 and {MAX_DOWNLOAD_STATUS_RESOURCES_PER_POST} resources"
+                ));
+            }
+            DownloadStatusNamespace::Story if item.resources.len() != 1 => {
+                return Err("Story download status must contain exactly one resource".into());
+            }
+            _ => {}
+        }
+    }
+    Ok(items)
+}
+
+fn classify_download_status_io<T>(
+    result: io::Result<T>,
+) -> Result<Option<T>, DownloadStatusLookupError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(DownloadStatusLookupError::Io(error)),
+    }
+}
+
+fn download_status_public_error(_error: &DownloadStatusLookupError) -> String {
+    DOWNLOAD_STATUS_PUBLIC_ERROR.to_owned()
+}
+
+fn normalized_download_status_relative_path(path: &Path) -> Option<PathBuf> {
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return None;
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => normalized.push(part),
+            Component::Prefix(_)
+            | Component::RootDir
+            | Component::CurDir
+            | Component::ParentDir => return None,
+        }
+    }
+    (!normalized.as_os_str().is_empty()).then_some(normalized)
+}
+
+fn download_status_candidate_is_available(
+    candidate: &CatalogDownloadStatusCandidate,
+    requested_kind: MediaFileKind,
+    canonical_destination_root: &Path,
+    canonical_registered_roots: &mut HashMap<i64, Option<PathBuf>>,
+) -> Result<bool, DownloadStatusLookupError> {
+    if candidate.kind != requested_kind {
+        return Ok(false);
+    }
+    let Some(relative_path) = normalized_download_status_relative_path(&candidate.relative_path)
+    else {
+        return Ok(false);
+    };
+    let registered_root = if let Some(cached) = canonical_registered_roots.get(&candidate.root_id) {
+        cached.clone()
+    } else {
+        let canonical = classify_download_status_io(candidate.root_path.canonicalize())?;
+        canonical_registered_roots.insert(candidate.root_id, canonical.clone());
+        canonical
+    };
+    let Some(registered_root) = registered_root else {
+        return Ok(false);
+    };
+    if registered_root != canonical_destination_root {
+        return Ok(false);
+    }
+
+    let candidate_path = canonical_destination_root.join(relative_path);
+    let Some(metadata) = classify_download_status_io(std::fs::symlink_metadata(&candidate_path))?
+    else {
+        return Ok(false);
+    };
+    if !metadata.file_type().is_file() {
+        return Ok(false);
+    }
+    let Some(canonical_file) = classify_download_status_io(candidate_path.canonicalize())? else {
+        return Ok(false);
+    };
+    if canonical_file
+        .strip_prefix(canonical_destination_root)
+        .is_err()
+    {
+        return Ok(false);
+    }
+    let Ok(expected_bytes) = u64::try_from(candidate.byte_size) else {
+        return Ok(false);
+    };
+    Ok(metadata.len() == expected_bytes
+        && media_file_kind_from_path(&canonical_file) == candidate.kind
+        && candidate.kind == requested_kind)
+}
+
+fn check_download_statuses_blocking(
+    catalog: &Catalog,
+    destination_root: &Path,
+    items: Vec<DownloadStatusRequest>,
+) -> Result<Vec<DownloadStatus>, DownloadStatusLookupError> {
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+    let remote_keys = items
+        .iter()
+        .map(|item| item.namespace.remote_key(&item.pk))
+        .collect::<Vec<_>>();
+    let evidence = catalog.download_status_evidence(&remote_keys)?;
+    let Some(canonical_destination_root) =
+        classify_download_status_io(destination_root.canonicalize())?
+    else {
+        return Ok(items
+            .into_iter()
+            .map(|item| DownloadStatus {
+                namespace: item.namespace,
+                pk: item.pk,
+                state: DownloadStatusState::NotDownloaded,
+                available_resources: 0,
+                expected_resources: item.resources.len() as u32,
+            })
+            .collect());
+    };
+    let evidence_by_identity_and_ordinal = evidence
+        .into_iter()
+        .map(|row| ((row.remote_key.clone(), row.ordinal), row))
+        .collect::<HashMap<_, _>>();
+    let mut canonical_registered_roots = HashMap::new();
+    let mut statuses = Vec::with_capacity(items.len());
+    for item in items {
+        let remote_key = item.namespace.remote_key(&item.pk);
+        let mut available_resources = 0_u32;
+        for (ordinal, requested_kind) in item.resources.iter().copied().enumerate() {
+            let Some(row) =
+                evidence_by_identity_and_ordinal.get(&(remote_key.clone(), ordinal as u32))
+            else {
+                continue;
+            };
+            if row.candidate_count != 1 {
+                continue;
+            }
+            let Some(candidate) = row.candidate.as_ref() else {
+                continue;
+            };
+            if download_status_candidate_is_available(
+                candidate,
+                requested_kind,
+                &canonical_destination_root,
+                &mut canonical_registered_roots,
+            )? {
+                available_resources += 1;
+            }
+        }
+        let expected_resources = item.resources.len() as u32;
+        let state = if available_resources == expected_resources {
+            DownloadStatusState::Downloaded
+        } else if available_resources > 0 {
+            DownloadStatusState::Partial
+        } else {
+            DownloadStatusState::NotDownloaded
+        };
+        statuses.push(DownloadStatus {
+            namespace: item.namespace,
+            pk: item.pk,
+            state,
+            available_resources,
+            expected_resources,
+        });
+    }
+    Ok(statuses)
+}
+
+#[tauri::command]
+pub async fn check_download_statuses(
+    items: Vec<DownloadStatusRequest>,
+    state: State<'_, AppState>,
+) -> Result<Vec<DownloadStatus>, String> {
+    let items = validate_download_status_requests(items)?;
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+    let destination_root = {
+        let config = state.cfg.read().await;
+        PathBuf::from(&config.dest_dir)
+    };
+    let catalog = state.catalog.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        check_download_statuses_blocking(&catalog, &destination_root, items)
+    })
+    .await
+    .map_err(|_| DOWNLOAD_STATUS_PUBLIC_ERROR.to_owned())?
+    .map_err(|error| {
+        eprintln!("download status lookup failed: {error}");
+        download_status_public_error(&error)
+    })
+}
+
 async fn recover_downloaded_file(
     catalog: &Catalog,
     destination_root: &Path,
@@ -981,6 +1264,32 @@ async fn catalog_downloaded_media(
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+async fn catalog_newly_written_post_media_before_cancellation(
+    catalog: &Catalog,
+    destination_root: &Path,
+    item: &CatalogItemMetadata,
+    downloaded: &[DownloadedFile],
+) {
+    let files = downloaded
+        .iter()
+        .filter(|file| {
+            file.newly_written && matches!(file.kind, MediaFileKind::Photo | MediaFileKind::Video)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if files.is_empty() {
+        return;
+    }
+    let media = DownloadedMedia {
+        item: item.clone(),
+        files,
+        resource_errors: Vec::new(),
+    };
+    if let Err(error) = catalog_downloaded_media(catalog, destination_root, &media).await {
+        eprintln!("failed to catalog completed media before cancellation: {error}");
+    }
 }
 
 /// Run an optional section fetch: quota/auth failures abort the whole
@@ -1639,7 +1948,16 @@ async fn run_profile_job(
                             has_successful_resource = true;
                             downloaded.push(file);
                         }
-                        Err(JobFail::Cancelled) => return Err(JobFail::Cancelled),
+                        Err(JobFail::Cancelled) => {
+                            catalog_newly_written_post_media_before_cancellation(
+                                catalog,
+                                destination_root,
+                                &item_metadata,
+                                &downloaded,
+                            )
+                            .await;
+                            return Err(JobFail::Cancelled);
+                        }
                         Err(JobFail::Fatal(error)) => {
                             last_error = Some(error.clone());
                             all_resource_errors.push(error.clone());
@@ -2079,10 +2397,12 @@ async fn run_single_post_attempt(
     let mut resource_errors = Vec::new();
     let mut last_error = None;
     let mut has_successful_resource = false;
+    let mut cancelled = false;
 
-    for (idx, resource) in post.resources.iter().enumerate() {
+    'resources: for (idx, resource) in post.resources.iter().enumerate() {
         if is_cancelled() {
-            return Err(JobFail::Cancelled);
+            cancelled = true;
+            break;
         }
         let dest_base = if total > 1 {
             dir.join(format!("{base}_{}", idx + 1))
@@ -2098,7 +2418,8 @@ async fn run_single_post_attempt(
         )
         .await;
         if is_cancelled() {
-            return Err(JobFail::Cancelled);
+            cancelled = true;
+            break;
         }
         if let Some(file) = recovered {
             bytes_total = bytes_total.saturating_add(file.bytes);
@@ -2109,7 +2430,8 @@ async fn run_single_post_attempt(
                 .unwrap_or_else(|| "file".into());
             em.progress(idx + 1, total, bytes_total, &file_name);
             if is_cancelled() {
-                return Err(JobFail::Cancelled);
+                cancelled = true;
+                break;
             }
             downloaded.push(file);
             has_successful_resource = true;
@@ -2134,17 +2456,28 @@ async fn run_single_post_attempt(
                 downloaded.push(file);
                 has_successful_resource = true;
             }
-            Err(JobFail::Cancelled) => return Err(JobFail::Cancelled),
+            Err(JobFail::Cancelled) => {
+                cancelled = true;
+                break 'resources;
+            }
             Err(JobFail::Fatal(error)) => {
                 last_error = Some(error.clone());
                 resource_errors.push(error);
             }
         }
         if is_cancelled() {
-            return Err(JobFail::Cancelled);
+            cancelled = true;
+            break;
         }
     }
-    if is_cancelled() {
+    if cancelled || is_cancelled() {
+        catalog_newly_written_post_media_before_cancellation(
+            catalog,
+            destination_root,
+            &item_metadata,
+            &downloaded,
+        )
+        .await;
         return Err(JobFail::Cancelled);
     }
     let sidecar_ordinal = u32::try_from(total).unwrap_or(u32::MAX);
@@ -2171,6 +2504,13 @@ async fn run_single_post_attempt(
         }
     }
     if is_cancelled() {
+        catalog_newly_written_post_media_before_cancellation(
+            catalog,
+            destination_root,
+            &item_metadata,
+            &downloaded,
+        )
+        .await;
         return Err(JobFail::Cancelled);
     }
 
@@ -2193,15 +2533,22 @@ async fn run_single_post_attempt(
     let media = if downloaded.is_empty() {
         None
     } else {
+        if (media_files_written > 0 || sidecar_written) && is_cancelled() {
+            catalog_newly_written_post_media_before_cancellation(
+                catalog,
+                destination_root,
+                &item_metadata,
+                &downloaded,
+            )
+            .await;
+            return Err(JobFail::Cancelled);
+        }
         let media = DownloadedMedia {
             item: item_metadata,
             files: downloaded,
             resource_errors: resource_errors.clone(),
         };
         let outputs = if media_files_written > 0 || sidecar_written {
-            if is_cancelled() {
-                return Err(JobFail::Cancelled);
-            }
             match catalog_downloaded_media(catalog, destination_root, &media).await {
                 Ok(cataloged) => cataloged,
                 Err(_) => {

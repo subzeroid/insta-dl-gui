@@ -7,9 +7,10 @@ use rusqlite::types::{Type, Value};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, TransactionBehavior};
 
 use super::models::{
-    CatalogMediaInput, CatalogRecoveryFile, FileAvailability, LibraryCard, LibraryCursor,
-    LibraryCursorScope, LibraryFile, LibraryItemDetail, LibraryPage, LibraryPreview, LibraryQuery,
-    LibraryRoot, LibrarySort, MediaFileKind, MediaItemKind, ResolvedCatalogFile, UpsertDisposition,
+    CatalogDownloadStatusCandidate, CatalogDownloadStatusEvidence, CatalogMediaInput,
+    CatalogRecoveryFile, FileAvailability, LibraryCard, LibraryCursor, LibraryCursorScope,
+    LibraryFile, LibraryItemDetail, LibraryPage, LibraryPreview, LibraryQuery, LibraryRoot,
+    LibrarySort, MediaFileKind, MediaItemKind, ResolvedCatalogFile, UpsertDisposition,
     UpsertResult,
 };
 use super::{Catalog, CatalogError};
@@ -17,6 +18,7 @@ use super::{Catalog, CatalogError};
 const MAX_BATCH_SIZE: usize = 100;
 const DEFAULT_PAGE_SIZE: u32 = 60;
 const MAX_PAGE_SIZE: u32 = 100;
+const MAX_DOWNLOAD_STATUS_KEYS: usize = 500;
 const LIBRARY_MEDIA_FROM: &str = "media_items mi";
 
 pub fn local_remote_key(root_id: i64, relative_path: &Path) -> Result<String, CatalogError> {
@@ -629,6 +631,83 @@ impl Catalog {
             kind: candidate.3,
             byte_size: candidate.4,
         }))
+    }
+
+    pub(crate) fn download_status_evidence(
+        &self,
+        remote_keys: &[String],
+    ) -> Result<Vec<CatalogDownloadStatusEvidence>, CatalogError> {
+        if remote_keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        if remote_keys.len() > MAX_DOWNLOAD_STATUS_KEYS {
+            return Err(CatalogError::BatchTooLarge {
+                size: remote_keys.len(),
+                max: MAX_DOWNLOAD_STATUS_KEYS,
+            });
+        }
+
+        let placeholders = vec!["?"; remote_keys.len()].join(",");
+        let sql = format!(
+            "SELECT mi.remote_key, mf.ordinal,
+                    CASE WHEN COUNT(mf.id) > 1 THEN 2 ELSE COUNT(mf.id) END AS candidate_count,
+                    CASE WHEN COUNT(mf.id) = 1 THEN MIN(lr.id) END,
+                    CASE WHEN COUNT(mf.id) = 1 THEN MIN(lr.path) END,
+                    CASE WHEN COUNT(mf.id) = 1 THEN MIN(mf.relative_path) END,
+                    CASE WHEN COUNT(mf.id) = 1 THEN MIN(mf.kind) END,
+                    CASE WHEN COUNT(mf.id) = 1 THEN MIN(mf.byte_size) END
+             FROM media_items mi
+             JOIN media_files mf ON mf.media_item_id = mi.id
+             JOIN library_roots lr ON lr.id = mf.library_root_id
+             WHERE mi.remote_key IN ({placeholders})
+               AND mf.ordinal BETWEEN 0 AND 19
+               AND mf.kind IN ('photo', 'video')
+             GROUP BY mi.remote_key, mf.ordinal
+             ORDER BY mi.remote_key, mf.ordinal"
+        );
+        let values = remote_keys
+            .iter()
+            .cloned()
+            .map(Value::Text)
+            .collect::<Vec<_>>();
+        let conn = self.connect()?;
+        let evidence = {
+            let mut statement = conn
+                .prepare(&sql)
+                .map_err(|source| sql_error("preparing download status evidence", source))?;
+            let rows = statement
+                .query_map(params_from_iter(values.iter()), |row| {
+                    let ordinal = u32::try_from(row.get::<_, i64>(1)?).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(1, Type::Integer, Box::new(error))
+                    })?;
+                    let candidate_count = row.get::<_, u8>(2)?;
+                    let candidate = if candidate_count == 1 {
+                        let kind_value = row.get::<_, String>(6)?;
+                        let kind = MediaFileKind::from_db(&kind_value)
+                            .ok_or_else(|| invalid_db_value(6, &kind_value))?;
+                        Some(CatalogDownloadStatusCandidate {
+                            root_id: row.get(3)?,
+                            root_path: PathBuf::from(row.get::<_, String>(4)?),
+                            relative_path: PathBuf::from(row.get::<_, String>(5)?),
+                            kind,
+                            byte_size: row.get(7)?,
+                        })
+                    } else {
+                        None
+                    };
+                    Ok(CatalogDownloadStatusEvidence {
+                        remote_key: row.get(0)?,
+                        ordinal,
+                        candidate_count,
+                        candidate,
+                    })
+                })
+                .map_err(|source| sql_error("querying download status evidence", source))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|source| sql_error("reading download status evidence", source))?;
+            rows
+        };
+        Ok(evidence)
     }
 }
 

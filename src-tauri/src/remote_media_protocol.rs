@@ -1,6 +1,8 @@
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use bytes::Bytes;
@@ -14,9 +16,12 @@ const MAX_PROTOCOL_BODY_BYTES: u64 = crate::library_protocol::MAX_PROTOCOL_BODY_
 const MAX_DECODED_URL_BYTES: usize = 16 * 1024;
 const MAX_ENCODED_URL_BYTES: usize = (MAX_DECODED_URL_BYTES * 4).div_ceil(3);
 const MAX_CONCURRENT_REMOTE_MEDIA: usize = 4;
+const REMOTE_MEDIA_DIAGNOSTIC_COOLDOWN: Duration = Duration::from_secs(30);
 const DOCUMENT_CSP: &str = "default-src 'none'; sandbox";
 static REMOTE_MEDIA_SLOTS: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(MAX_CONCURRENT_REMOTE_MEDIA);
+static REMOTE_MEDIA_DIAGNOSTIC_LIMITER: Mutex<DiagnosticRateLimiter> =
+    Mutex::new(DiagnosticRateLimiter::new(REMOTE_MEDIA_DIAGNOSTIC_COOLDOWN));
 
 type UpstreamBody = Pin<Box<dyn Stream<Item = Result<Bytes, ()>> + Send + 'static>>;
 type FetchFuture = Pin<Box<dyn Future<Output = Result<UpstreamResponse, ()>> + Send + 'static>>;
@@ -141,10 +146,177 @@ impl ByteRangeSpec {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteMediaDiagnostic {
+    Network,
+    UpstreamStatus(u16),
+    Validation,
+    RangeRejected(Option<u64>),
+    ResponseTooLarge(Option<u64>),
+}
+
+impl fmt::Display for RemoteMediaDiagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Network => formatter.write_str("remote media fetch failed: network"),
+            Self::UpstreamStatus(status) => {
+                write!(formatter, "remote media upstream status: {status}")
+            }
+            Self::Validation => formatter.write_str("remote media response rejected: validation"),
+            Self::RangeRejected(Some(length)) => {
+                write!(formatter, "remote media range rejected: length {length}")
+            }
+            Self::RangeRejected(None) => formatter.write_str("remote media range rejected"),
+            Self::ResponseTooLarge(Some(length)) => {
+                write!(
+                    formatter,
+                    "remote media response too large: length {length}"
+                )
+            }
+            Self::ResponseTooLarge(None) => formatter.write_str("remote media response too large"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
-enum ProtocolError {
+struct DiagnosticEmission {
+    diagnostic: RemoteMediaDiagnostic,
+    suppressed: u64,
+}
+
+impl fmt::Display for DiagnosticEmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.diagnostic.fmt(formatter)?;
+        match self.suppressed {
+            0 => Ok(()),
+            1 => formatter.write_str("; suppressed 1 similar event"),
+            count => write!(formatter, "; suppressed {count} similar events"),
+        }
+    }
+}
+
+struct DiagnosticRateLimiter {
+    cooldown: Duration,
+    last_emitted: [Option<Instant>; 5],
+    suppressed: [u64; 5],
+}
+
+impl DiagnosticRateLimiter {
+    const fn new(cooldown: Duration) -> Self {
+        Self {
+            cooldown,
+            last_emitted: [None; 5],
+            suppressed: [0; 5],
+        }
+    }
+
+    fn record(
+        &mut self,
+        diagnostic: RemoteMediaDiagnostic,
+        now: Instant,
+    ) -> Option<DiagnosticEmission> {
+        let category = diagnostic.category_index();
+        if self.last_emitted[category]
+            .is_some_and(|last| now.saturating_duration_since(last) < self.cooldown)
+        {
+            self.suppressed[category] = self.suppressed[category].saturating_add(1);
+            return None;
+        }
+        let suppressed = self.suppressed[category];
+        self.last_emitted[category] = Some(now);
+        self.suppressed[category] = 0;
+        Some(DiagnosticEmission {
+            diagnostic,
+            suppressed,
+        })
+    }
+}
+
+impl RemoteMediaDiagnostic {
+    const fn category_index(self) -> usize {
+        match self {
+            Self::Network => 0,
+            Self::UpstreamStatus(_) => 1,
+            Self::Validation => 2,
+            Self::RangeRejected(_) => 3,
+            Self::ResponseTooLarge(_) => 4,
+        }
+    }
+}
+
+trait DiagnosticSink: Clone + Send + Sync + 'static {
+    fn emit(&self, diagnostic: RemoteMediaDiagnostic);
+}
+
+#[derive(Clone, Copy)]
+struct StderrDiagnosticSink;
+
+impl DiagnosticSink for StderrDiagnosticSink {
+    fn emit(&self, diagnostic: RemoteMediaDiagnostic) {
+        let emission = REMOTE_MEDIA_DIAGNOSTIC_LIMITER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .record(diagnostic, Instant::now());
+        if let Some(emission) = emission {
+            eprintln!("{emission}");
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProtocolResponseError {
     NotFound,
     RangeNotSatisfiable(Option<u64>),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProtocolError {
+    response: ProtocolResponseError,
+    diagnostic: RemoteMediaDiagnostic,
+}
+
+impl ProtocolError {
+    const fn validation() -> Self {
+        Self {
+            response: ProtocolResponseError::NotFound,
+            diagnostic: RemoteMediaDiagnostic::Validation,
+        }
+    }
+
+    const fn network() -> Self {
+        Self {
+            response: ProtocolResponseError::NotFound,
+            diagnostic: RemoteMediaDiagnostic::Network,
+        }
+    }
+
+    const fn upstream_status(status: StatusCode) -> Self {
+        Self {
+            response: ProtocolResponseError::NotFound,
+            diagnostic: RemoteMediaDiagnostic::UpstreamStatus(status.as_u16()),
+        }
+    }
+
+    const fn range_rejected(total: Option<u64>, length: Option<u64>) -> Self {
+        Self {
+            response: ProtocolResponseError::RangeNotSatisfiable(total),
+            diagnostic: RemoteMediaDiagnostic::RangeRejected(length),
+        }
+    }
+
+    const fn response_too_large(total: Option<u64>, length: Option<u64>) -> Self {
+        Self {
+            response: ProtocolResponseError::RangeNotSatisfiable(total),
+            diagnostic: RemoteMediaDiagnostic::ResponseTooLarge(length),
+        }
+    }
+
+    const fn declared_length_mismatch(total: Option<u64>) -> Self {
+        Self {
+            response: ProtocolResponseError::RangeNotSatisfiable(total),
+            diagnostic: RemoteMediaDiagnostic::Validation,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -179,6 +351,21 @@ async fn handle_remote_media_protocol_with_fetcher<F: RemoteFetcher>(
     webview_label: &str,
     request: Request<Vec<u8>>,
 ) -> Response<Vec<u8>> {
+    handle_remote_media_protocol_with_fetcher_and_sink(
+        fetcher,
+        StderrDiagnosticSink,
+        webview_label,
+        request,
+    )
+    .await
+}
+
+async fn handle_remote_media_protocol_with_fetcher_and_sink<F: RemoteFetcher, S: DiagnosticSink>(
+    fetcher: F,
+    diagnostics: S,
+    webview_label: &str,
+    request: Request<Vec<u8>>,
+) -> Response<Vec<u8>> {
     let is_head = request.method() == Method::HEAD;
     if webview_label != "main" {
         return empty_body_for_head(plain_response(StatusCode::NOT_FOUND, b"not found"), is_head);
@@ -189,13 +376,20 @@ async fn handle_remote_media_protocol_with_fetcher<F: RemoteFetcher>(
     let Some(url) = parse_protocol_uri(request.uri()) else {
         return empty_body_for_head(plain_response(StatusCode::NOT_FOUND, b"not found"), is_head);
     };
+    let url = match validate_target(url) {
+        Ok(url) => url,
+        Err(error) => return protocol_error_response(&diagnostics, error, is_head),
+    };
 
     let result = if is_head {
         serve_head(fetcher, url).await
     } else {
         let range = match collect_range(request.headers()) {
             Ok(range) => range,
-            Err(()) => return range_not_satisfiable(None),
+            Err(()) => {
+                diagnostics.emit(RemoteMediaDiagnostic::RangeRejected(None));
+                return range_not_satisfiable(None);
+            }
         };
         if let Some(range) = range {
             serve_range(fetcher, url, range).await
@@ -205,10 +399,21 @@ async fn handle_remote_media_protocol_with_fetcher<F: RemoteFetcher>(
     };
     match result {
         Ok(response) => empty_body_for_head(response, is_head),
-        Err(ProtocolError::NotFound) => {
+        Err(error) => protocol_error_response(&diagnostics, error, is_head),
+    }
+}
+
+fn protocol_error_response<S: DiagnosticSink>(
+    diagnostics: &S,
+    error: ProtocolError,
+    is_head: bool,
+) -> Response<Vec<u8>> {
+    diagnostics.emit(error.diagnostic);
+    match error.response {
+        ProtocolResponseError::NotFound => {
             empty_body_for_head(plain_response(StatusCode::NOT_FOUND, b"not found"), is_head)
         }
-        Err(ProtocolError::RangeNotSatisfiable(total)) => {
+        ProtocolResponseError::RangeNotSatisfiable(total) => {
             empty_body_for_head(range_not_satisfiable(total), is_head)
         }
     }
@@ -246,7 +451,7 @@ fn parse_protocol_uri(uri: &tauri::http::Uri) -> Option<Url> {
         return None;
     }
     let raw = std::str::from_utf8(&decoded).ok()?;
-    validate_target(Url::parse(raw).ok()?).ok()
+    Url::parse(raw).ok()
 }
 
 fn validate_target(url: Url) -> Result<Url, ProtocolError> {
@@ -257,7 +462,7 @@ fn validate_target(url: Url) -> Result<Url, ProtocolError> {
         || url.port_or_known_default() != Some(443)
         || cdn::validate_remote_url(url.as_str(), false).is_err()
     {
-        return Err(ProtocolError::NotFound);
+        return Err(ProtocolError::validation());
     }
     Ok(url)
 }
@@ -281,11 +486,14 @@ async fn serve_full<F: RemoteFetcher>(
 ) -> Result<Response<Vec<u8>>, ProtocolError> {
     let response = fetch_follow_redirects(fetcher, url, None).await?;
     if response.status != StatusCode::OK {
-        return Err(ProtocolError::NotFound);
+        return Err(ProtocolError::upstream_status(response.status));
     }
     let declared_length = content_length(&response.headers)?;
     if declared_length.is_some_and(|length| length > MAX_PROTOCOL_BODY_BYTES) {
-        return Err(ProtocolError::RangeNotSatisfiable(declared_length));
+        return Err(ProtocolError::response_too_large(
+            declared_length,
+            declared_length,
+        ));
     }
     let declared_type = content_type(&response.headers)?;
     let body = read_entire(response.body, MAX_PROTOCOL_BODY_BYTES, declared_length).await?;
@@ -314,22 +522,28 @@ async fn serve_range<F: RemoteFetcher>(
     let probe = probe_media(fetcher.clone(), url.clone()).await?;
     let selected = requested
         .resolve(probe.total)
-        .map_err(|_| ProtocolError::RangeNotSatisfiable(Some(probe.total)))?;
+        .map_err(|_| ProtocolError::range_rejected(Some(probe.total), None))?;
     if selected.len() > MAX_PROTOCOL_BODY_BYTES {
-        return Err(ProtocolError::RangeNotSatisfiable(Some(probe.total)));
+        return Err(ProtocolError::range_rejected(
+            Some(probe.total),
+            Some(selected.len()),
+        ));
     }
     let response = fetch_follow_redirects(fetcher, url, Some(selected.header_value())).await?;
     if response.status == StatusCode::RANGE_NOT_SATISFIABLE {
         let total = unsatisfied_total(&response.headers)?;
         if total != probe.total {
-            return Err(ProtocolError::NotFound);
+            return Err(ProtocolError::validation());
         }
-        return Err(ProtocolError::RangeNotSatisfiable(Some(total)));
+        return Err(ProtocolError::range_rejected(Some(total), None));
     }
     if response.status == StatusCode::OK {
         let declared_length = content_length(&response.headers)?;
         if declared_length.is_some_and(|length| length > MAX_PROTOCOL_BODY_BYTES) {
-            return Err(ProtocolError::RangeNotSatisfiable(declared_length));
+            return Err(ProtocolError::response_too_large(
+                declared_length,
+                declared_length,
+            ));
         }
         let declared_type = content_type(&response.headers)?;
         let body = read_entire(response.body, MAX_PROTOCOL_BODY_BYTES, declared_length).await?;
@@ -337,18 +551,18 @@ async fn serve_range<F: RemoteFetcher>(
         return Ok(media_response(StatusCode::OK, kind, body, None));
     }
     if response.status != StatusCode::PARTIAL_CONTENT {
-        return Err(ProtocolError::NotFound);
+        return Err(ProtocolError::upstream_status(response.status));
     }
     let actual = satisfied_range(&response.headers)?;
     if actual != selected || content_length(&response.headers)? != Some(selected.len()) {
-        return Err(ProtocolError::NotFound);
+        return Err(ProtocolError::validation());
     }
     let declared_type = content_type(&response.headers)?;
     if declared_type
         .as_deref()
         .is_some_and(|declared| !cdn::ct_compatible(declared, probe.kind))
     {
-        return Err(ProtocolError::NotFound);
+        return Err(ProtocolError::validation());
     }
     let body = read_entire(response.body, MAX_PROTOCOL_BODY_BYTES, Some(selected.len())).await?;
     Ok(media_response(
@@ -370,21 +584,21 @@ async fn probe_media<F: RemoteFetcher>(fetcher: F, url: Url) -> Result<Probe, Pr
         StatusCode::PARTIAL_CONTENT => {
             let range = satisfied_range(&response.headers)?;
             if range.start != 0 || range.end >= cdn::SNIFF_SIZE as u64 {
-                return Err(ProtocolError::NotFound);
+                return Err(ProtocolError::validation());
             }
             if content_length(&response.headers)? != Some(range.len()) {
-                return Err(ProtocolError::NotFound);
+                return Err(ProtocolError::validation());
             }
             (range.total, Some(range.len()))
         }
         StatusCode::OK => {
-            let length = content_length(&response.headers)?.ok_or(ProtocolError::NotFound)?;
+            let length = content_length(&response.headers)?.ok_or(ProtocolError::validation())?;
             if length == 0 {
-                return Err(ProtocolError::NotFound);
+                return Err(ProtocolError::validation());
             }
             (length, None)
         }
-        _ => return Err(ProtocolError::NotFound),
+        _ => return Err(ProtocolError::upstream_status(response.status)),
     };
     let declared_type = content_type(&response.headers)?;
     let prefix = read_prefix(response.body, cdn::SNIFF_SIZE, expected).await?;
@@ -403,17 +617,20 @@ async fn fetch_follow_redirects<F: RemoteFetcher>(
         let response = fetcher
             .send(url.clone(), range.clone())
             .await
-            .map_err(|_| ProtocolError::NotFound)?;
+            .map_err(|_| ProtocolError::network())?;
         if !response.status.is_redirection() {
             return Ok(response);
         }
         if redirects == cdn::MAX_REDIRECTS {
-            return Err(ProtocolError::NotFound);
+            return Err(ProtocolError::validation());
         }
         redirects += 1;
-        let location =
-            single_header(&response.headers, header::LOCATION)?.ok_or(ProtocolError::NotFound)?;
-        url = validate_target(url.join(&location).map_err(|_| ProtocolError::NotFound)?)?;
+        let location = single_header(&response.headers, header::LOCATION)?
+            .ok_or(ProtocolError::validation())?;
+        url = validate_target(
+            url.join(&location)
+                .map_err(|_| ProtocolError::validation())?,
+        )?;
     }
 }
 
@@ -424,17 +641,23 @@ async fn read_entire(
 ) -> Result<Vec<u8>, ProtocolError> {
     let mut output = Vec::new();
     while let Some(chunk) = body.next().await {
-        let chunk = chunk.map_err(|_| ProtocolError::NotFound)?;
+        let chunk = chunk.map_err(|_| ProtocolError::network())?;
         let new_length = (output.len() as u64)
             .checked_add(chunk.len() as u64)
-            .ok_or(ProtocolError::NotFound)?;
-        if new_length > limit || expected.is_some_and(|expected| new_length > expected) {
-            return Err(ProtocolError::RangeNotSatisfiable(expected));
+            .ok_or(ProtocolError::validation())?;
+        if new_length > limit {
+            return Err(ProtocolError::response_too_large(
+                expected,
+                Some(new_length),
+            ));
+        }
+        if expected.is_some_and(|expected| new_length > expected) {
+            return Err(ProtocolError::declared_length_mismatch(expected));
         }
         output.extend_from_slice(&chunk);
     }
     if output.is_empty() || expected.is_some_and(|expected| expected != output.len() as u64) {
-        return Err(ProtocolError::NotFound);
+        return Err(ProtocolError::validation());
     }
     Ok(output)
 }
@@ -449,20 +672,20 @@ async fn read_prefix(
         let Some(chunk) = body.next().await else {
             break;
         };
-        let chunk = chunk.map_err(|_| ProtocolError::NotFound)?;
+        let chunk = chunk.map_err(|_| ProtocolError::network())?;
         let remaining = limit - output.len();
         output.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
     }
     if output.is_empty() || expected.is_some_and(|expected| expected != output.len() as u64) {
-        return Err(ProtocolError::NotFound);
+        return Err(ProtocolError::validation());
     }
     Ok(output)
 }
 
 fn sniff_and_validate(body: &[u8], declared: Option<&str>) -> Result<Sniffed, ProtocolError> {
-    let kind = Sniffed::detect(body).ok_or(ProtocolError::NotFound)?;
+    let kind = Sniffed::detect(body).ok_or(ProtocolError::validation())?;
     if declared.is_some_and(|declared| !cdn::ct_compatible(declared, kind)) {
-        return Err(ProtocolError::NotFound);
+        return Err(ProtocolError::validation());
     }
     Ok(kind)
 }
@@ -472,12 +695,12 @@ fn content_length(headers: &HeaderMap) -> Result<Option<u64>, ProtocolError> {
         return Ok(None);
     };
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(ProtocolError::NotFound);
+        return Err(ProtocolError::validation());
     }
     value
         .parse::<u64>()
         .map(Some)
-        .map_err(|_| ProtocolError::NotFound)
+        .map_err(|_| ProtocolError::validation())
 }
 
 fn content_type(headers: &HeaderMap) -> Result<Option<String>, ProtocolError> {
@@ -494,23 +717,25 @@ fn single_header(
         [value] => value
             .to_str()
             .map(|value| Some(value.to_owned()))
-            .map_err(|_| ProtocolError::NotFound),
-        _ => Err(ProtocolError::NotFound),
+            .map_err(|_| ProtocolError::validation()),
+        _ => Err(ProtocolError::validation()),
     }
 }
 
 fn satisfied_range(headers: &HeaderMap) -> Result<ResolvedRange, ProtocolError> {
-    let value = single_header(headers, header::CONTENT_RANGE)?.ok_or(ProtocolError::NotFound)?;
+    let value = single_header(headers, header::CONTENT_RANGE)?.ok_or(ProtocolError::validation())?;
     let value = value
         .strip_prefix("bytes ")
-        .ok_or(ProtocolError::NotFound)?;
-    let (range, total) = value.split_once('/').ok_or(ProtocolError::NotFound)?;
-    let (start, end) = range.split_once('-').ok_or(ProtocolError::NotFound)?;
+        .ok_or(ProtocolError::validation())?;
+    let (range, total) = value.split_once('/').ok_or(ProtocolError::validation())?;
+    let (start, end) = range.split_once('-').ok_or(ProtocolError::validation())?;
     let parse = |value: &str| {
         if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(ProtocolError::NotFound);
+            return Err(ProtocolError::validation());
         }
-        value.parse::<u64>().map_err(|_| ProtocolError::NotFound)
+        value
+            .parse::<u64>()
+            .map_err(|_| ProtocolError::validation())
     };
     let range = ResolvedRange {
         start: parse(start)?,
@@ -518,20 +743,20 @@ fn satisfied_range(headers: &HeaderMap) -> Result<ResolvedRange, ProtocolError> 
         total: parse(total)?,
     };
     if range.total == 0 || range.start > range.end || range.end >= range.total {
-        return Err(ProtocolError::NotFound);
+        return Err(ProtocolError::validation());
     }
     Ok(range)
 }
 
 fn unsatisfied_total(headers: &HeaderMap) -> Result<u64, ProtocolError> {
-    let value = single_header(headers, header::CONTENT_RANGE)?.ok_or(ProtocolError::NotFound)?;
+    let value = single_header(headers, header::CONTENT_RANGE)?.ok_or(ProtocolError::validation())?;
     let total = value
         .strip_prefix("bytes */")
-        .ok_or(ProtocolError::NotFound)?;
+        .ok_or(ProtocolError::validation())?;
     if total.is_empty() || !total.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(ProtocolError::NotFound);
+        return Err(ProtocolError::validation());
     }
-    total.parse().map_err(|_| ProtocolError::NotFound)
+    total.parse().map_err(|_| ProtocolError::validation())
 }
 
 fn media_response(
@@ -614,7 +839,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use base64::Engine;
     use bytes::Bytes;
@@ -626,8 +851,10 @@ mod tests {
 
     use super::{
         handle_remote_media_protocol, handle_remote_media_protocol_with_fetcher,
-        with_remote_media_slot, RemoteFetcher, UpstreamResponse, MAX_CONCURRENT_REMOTE_MEDIA,
-        MAX_ENCODED_URL_BYTES, MAX_PROTOCOL_BODY_BYTES,
+        handle_remote_media_protocol_with_fetcher_and_sink, with_remote_media_slot,
+        DiagnosticRateLimiter, DiagnosticSink, RemoteFetcher, RemoteMediaDiagnostic,
+        UpstreamResponse, MAX_CONCURRENT_REMOTE_MEDIA, MAX_ENCODED_URL_BYTES,
+        MAX_PROTOCOL_BODY_BYTES,
     };
 
     static LIVE_PROTOCOL_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -674,6 +901,21 @@ mod tests {
                 .pop_front()
                 .unwrap_or(Err(()));
             Box::pin(async move { response })
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturingDiagnosticSink(Arc<Mutex<Vec<String>>>);
+
+    impl CapturingDiagnosticSink {
+        fn messages(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl DiagnosticSink for CapturingDiagnosticSink {
+        fn emit(&self, diagnostic: RemoteMediaDiagnostic) {
+            self.0.lock().unwrap().push(diagnostic.to_string());
         }
     }
 
@@ -734,6 +976,262 @@ mod tests {
             ("content-type", content_type.to_owned()),
             ("content-length", content_length.to_string()),
         ]
+    }
+
+    async fn response_with_diagnostics(
+        fetcher: ScriptedFetcher,
+        request: Request<Vec<u8>>,
+    ) -> (tauri::http::Response<Vec<u8>>, Vec<String>) {
+        let diagnostics = CapturingDiagnosticSink::default();
+        let response = handle_remote_media_protocol_with_fetcher_and_sink(
+            fetcher,
+            diagnostics.clone(),
+            "main",
+            request,
+        )
+        .await;
+        (response, diagnostics.messages())
+    }
+
+    fn assert_diagnostics_are_secret_safe(messages: &[String]) {
+        for sentinel in [
+            "TOP-SECRET",
+            "cdninstagram.com/private.jpg",
+            "proxy-user:proxy-password",
+            "private response body text",
+        ] {
+            assert!(
+                messages.iter().all(|message| !message.contains(sentinel)),
+                "diagnostic leaked sentinel {sentinel:?}: {messages:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostic_messages_are_bounded_static_categories() {
+        let diagnostics = [
+            RemoteMediaDiagnostic::Network,
+            RemoteMediaDiagnostic::UpstreamStatus(403),
+            RemoteMediaDiagnostic::Validation,
+            RemoteMediaDiagnostic::RangeRejected(None),
+            RemoteMediaDiagnostic::RangeRejected(Some(u64::MAX)),
+            RemoteMediaDiagnostic::ResponseTooLarge(None),
+            RemoteMediaDiagnostic::ResponseTooLarge(Some(u64::MAX)),
+        ];
+        let rendered = diagnostics.map(|diagnostic| diagnostic.to_string());
+
+        assert_eq!(rendered[0], "remote media fetch failed: network");
+        assert_eq!(rendered[1], "remote media upstream status: 403");
+        assert_eq!(rendered[2], "remote media response rejected: validation");
+        assert_eq!(rendered[3], "remote media range rejected");
+        assert_eq!(
+            rendered[4],
+            "remote media range rejected: length 18446744073709551615"
+        );
+        assert_eq!(rendered[5], "remote media response too large");
+        assert_eq!(
+            rendered[6],
+            "remote media response too large: length 18446744073709551615"
+        );
+        assert!(rendered.iter().all(|message| message.len() <= 64));
+    }
+
+    #[test]
+    fn diagnostic_rate_limiter_suppresses_by_category_and_reports_a_bounded_count() {
+        let cooldown = Duration::from_secs(30);
+        let start = Instant::now();
+        let mut limiter = DiagnosticRateLimiter::new(cooldown);
+
+        assert_eq!(
+            limiter
+                .record(RemoteMediaDiagnostic::RangeRejected(Some(10)), start)
+                .unwrap()
+                .to_string(),
+            "remote media range rejected: length 10"
+        );
+        assert!(limiter
+            .record(
+                RemoteMediaDiagnostic::RangeRejected(Some(999)),
+                start + Duration::from_secs(1)
+            )
+            .is_none());
+        assert_eq!(
+            limiter
+                .record(
+                    RemoteMediaDiagnostic::RangeRejected(Some(20)),
+                    start + cooldown
+                )
+                .unwrap()
+                .to_string(),
+            "remote media range rejected: length 20; suppressed 1 similar event"
+        );
+
+        assert!(limiter
+            .record(RemoteMediaDiagnostic::ResponseTooLarge(Some(1)), start)
+            .is_some());
+        assert!(limiter
+            .record(
+                RemoteMediaDiagnostic::ResponseTooLarge(Some(u64::MAX)),
+                start + Duration::from_secs(1)
+            )
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn diagnostic_handler_emits_network_failure_without_secrets() {
+        let (response, diagnostics) = response_with_diagnostics(
+            ScriptedFetcher::default(),
+            request(
+                Method::GET,
+                "https://cdninstagram.com/private.jpg?token=TOP-SECRET",
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(diagnostics, ["remote media fetch failed: network"]);
+        assert_diagnostics_are_secret_safe(&diagnostics);
+    }
+
+    #[tokio::test]
+    async fn diagnostic_handler_emits_upstream_status_without_headers_or_body() {
+        let fetcher = ScriptedFetcher::with_responses(vec![upstream(
+            StatusCode::FORBIDDEN,
+            &[(
+                "x-upstream-debug",
+                concat!(
+                    "http://proxy-user",
+                    ":",
+                    "proxy-password",
+                    "@127.0.0.1/private"
+                )
+                .into(),
+            )],
+            vec![b"private response body text TOP-SECRET".to_vec()],
+        )]);
+
+        let (response, diagnostics) = response_with_diagnostics(
+            fetcher,
+            request(Method::GET, "https://cdninstagram.com/private.jpg"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(diagnostics, ["remote media upstream status: 403"]);
+        assert_diagnostics_are_secret_safe(&diagnostics);
+    }
+
+    #[tokio::test]
+    async fn diagnostic_handler_emits_validation_for_rejected_content() {
+        let cases = vec![
+            upstream(
+                StatusCode::OK,
+                &[("content-length", "TOP-SECRET".into())],
+                vec![jpeg()],
+            ),
+            upstream(
+                StatusCode::OK,
+                &content_headers("video/mp4", jpeg().len()),
+                vec![jpeg()],
+            ),
+            upstream(
+                StatusCode::OK,
+                &content_headers("image/jpeg", "private response body text".len()),
+                vec![b"private response body text".to_vec()],
+            ),
+        ];
+
+        for response in cases {
+            let (response, diagnostics) = response_with_diagnostics(
+                ScriptedFetcher::with_responses(vec![response]),
+                request(Method::GET, "https://cdninstagram.com/private.jpg"),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert_eq!(diagnostics, ["remote media response rejected: validation"]);
+            assert_diagnostics_are_secret_safe(&diagnostics);
+        }
+    }
+
+    #[tokio::test]
+    async fn diagnostic_handler_emits_range_rejection_for_malformed_and_unsatisfiable_ranges() {
+        let mut malformed = request(Method::GET, "https://cdninstagram.com/private.jpg");
+        malformed
+            .headers_mut()
+            .insert(header::RANGE, HeaderValue::from_static("bytes=TOP-SECRET"));
+        let (response, diagnostics) =
+            response_with_diagnostics(ScriptedFetcher::default(), malformed).await;
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(diagnostics, ["remote media range rejected"]);
+        assert_diagnostics_are_secret_safe(&diagnostics);
+
+        let prefix = jpeg();
+        let fetcher = ScriptedFetcher::with_responses(vec![upstream(
+            StatusCode::PARTIAL_CONTENT,
+            &[
+                ("content-type", "image/jpeg".into()),
+                ("content-length", prefix.len().to_string()),
+                ("content-range", format!("bytes 0-{}/100", prefix.len() - 1)),
+            ],
+            vec![prefix],
+        )]);
+        let mut unsatisfiable = request(Method::GET, "https://cdninstagram.com/private.jpg");
+        unsatisfiable
+            .headers_mut()
+            .insert(header::RANGE, HeaderValue::from_static("bytes=1000-2000"));
+        let (response, diagnostics) = response_with_diagnostics(fetcher, unsatisfiable).await;
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(diagnostics, ["remote media range rejected"]);
+        assert_diagnostics_are_secret_safe(&diagnostics);
+    }
+
+    #[tokio::test]
+    async fn diagnostic_handler_classifies_oversized_full_response_separately() {
+        let oversized = MAX_PROTOCOL_BODY_BYTES + 1;
+        let fetcher = ScriptedFetcher::with_responses(vec![upstream(
+            StatusCode::OK,
+            &[("content-length", oversized.to_string())],
+            vec![],
+        )]);
+        let (response, diagnostics) = response_with_diagnostics(
+            fetcher,
+            request(Method::GET, "https://cdninstagram.com/private.jpg"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            diagnostics,
+            [format!(
+                "remote media response too large: length {oversized}"
+            )]
+        );
+        assert_diagnostics_are_secret_safe(&diagnostics);
+    }
+
+    #[tokio::test]
+    async fn diagnostic_handler_emits_validation_for_decoded_invalid_targets() {
+        let invalid_targets = [
+            "https://evil.example/private.jpg?token=TOP-SECRET",
+            concat!(
+                "https://user",
+                ":",
+                "TOP-SECRET",
+                "@cdninstagram.com/private.jpg"
+            ),
+            "https://cdninstagram.com:444/private.jpg?token=TOP-SECRET",
+            "https://cdninstagram.com/private.jpg#TOP-SECRET",
+        ];
+
+        for target in invalid_targets {
+            let fetcher = ScriptedFetcher::default();
+            let (response, diagnostics) =
+                response_with_diagnostics(fetcher.clone(), request(Method::GET, target)).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert_eq!(diagnostics, ["remote media response rejected: validation"]);
+            assert!(fetcher.requests().is_empty());
+            assert_diagnostics_are_secret_safe(&diagnostics);
+        }
     }
 
     #[tokio::test]
@@ -1170,30 +1668,45 @@ mod tests {
     #[tokio::test]
     async fn rejects_empty_unknown_mismatched_oversized_and_truncated_media() {
         let cases = vec![
-            upstream(StatusCode::OK, &content_headers("image/jpeg", 0), vec![]),
-            upstream(
-                StatusCode::OK,
-                &content_headers("image/jpeg", 6),
-                vec![b"unsafe".to_vec()],
+            (
+                upstream(StatusCode::OK, &content_headers("image/jpeg", 0), vec![]),
+                StatusCode::NOT_FOUND,
             ),
-            upstream(
-                StatusCode::OK,
-                &content_headers("video/mp4", jpeg().len()),
-                vec![jpeg()],
+            (
+                upstream(
+                    StatusCode::OK,
+                    &content_headers("image/jpeg", 6),
+                    vec![b"unsafe".to_vec()],
+                ),
+                StatusCode::NOT_FOUND,
             ),
-            upstream(
-                StatusCode::OK,
-                &content_headers("image/jpeg", MAX_PROTOCOL_BODY_BYTES as usize + 1),
-                vec![],
+            (
+                upstream(
+                    StatusCode::OK,
+                    &content_headers("video/mp4", jpeg().len()),
+                    vec![jpeg()],
+                ),
+                StatusCode::NOT_FOUND,
             ),
-            upstream(
-                StatusCode::OK,
-                &content_headers("image/jpeg", jpeg().len() + 10),
-                vec![jpeg()],
+            (
+                upstream(
+                    StatusCode::OK,
+                    &content_headers("image/jpeg", MAX_PROTOCOL_BODY_BYTES as usize + 1),
+                    vec![],
+                ),
+                StatusCode::RANGE_NOT_SATISFIABLE,
+            ),
+            (
+                upstream(
+                    StatusCode::OK,
+                    &content_headers("image/jpeg", jpeg().len() + 10),
+                    vec![jpeg()],
+                ),
+                StatusCode::NOT_FOUND,
             ),
         ];
 
-        for scripted in cases {
+        for (scripted, expected_status) in cases {
             let fetcher = ScriptedFetcher::with_responses(vec![scripted]);
             let response = handle_remote_media_protocol_with_fetcher(
                 fetcher,
@@ -1201,14 +1714,7 @@ mod tests {
                 request(Method::GET, "https://cdninstagram.com/media.jpg"),
             )
             .await;
-            assert!(
-                matches!(
-                    response.status(),
-                    StatusCode::NOT_FOUND | StatusCode::RANGE_NOT_SATISFIABLE
-                ),
-                "unexpected status {}",
-                response.status()
-            );
+            assert_eq!(response.status(), expected_status);
             assert!(response.body().len() < 64);
         }
     }

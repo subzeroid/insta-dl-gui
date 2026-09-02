@@ -507,6 +507,7 @@ pub fn run() {
             commands::fetch_profile_summary,
             commands::fetch_reels,
             commands::fetch_relationships,
+            commands::check_download_statuses,
             commands::enqueue_profile_download,
             commands::enqueue_fetched_post_download,
             commands::cancel_job,

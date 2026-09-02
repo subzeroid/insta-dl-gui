@@ -122,9 +122,270 @@ describe("DownloadJobDetails", () => {
     expect(ipc.libraryMediaUrl.mock.calls.map((call) => call[0])).toEqual([101, 102, 104, 105]);
     expect(wrapper.get("img[data-file-id='101']").attributes("src")).toBe("library://localhost/media/101");
     expect(wrapper.get("img[data-file-id='101']").attributes("loading")).toBe("lazy");
-    expect(wrapper.get("video[data-file-id='102']").attributes("src")).toBe("library://localhost/media/102");
-    expect(wrapper.get("video[data-file-id='102']").attributes("controls")).toBeDefined();
-    expect(wrapper.get("video[data-file-id='102']").attributes("preload")).toBe("none");
+    const video = wrapper.get("video[data-file-id='102']");
+    expect(video.attributes("src")).toBe("library://localhost/media/102");
+    expect(video.attributes("controls")).toBeUndefined();
+    expect(video.attributes("aria-hidden")).toBe("true");
+    expect(video.attributes("preload")).toBe("none");
+    const control = wrapper.get("[data-action='toggle-video-preview']");
+    expect(control.attributes("aria-label")).toBe("Play second.mp4 preview");
+    expect(control.classes()).toEqual(expect.arrayContaining(["absolute", "inset-0", "focus-visible:ring-2"]));
+    expect(control.get("[data-video-control-indicator]").classes()).toEqual(
+      expect.arrayContaining(["h-8", "w-8"]),
+    );
+    expect(control.get("svg").classes()).toEqual(expect.arrayContaining(["h-4", "w-4"]));
+    expect(wrapper.find("[data-remote-image]").exists()).toBe(false);
+    expect(wrapper.find("[data-remote-video]").exists()).toBe(false);
+  });
+
+  it("plays, pauses, and resets a video preview through its compact custom control", async () => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    const pause = vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => undefined);
+    const wrapper = render();
+    await flushPromises();
+
+    const playButton = wrapper.get("button[aria-label='Play second.mp4 preview']");
+    await playButton.trigger("click");
+    await flushPromises();
+    expect(play).toHaveBeenCalledTimes(1);
+    expect(wrapper.get("[data-action='toggle-video-preview']").attributes("aria-label")).toBe(
+      "Play second.mp4 preview",
+    );
+
+    (wrapper.get("video[data-file-id='102']").element as HTMLVideoElement).dispatchEvent(new Event("play"));
+    await flushPromises();
+    const pauseButton = wrapper.get("button[aria-label='Pause second.mp4 preview']");
+    await pauseButton.trigger("click");
+    expect(pause).toHaveBeenCalledTimes(1);
+    expect(wrapper.get("[data-action='toggle-video-preview']").attributes("aria-label")).toBe(
+      "Pause second.mp4 preview",
+    );
+
+    (wrapper.get("video[data-file-id='102']").element as HTMLVideoElement).dispatchEvent(new Event("pause"));
+    await flushPromises();
+    expect(wrapper.get("[data-action='toggle-video-preview']").attributes("aria-label")).toBe(
+      "Play second.mp4 preview",
+    );
+
+    (wrapper.get("video[data-file-id='102']").element as HTMLVideoElement).dispatchEvent(new Event("play"));
+    await flushPromises();
+    (wrapper.get("video[data-file-id='102']").element as HTMLVideoElement).dispatchEvent(new Event("ended"));
+    await flushPromises();
+    expect(wrapper.get("[data-action='toggle-video-preview']").attributes("aria-label")).toBe(
+      "Play second.mp4 preview",
+    );
+  });
+
+  it("keeps the video preview stopped and shows a stable row error when playback is rejected", async () => {
+    const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockRejectedValue(
+      new Error("decoder details must stay private"),
+    );
+    const wrapper = render();
+    await flushPromises();
+
+    await wrapper.get("button[aria-label='Play second.mp4 preview']").trigger("click");
+    await flushPromises();
+
+    expect(play).toHaveBeenCalledTimes(1);
+    expect(wrapper.get("[data-action='toggle-video-preview']").attributes("aria-label")).toBe(
+      "Play second.mp4 preview",
+    );
+    expect(wrapper.get("[data-output-row='1'] [data-row-error]").text()).toBe(
+      "Could not play video preview.",
+    );
+    expect(wrapper.text()).not.toContain("decoder details must stay private");
+  });
+
+  it("treats an aborted pending play as an intentional pause instead of a playback error", async () => {
+    const playback = deferred<void>();
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockReturnValue(playback.promise);
+    const pause = vi
+      .spyOn(HTMLMediaElement.prototype, "pause")
+      .mockImplementation(function (this: HTMLMediaElement) {
+        this.dispatchEvent(new Event("pause"));
+      });
+    const wrapper = render();
+    await flushPromises();
+
+    await wrapper.get("button[aria-label='Play second.mp4 preview']").trigger("click");
+    (wrapper.get("video[data-file-id='102']").element as HTMLVideoElement).dispatchEvent(
+      new Event("play"),
+    );
+    await flushPromises();
+    expect(wrapper.get("[data-action='toggle-video-preview']").attributes("aria-label")).toBe(
+      "Pause second.mp4 preview",
+    );
+
+    await wrapper.get("button[aria-label='Pause second.mp4 preview']").trigger("click");
+    await flushPromises();
+    expect(pause).toHaveBeenCalledTimes(1);
+    expect(wrapper.get("[data-action='toggle-video-preview']").attributes("aria-label")).toBe(
+      "Play second.mp4 preview",
+    );
+
+    playback.reject(new DOMException("The play() request was interrupted", "AbortError"));
+    await flushPromises();
+
+    expect(wrapper.get("[data-action='toggle-video-preview']").attributes("aria-label")).toBe(
+      "Play second.mp4 preview",
+    );
+    expect(wrapper.find("[data-output-row='1'] [data-row-error]").exists()).toBe(false);
+  });
+
+  it("returns to Play and shows a stable row error when the video element reports an error", async () => {
+    const wrapper = render();
+    await flushPromises();
+
+    (wrapper.get("video[data-file-id='102']").element as HTMLVideoElement).dispatchEvent(
+      new Event("play"),
+    );
+    await flushPromises();
+    expect(wrapper.get("[data-action='toggle-video-preview']").attributes("aria-label")).toBe(
+      "Pause second.mp4 preview",
+    );
+
+    (wrapper.get("video[data-file-id='102']").element as HTMLVideoElement).dispatchEvent(
+      new Event("error"),
+    );
+    await flushPromises();
+
+    expect(wrapper.get("[data-action='toggle-video-preview']").attributes("aria-label")).toBe(
+      "Play second.mp4 preview",
+    );
+    expect(wrapper.get("[data-output-row='1'] [data-row-error]").text()).toBe(
+      "Could not play video preview.",
+    );
+  });
+
+  it("reloads a failed video before retrying playback and clears its visible error", async () => {
+    const calls: string[] = [];
+    const load = vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {
+      calls.push("load");
+    });
+    const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockImplementation(() => {
+      calls.push("play");
+      return Promise.resolve();
+    });
+    const wrapper = render();
+    await flushPromises();
+
+    (wrapper.get("video[data-file-id='102']").element as HTMLVideoElement).dispatchEvent(
+      new Event("error"),
+    );
+    await flushPromises();
+    const failedVideo = wrapper.get("video[data-file-id='102']").element as HTMLVideoElement;
+    Object.defineProperty(failedVideo, "error", {
+      configurable: true,
+      value: { code: 3 } as MediaError,
+    });
+
+    await wrapper.get("button[aria-label='Play second.mp4 preview']").trigger("click");
+    await flushPromises();
+
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(play).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual(["load", "play"]);
+    expect(wrapper.find("[data-output-row='1'] [data-row-error]").exists()).toBe(false);
+  });
+
+  it("does not let an older aborted play clear a newer playing state", async () => {
+    const firstPlayback = deferred<void>();
+    const retryPlayback = deferred<void>();
+    vi.spyOn(HTMLMediaElement.prototype, "play")
+      .mockReturnValueOnce(firstPlayback.promise)
+      .mockReturnValueOnce(retryPlayback.promise);
+    const wrapper = render();
+    await flushPromises();
+
+    await wrapper.get("button[aria-label='Play second.mp4 preview']").trigger("click");
+    await wrapper.get("button[aria-label='Play second.mp4 preview']").trigger("click");
+    (wrapper.get("video[data-file-id='102']").element as HTMLVideoElement).dispatchEvent(
+      new Event("play"),
+    );
+    await flushPromises();
+    firstPlayback.reject(new DOMException("The play() request was interrupted", "AbortError"));
+    await flushPromises();
+
+    expect(wrapper.get("[data-action='toggle-video-preview']").attributes("aria-label")).toBe(
+      "Pause second.mp4 preview",
+    );
+    expect(wrapper.find("[data-output-row='1'] [data-row-error]").exists()).toBe(false);
+
+    retryPlayback.resolve();
+    await flushPromises();
+  });
+
+  it("clears video playback state when the selected job changes", async () => {
+    const wrapper = render();
+    await flushPromises();
+    const video = wrapper.get("video[data-file-id='102']").element as HTMLVideoElement;
+    video.dispatchEvent(new Event("play"));
+    await flushPromises();
+    expect(wrapper.get("[data-action='toggle-video-preview']").attributes("aria-label")).toBe(
+      "Pause second.mp4 preview",
+    );
+
+    await wrapper.setProps({ job: job({ id: "job-2" }) });
+    await flushPromises();
+
+    expect(wrapper.get("[data-action='toggle-video-preview']").attributes("aria-label")).toBe(
+      "Play second.mp4 preview",
+    );
+  });
+
+  it("ignores an error event queued by a detached video from the previous job", async () => {
+    const wrapper = render();
+    await flushPromises();
+    const oldVideo = wrapper.get("video[data-file-id='102']").element as HTMLVideoElement;
+
+    await wrapper.setProps({ job: job({ id: "job-2" }) });
+    await flushPromises();
+    expect(oldVideo.isConnected).toBe(false);
+    oldVideo.dispatchEvent(new Event("error"));
+    await flushPromises();
+
+    expect(wrapper.get("[data-action='toggle-video-preview']").attributes("aria-label")).toBe(
+      "Play second.mp4 preview",
+    );
+    expect(wrapper.find("[data-output-row='1'] [data-row-error]").exists()).toBe(false);
+  });
+
+  it("ignores a stale play rejection after switching to another job", async () => {
+    const playback = deferred<void>();
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockReturnValue(playback.promise);
+    const wrapper = render();
+    await flushPromises();
+
+    await wrapper.get("button[aria-label='Play second.mp4 preview']").trigger("click");
+    await wrapper.setProps({ job: job({ id: "job-2" }) });
+    await flushPromises();
+    playback.reject(new Error("stale decoder failure"));
+    await flushPromises();
+
+    expect(wrapper.get("[data-action='toggle-video-preview']").attributes("aria-label")).toBe(
+      "Play second.mp4 preview",
+    );
+    expect(wrapper.find("[data-output-row='1'] [data-row-error]").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("stale decoder failure");
+  });
+
+  it("ignores a pending play rejection after the details dialog closes", async () => {
+    const playback = deferred<void>();
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockReturnValue(playback.promise);
+    const wrapper = render();
+    await flushPromises();
+
+    await wrapper.get("button[aria-label='Play second.mp4 preview']").trigger("click");
+    await wrapper.get("button[aria-label='Close download details']").trigger("click");
+    playback.reject(new Error("late decoder failure"));
+    await flushPromises();
+
+    expect(wrapper.emitted("close")).toHaveLength(1);
+    expect(wrapper.get("[data-action='toggle-video-preview']").attributes("aria-label")).toBe(
+      "Play second.mp4 preview",
+    );
+    expect(wrapper.find("[data-output-row='1'] [data-row-error]").exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("late decoder failure");
   });
 
   it("renders large manifests in stable 50-row pages and builds URLs only for shown rows", async () => {
