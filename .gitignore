@@ -29,3 +29,7 @@ src-tauri/gen/schemas
 
 # mkdocs
 site/
+
+# Build artefacts: a signed bundle must never be committed by accident.
+*.dmg
+*.app/
